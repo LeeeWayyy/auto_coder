@@ -6,11 +6,13 @@ Roles use a Base + Overlay model:
 - Merge semantics: Lists append, dicts deep merge, scalars override
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import yaml
 
 # Valid role name pattern: alphanumeric, underscores, hyphens only
@@ -49,6 +51,7 @@ class RoleConfig:
     gates: list[str]
     config: dict[str, Any]
     extends: str | None = None
+    base_role: str | None = None  # Root of extends chain (planner/implementer/reviewer)
 
     @property
     def token_budget(self) -> int:
@@ -83,6 +86,9 @@ class RoleLoader:
         default_factory=lambda: Path(__file__).parent.parent / "config" / "base_roles"
     )
 
+    # Schema loaded in __post_init__ to preserve dataclass init behavior
+    _schema: dict = field(default_factory=dict, init=False, repr=False)
+
     def __post_init__(self) -> None:
         # Default search paths
         if not self.search_paths:
@@ -91,6 +97,26 @@ class RoleLoader:
                 Path.home() / ".supervisor/roles",  # User-global
                 self.package_dir,  # Built-in
             ]
+
+        # PHASE 2: Load JSON schema for validation
+        self._schema = self._load_schema()
+
+    def _load_schema(self) -> dict:
+        """Load JSON schema for role validation.
+
+        Raises RoleValidationError with actionable message on failure.
+        """
+        schema_path = Path(__file__).parent.parent / "config" / "role_schema.json"
+        try:
+            with open(schema_path) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            raise RoleValidationError(
+                f"Role schema not found at {schema_path}. "
+                f"Ensure supervisor package is properly installed."
+            )
+        except json.JSONDecodeError as e:
+            raise RoleValidationError(f"Invalid JSON in role schema at {schema_path}: {e}")
 
     def load_role(self, name: str, _loading_chain: list[str] | None = None) -> RoleConfig:
         """Load role with inheritance resolution.
@@ -125,13 +151,26 @@ class RoleLoader:
         role_file = self._find_role_file(name)
         config = self._load_yaml(role_file)
 
-        # Handle inheritance
+        # PHASE 2: Pre-merge type validation to catch structural issues before merge fails
+        self._validate_pre_merge_types(config, role_file)
+
+        # PHASE 2: Capture base_role before merge removes extends
+        # base_role is the ROOT of the extends chain (handles multi-level overlays)
+        base_role: str | None = None
         if "extends" in config:
             parent = self.load_role(config["extends"], _loading_chain)
+            # Use parent's base_role if it has one (multi-level), otherwise parent's name
+            base_role = parent.base_role if parent.base_role else parent.name
             config = self._merge_configs(parent, config)
+        else:
+            # Base roles have base_role = None (they ARE the base)
+            base_role = None
 
-        self._validate_config(config)
-        return self._dict_to_role(config)
+        # PHASE 2: Full schema validation AFTER merge
+        # This allows overlay roles to omit inherited fields like system_prompt
+        self._validate_merged_config(config)
+
+        return self._dict_to_role(config, base_role=base_role)
 
     def _find_role_file(self, name: str) -> Path:
         """Find role file in search paths."""
@@ -145,9 +184,54 @@ class RoleLoader:
         )
 
     def _load_yaml(self, path: Path) -> dict[str, Any]:
-        """Load YAML file."""
-        with open(path) as f:
-            return yaml.safe_load(f)
+        """Load YAML file with proper error handling."""
+        try:
+            with open(path) as f:
+                config = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise RoleValidationError(f"Invalid YAML in {path}: {e}")
+
+        if config is None:
+            raise RoleValidationError(f"Empty or invalid YAML file: {path}")
+
+        if not isinstance(config, dict):
+            raise RoleValidationError(
+                f"Role config must be a dict, got {type(config).__name__} in {path}"
+            )
+
+        return config
+
+    def _validate_pre_merge_types(self, config: dict, path: Path) -> None:
+        """Lightweight type checks before merge to catch structural issues early."""
+        type_checks = {
+            "flags": list,
+            "gates": list,
+            "context": dict,
+            "config": dict,
+        }
+        for field_name, expected_type in type_checks.items():
+            if field_name in config and not isinstance(config[field_name], expected_type):
+                raise RoleValidationError(
+                    f"Field '{field_name}' must be {expected_type.__name__}, "
+                    f"got {type(config[field_name]).__name__} in {path}"
+                )
+
+    def _validate_merged_config(self, config: dict[str, Any]) -> None:
+        """Validate MERGED role configuration against JSON Schema.
+
+        IMPORTANT: This runs AFTER inheritance merge, so overlay roles
+        that only define system_prompt_additions (not system_prompt)
+        will have system_prompt populated from parent.
+        """
+        try:
+            jsonschema.validate(config, self._schema)
+        except jsonschema.ValidationError as e:
+            raise RoleValidationError(f"Schema validation failed: {e.message}")
+        except jsonschema.SchemaError as e:
+            # Invalid schema definition (developer error, not user error)
+            raise RoleValidationError(
+                f"Invalid role schema definition (bug in role_schema.json): {e.message}"
+            )
 
     def _merge_configs(self, parent: RoleConfig, child: dict[str, Any]) -> dict[str, Any]:
         """Merge child config into parent with proper semantics.
@@ -208,15 +292,8 @@ class RoleLoader:
                 result[key] = value
         return result
 
-    def _validate_config(self, config: dict[str, Any]) -> None:
-        """Validate role configuration."""
-        required_fields = ["name", "description", "cli", "system_prompt"]
-        for field in required_fields:
-            if field not in config:
-                raise RoleValidationError(f"Missing required field: {field}")
-
-    def _dict_to_role(self, config: dict[str, Any]) -> RoleConfig:
-        """Convert dict to RoleConfig."""
+    def _dict_to_role(self, config: dict[str, Any], base_role: str | None = None) -> RoleConfig:
+        """Convert dict to RoleConfig with base_role for template/schema resolution."""
         return RoleConfig(
             name=config["name"],
             description=config["description"],
@@ -227,6 +304,7 @@ class RoleLoader:
             gates=config.get("gates", []),
             config=config.get("config", {}),
             extends=config.get("extends"),
+            base_role=base_role,
         )
 
     def list_available_roles(self) -> list[str]:

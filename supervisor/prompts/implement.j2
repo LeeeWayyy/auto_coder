@@ -1,0 +1,22 @@
+{# implement.j2 - Implementer role template #}
+{% extends "_base.j2" %}
+
+{% block content %}
+{{ role.system_prompt }}
+
+## Context
+
+{{ context }}
+
+## Task
+
+{{ task }}
+
+## Implementation Guidelines
+
+1. Write clean, well-documented code
+2. Follow existing project conventions
+3. Include appropriate error handling
+4. Write tests for new functionality
+5. Keep changes focused and minimal
+{% endblock %}

@@ -1,0 +1,25 @@
+{# _base.j2 - Base template with content and output requirements blocks #}
+{# Child templates extend this and override content block #}
+
+{% block content %}
+{# Override in child templates #}
+{% endblock %}
+
+---
+
+{% block output_requirements %}
+## Output Requirements
+
+You MUST end your response with a fenced JSON code block containing your structured output.
+
+**CRITICAL:** Use exactly this format with triple backticks and "json" label:
+
+```json
+{ "status": "...", ... }
+```
+
+The JSON MUST be in a fenced code block (triple backticks with json label).
+Bare JSON without fences will NOT be accepted.
+
+{% include "_output_schema.j2" %}
+{% endblock %}
