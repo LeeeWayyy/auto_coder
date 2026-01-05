@@ -1,0 +1,43 @@
+{# _output_schema.j2 - Output schema requirements based on role #}
+{# This partial is included in _base.j2 #}
+
+{% if role.name == 'planner' or role.base_role == 'planner' %}
+### Planner Output Schema
+
+Your JSON output must include:
+- `status`: One of "COMPLETE", "NEEDS_REFINEMENT", or "BLOCKED"
+- `phases`: Array of phase objects with title, sequence, and components
+- `estimated_components`: Total number of components
+- `risks`: Array of identified risks (optional)
+- `next_step`: What should happen next
+
+{% elif role.name == 'implementer' or role.base_role == 'implementer' %}
+### Implementer Output Schema
+
+Your JSON output must include:
+- `status`: One of "SUCCESS", "PARTIAL", "FAILED", or "BLOCKED"
+- `action_taken`: Description of what you did
+- `files_created`: Array of file paths created
+- `files_modified`: Array of file paths modified
+- `tests_written`: Array of test file paths
+- `blockers`: Array of any blockers encountered
+- `next_step`: What should happen next
+
+{% elif role.name == 'reviewer' or role.base_role == 'reviewer' %}
+### Reviewer Output Schema
+
+Your JSON output must include:
+- `status`: One of "APPROVED", "CHANGES_REQUESTED", or "REJECTED"
+- `review_status`: Same as status (for compatibility)
+- `issues`: Array of issue objects with severity, file, line, description, suggestion
+- `suggestions`: Array of optional improvement suggestions
+- `security_concerns`: Array of security-related concerns
+- `next_step`: What should happen next
+
+{% else %}
+### Generic Output Schema
+
+Your JSON output must include at minimum:
+- `status`: A string indicating the result
+
+{% endif %}

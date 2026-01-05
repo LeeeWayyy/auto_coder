@@ -56,7 +56,7 @@ This directory contains detailed specifications for each module in the Superviso
 1. **Docker Containers**: All CLI execution in isolated containers
 2. **Git Worktrees**: Each step has its own filesystem
 3. **Gates**: Changes only applied after verification passes
-4. **Network Control**: CLI containers have egress only; executors have no network
+4. **Network Control**: CLI containers have egress only (requires host firewall rules; verification optional via config); executors have no network
 
 ### Key Security Features
 
@@ -83,11 +83,36 @@ This directory contains detailed specifications for each module in the Superviso
 - **Circuit Breaker**: Prevents infinite retry loops
 - **Worktree Reset Warning**: Feedback includes notice about discarded changes
 
+## Phase 2 Features
+
+### Role Configuration
+- JSON schema validation after merge
+- `base_role` field for multi-level overlay resolution
+- Pre-merge type validation
+
+### Jinja2 Templates
+- `SandboxedEnvironment` for security
+- Template allowlist (only package templates)
+- Custom filters (`truncate_lines`, `format_diff`)
+
+### CLI Adapters
+- `ClaudeAdapter`: Raw markdown
+- `CodexAdapter`: JSONL event extraction
+- `GeminiAdapter`: JSON envelope unwrapping
+- All require fenced ```json blocks
+
+### Context Packing
+- `build_full_prompt()`: Template-based (preferred)
+- `pack_file_context()`: Files only with budget reservation
+- `SENTINELS`: Non-file patterns handled separately
+- `skip_targets`: Prevents file duplication
+
 ## Dependencies
 
 - `pydantic`: Schema validation
 - `filelock`: Concurrent access protection
-- `jinja2`: Prompt templating
+- `jinja2`: Prompt templating (SandboxedEnvironment)
+- `jsonschema`: Role configuration validation
 - `pyyaml`: Role configuration
 - Docker: Container isolation
 - Git: Worktree management

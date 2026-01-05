@@ -1,0 +1,52 @@
+{# review_strict.j2 - Reviewer role template with strict JSON-only output #}
+{% extends "_base.j2" %}
+
+{% block content %}
+{{ role.system_prompt }}
+
+## Context
+
+{{ context }}
+
+## Task
+
+{{ task }}
+
+## Review Guidelines
+
+1. Check for correctness and completeness
+2. Identify security vulnerabilities (OWASP Top 10)
+3. Verify error handling is appropriate
+4. Ensure tests cover the changes
+5. Check code follows project conventions
+6. Look for performance issues
+
+IMPORTANT: Be thorough but fair. Provide specific, actionable feedback.
+Cite line numbers for issues. Distinguish between critical issues and suggestions.
+{% endblock %}
+
+{% block output_requirements %}
+## Output Requirements
+
+You MUST end your response with a fenced JSON code block containing your structured output.
+
+**CRITICAL:** Use exactly this format with triple backticks and "json" label:
+
+```json
+{
+  "status": "APPROVED" | "CHANGES_REQUESTED" | "REJECTED",
+  "review_status": "APPROVED" | "CHANGES_REQUESTED" | "REJECTED",
+  "issues": [...],
+  "suggestions": [...],
+  "security_concerns": [...],
+  "next_step": "..."
+}
+```
+
+The JSON MUST be in a fenced code block (triple backticks with json label).
+Bare JSON without fences will NOT be accepted.
+
+- APPROVED: Code is ready to merge
+- CHANGES_REQUESTED: Issues must be fixed before merge
+- REJECTED: Fundamental problems require major rework
+{% endblock %}

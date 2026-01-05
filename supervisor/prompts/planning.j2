@@ -1,0 +1,14 @@
+{# planning.j2 - Planner role template #}
+{% extends "_base.j2" %}
+
+{% block content %}
+{{ role.system_prompt }}
+
+## Context
+
+{{ context }}
+
+## Task
+
+{{ task }}
+{% endblock %}

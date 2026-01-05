@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Merged Role Configuration",
+  "description": "Schema for role configs AFTER inheritance merge. All required fields must be present.",
+  "type": "object",
+  "required": ["name", "description", "cli", "system_prompt"],
+  "additionalProperties": false,
+  "patternProperties": {
+    "^x-": {
+      "description": "Extension fields (x-model, x-temperature, etc.) for custom role options"
+    }
+  },
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"
+    },
+    "description": {
+      "type": "string"
+    },
+    "cli": {
+      "type": "string",
+      "enum": ["claude", "codex", "gemini"]
+    },
+    "flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "system_prompt": {
+      "type": "string"
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Allows role-specific fields: git_diff, priority_order, $TARGET, $TARGET_IMPORTS, etc.",
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "always_include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "token_budget": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 100000
+        },
+        "git_diff": {
+          "type": "boolean"
+        },
+        "priority_order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Simple gate commands as strings. Structured GateConfig deferred to Phase 3."
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Allows role-specific config: tdd, coverage_target, etc.",
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "tdd": {
+          "type": "boolean"
+        },
+        "coverage_target": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    }
+  }
+}

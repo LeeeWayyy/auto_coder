@@ -20,7 +20,14 @@ from pydantic import BaseModel
 
 from supervisor.core.context import ContextPacker
 from supervisor.core.models import ErrorAction, ErrorCategory, Step, StepStatus
-from supervisor.core.parser import InvalidOutputError, ParsingError, parse_role_output
+from supervisor.core.parser import (
+    GenericOutput,
+    InvalidOutputError,
+    ParsingError,
+    ROLE_SCHEMAS,
+    get_adapter,
+    parse_role_output,
+)
 from supervisor.core.roles import RoleConfig, RoleLoader
 from supervisor.core.state import Database, Event, EventType
 from supervisor.core.workspace import ApplyError, GateFailedError, IsolatedWorkspace, _truncate_output
@@ -341,16 +348,29 @@ class ExecutionEngine:
                 f"Too many failures. Manual intervention required."
             )
 
-        # Load role configuration
+        # Load role configuration (now with schema validation)
         role = self.role_loader.load_role(role_name)
 
-        # Pack context
-        prompt = self.context_packer.pack_context(
-            role=role,
-            task_description=task_description,
-            target_files=target_files,
-            extra_context=extra_context,
-        )
+        # PHASE 2: Use template-based prompt building for known roles
+        # NOTE: Pass role object (not role_name) to resolve overlay extends chain
+        template_name = self._get_template_for_role(role)
+        if template_name:
+            # Template-based flow (planner, implementer, reviewer, AND overlays that extend them)
+            prompt = self.context_packer.build_full_prompt(
+                template_name,
+                role,
+                task_description,
+                target_files,
+                extra_context,
+            )
+        else:
+            # Legacy fallback for truly unknown roles (no extends to known base)
+            prompt = self.context_packer.pack_context(
+                role=role,
+                task_description=task_description,
+                target_files=target_files,
+                extra_context=extra_context,
+            )
 
         # Record step started
         self.db.append_event(
@@ -385,8 +405,11 @@ class ExecutionEngine:
                     if result.timed_out:
                         raise EngineError(f"CLI timed out: {result.stderr}")
 
-                    # Parse output
-                    output = parse_role_output(role_name, result.stdout)
+                    # PHASE 2: Use CLI adapter for parsing
+                    adapter = get_adapter(role.cli)
+                    # NOTE: Use _get_schema_for_role to resolve overlay extends chain
+                    schema = self._get_schema_for_role(role)
+                    output = adapter.parse_output(result.stdout, schema)
 
                     # Run gates IN THE WORKTREE before applying changes
                     for gate_name in gates:
@@ -571,6 +594,54 @@ class ExecutionEngine:
         """
         client = self._get_cli_client(role.cli)
         return client.execute(prompt, workdir)
+
+    def _get_template_for_role(self, role: RoleConfig) -> str | None:
+        """Map role to template, resolving overlays via base_role.
+
+        For overlay roles (e.g., reviewer-python extends reviewer),
+        uses the base role's template.
+
+        base_role is computed by RoleLoader and handles multi-level overlays:
+        - reviewer-python (extends reviewer) -> base_role = "reviewer"
+        - my-reviewer (extends reviewer-python extends reviewer) -> base_role = "reviewer"
+
+        Returns None only for truly unknown roles to use legacy pack_context.
+        """
+        templates = {
+            "planner": "planning.j2",
+            "implementer": "implement.j2",
+            "reviewer": "review_strict.j2",
+        }
+
+        # First try exact role name (for base roles)
+        if role.name in templates:
+            return templates[role.name]
+
+        # Then try base_role (for overlays - handles multi-level extends)
+        if role.base_role and role.base_role in templates:
+            return templates[role.base_role]
+
+        # Unknown role - fallback to legacy pack_context
+        return None
+
+    def _get_schema_for_role(self, role: RoleConfig) -> type[BaseModel]:
+        """Get output schema for role, resolving overlays via base_role.
+
+        For overlay roles (e.g., implementer-python extends implementer),
+        uses the base role's schema.
+
+        base_role is computed by RoleLoader and handles multi-level overlays.
+        """
+        # First try exact role name (for base roles)
+        if role.name in ROLE_SCHEMAS:
+            return ROLE_SCHEMAS[role.name]
+
+        # Then try base_role (for overlays - handles multi-level extends)
+        if role.base_role and role.base_role in ROLE_SCHEMAS:
+            return ROLE_SCHEMAS[role.base_role]
+
+        # Unknown role - use GenericOutput
+        return GenericOutput
 
     def _build_feedback(self, error: Exception, role: RoleConfig) -> str:
         """Build feedback message for retry.
