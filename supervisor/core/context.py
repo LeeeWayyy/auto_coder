@@ -278,8 +278,28 @@ class ContextPacker:
         protected_parts = {k: v for k, v in context_parts.items() if k in protected}
         prunable_parts = {k: v for k, v in context_parts.items() if k not in protected}
 
+        def assemble_in_priority_order(parts: dict[str, str]) -> str:
+            """Assemble parts in priority order, then any remaining keys."""
+            result = []
+            seen = set()
+            # First: protected content (always_include)
+            for key in protected:
+                if key in parts:
+                    result.append(parts[key])
+                    seen.add(key)
+            # Second: prunable content in priority order
+            for key in priority_order:
+                if key in parts and key not in seen:
+                    result.append(parts[key])
+                    seen.add(key)
+            # Third: any remaining keys not in priority order
+            for key, value in parts.items():
+                if key not in seen:
+                    result.append(value)
+            return "\n\n".join(result)
+
         # Try full context first
-        full = "\n\n".join(context_parts.values())
+        full = assemble_in_priority_order(context_parts)
         if len(full) <= char_budget:
             return full
 
@@ -287,12 +307,12 @@ class ContextPacker:
         for drop_key in reversed(priority_order):
             if drop_key in prunable_parts:
                 del prunable_parts[drop_key]
-                current = "\n\n".join({**protected_parts, **prunable_parts}.values())
+                current = assemble_in_priority_order({**protected_parts, **prunable_parts})
                 if len(current) <= char_budget:
                     return current
 
         # Return protected content only
-        return "\n\n".join(protected_parts.values())
+        return assemble_in_priority_order(protected_parts)
 
     def _get_changed_files(self) -> list[str]:
         """Get list of changed files from git diff --name-only --cached.

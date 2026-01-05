@@ -1482,8 +1482,7 @@ def test_extract_json_from_markdown():
     {"status": "SUCCESS", "files_created": ["foo.py"]}
     ```
     """
-    parser = OutputParser()
-    result = parser.parse(output, ImplementationOutput)
+    result = parse_worker_output(output, ImplementationOutput)
     assert result.status == "SUCCESS"
 
 def test_last_json_block_used():
@@ -1499,16 +1498,14 @@ def test_last_json_block_used():
     {"status": "SUCCESS", "files_created": []}
     ```
     """
-    parser = OutputParser()
-    result = parser.parse(output, ImplementationOutput)
+    result = parse_worker_output(output, ImplementationOutput)
     assert result.status == "SUCCESS"
 
 def test_no_marker_fallback():
     """Magic strings like 'APPROVED' are NOT parsed."""
     output = "REVIEW_STATUS: APPROVED\n\nLooks good!"
-    parser = OutputParser()
     with pytest.raises(ParsingError, match="No JSON block found"):
-        parser.parse(output, ReviewOutput)
+        parse_worker_output(output, ReviewOutput)
 ```
 
 ---
