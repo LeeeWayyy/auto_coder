@@ -185,7 +185,12 @@ class ContextPacker:
 
         # Step 2: Render template with role, task, and file context
         # Template handles: system_prompt, task, context (files), output requirements
-        return self.render_prompt(template_name, role, task_description, context=file_context)
+        try:
+            return self.render_prompt(template_name, role, task_description, context=file_context)
+        except Exception:
+            # Fallback: Use pack_context with full access to target_files and extra_context
+            # This ensures no context is lost on template rendering failures
+            return self.pack_context(role, task_description, target_files, extra_context)
 
     def pack_file_context(
         self,

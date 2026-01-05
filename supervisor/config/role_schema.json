@@ -18,9 +18,6 @@
     "description": {
       "type": "string"
     },
-    "extends": {
-      "type": "string"
-    },
     "cli": {
       "type": "string",
       "enum": ["claude", "codex", "gemini"]
