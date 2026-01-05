@@ -108,7 +108,7 @@ class RoleLoader:
         """
         schema_path = Path(__file__).parent.parent / "config" / "role_schema.json"
         try:
-            with open(schema_path) as f:
+            with open(schema_path, encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
             raise RoleValidationError(
@@ -186,7 +186,7 @@ class RoleLoader:
     def _load_yaml(self, path: Path) -> dict[str, Any]:
         """Load YAML file with proper error handling."""
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
         except yaml.YAMLError as e:
             raise RoleValidationError(f"Invalid YAML in {path}: {e}")

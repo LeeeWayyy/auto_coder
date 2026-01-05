@@ -339,7 +339,7 @@ class ContextPacker:
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip().split("\n")
             return []
-        except Exception:
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return []
 
     def _pack_target_files(self, target_files: list[str]) -> str:
@@ -365,7 +365,7 @@ class ContextPacker:
 
                 content = validated.read_text()
                 parts.append(f"### {file_path}\n\n```\n{content}\n```\n")
-            except Exception:
+            except (IOError, OSError, UnicodeDecodeError):
                 parts.append(f"### {file_path}\n\n[Could not read file]\n")
 
         return "\n".join(parts) if len(parts) > 1 else ""
@@ -433,7 +433,7 @@ class ContextPacker:
             rel_path = file_path.relative_to(self.repo_path)
             parts.append(f"### {rel_path}\n\n```\n{content}\n```\n")
             return len(content.encode("utf-8"))
-        except Exception:
+        except (IOError, OSError, UnicodeDecodeError):
             return 0  # Skip unreadable files
 
     def _truncate_lines(self, text: str, max_lines: int) -> str:
