@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from jinja2 import FileSystemLoader, StrictUndefined
+from jinja2 import FileSystemLoader, StrictUndefined, TemplateError
 from jinja2.sandbox import SandboxedEnvironment
 
 from supervisor.core.roles import RoleConfig
@@ -79,8 +79,11 @@ class ContextPacker:
     PROTECTED_KEYS = frozenset(["system_prompt", "task", "always_include"])
 
     # Priority order for pruning (only non-protected keys are pruned)
+    # Higher in list = higher priority = pruned last
     PRUNABLE_PRIORITY_ORDER = [
         "target_file",     # High priority (last to prune)
+        "git_diff",        # Changes in progress
+        "changed_files",   # Full content of changed files
         "imports",
         "related",
         "files",
@@ -191,9 +194,13 @@ class ContextPacker:
         # Template handles: system_prompt, task, context (files), output requirements
         try:
             return self.render_prompt(template_name, role, task_description, context=file_context)
-        except Exception:
+        except (TemplateError, ValueError) as e:
             # Fallback: Use pack_context with full access to target_files and extra_context
             # This ensures no context is lost on template rendering failures
+            # TemplateError covers all Jinja2 errors (TemplateSyntaxError, UndefinedError, etc.)
+            # ValueError covers template allowlist violations
+            import logging
+            logging.debug(f"Template rendering failed, using legacy fallback: {e}")
             return self.pack_context(role, task_description, target_files, extra_context)
 
     def pack_file_context(
@@ -766,6 +773,10 @@ class ContextPacker:
         """Pack context within token budget, pruning if necessary.
 
         Uses simple character-based estimation (4 chars ~= 1 token).
+        Pruning order:
+        1. Keys not in PRUNABLE_PRIORITY_ORDER (lowest priority, pruned first)
+        2. Keys in PRUNABLE_PRIORITY_ORDER from tree -> target_file (low to high)
+        3. PROTECTED_KEYS are never pruned
         """
         # Rough token estimation
         char_budget = budget * 4
@@ -775,27 +786,59 @@ class ContextPacker:
         if len(full) <= char_budget:
             return full
 
-        # Progressive pruning by priority
-        for drop_key in reversed(self.PRIORITY_ORDER):
+        # Separate protected and prunable keys
+        prunable_parts = {
+            k: v for k, v in context_parts.items()
+            if k not in self.PROTECTED_KEYS
+        }
+
+        # Build pruning order: unlisted keys first, then listed keys in reverse priority
+        unlisted_keys = [
+            k for k in prunable_parts
+            if k not in self.PRUNABLE_PRIORITY_ORDER
+        ]
+        listed_keys = [
+            k for k in reversed(self.PRUNABLE_PRIORITY_ORDER)
+            if k in prunable_parts
+        ]
+        prune_order = unlisted_keys + listed_keys
+
+        # Progressive pruning
+        for drop_key in prune_order:
             if drop_key in context_parts:
                 del context_parts[drop_key]
                 pruned = self._combine(context_parts)
                 if len(pruned) <= char_budget:
                     return pruned
 
-        # Still too large - truncate what's left
-        return full[:char_budget] + "\n\n[Context truncated due to token limit]"
+        # Still too large - truncate protected content only
+        protected_only = self._combine(context_parts)
+        return protected_only[:char_budget] + "\n\n[Context truncated due to token limit]"
 
     def _combine(self, context_parts: dict[str, str]) -> str:
-        """Combine context parts in priority order."""
+        """Combine context parts in priority order.
+
+        Order: protected keys first, then prunable keys in priority order,
+        then any remaining keys.
+        """
         result = []
-        for key in self.PRIORITY_ORDER:
+        seen = set()
+
+        # 1. Protected keys first (system_prompt, task, always_include)
+        for key in ["system_prompt", "task", "always_include"]:
             if key in context_parts:
                 result.append(context_parts[key])
+                seen.add(key)
 
-        # Add remaining parts not in priority order
+        # 2. Prunable keys in priority order
+        for key in self.PRUNABLE_PRIORITY_ORDER:
+            if key in context_parts and key not in seen:
+                result.append(context_parts[key])
+                seen.add(key)
+
+        # 3. Remaining keys not in any priority list
         for key, value in context_parts.items():
-            if key not in self.PRIORITY_ORDER:
+            if key not in seen:
                 result.append(value)
 
         return "\n\n---\n\n".join(result)

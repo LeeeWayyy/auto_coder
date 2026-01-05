@@ -173,10 +173,10 @@ PRIORITY_ORDER = [
 - If still over budget: returns protected content only
 
 **Legacy Flow (`pack_context`):**
-- Only keys IN `PRIORITY_ORDER` are prunable
-- Keys NOT in `PRIORITY_ORDER` (files, git_diff, always_include, etc.) are never pruned
-- Pruning order: tree → related → imports → target_file → task → system_prompt
-- If still over budget: truncates original full context (before pruning)
+- `PROTECTED_KEYS` (`system_prompt`, `task`, `always_include`) are never pruned
+- Unlisted keys (extra_context, etc.) are pruned first (lowest priority)
+- Then `PRUNABLE_PRIORITY_ORDER` keys: tree → files → related → imports → changed_files → git_diff → target_file
+- If still over budget: truncates protected content only
 
 ### Budget Calculation
 
