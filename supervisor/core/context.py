@@ -822,17 +822,13 @@ class ContextPacker:
             context = kwargs.get("context") or self.pack_context(role, task_description)
             return f"{context}\n\n## Instructions\n\n{task_description}"
 
-        try:
-            template = self.jinja_env.get_template(template_name)
-            return template.render(
-                role=role,
-                task=task_description,
-                **kwargs,
-            )
-        except Exception:
-            # Fallback on template error - preserve prepacked context if provided
-            context = kwargs.get("context") or self.pack_context(role, task_description)
-            return context
+        # Let exceptions propagate to build_full_prompt for robust fallback
+        template = self.jinja_env.get_template(template_name)
+        return template.render(
+            role=role,
+            task=task_description,
+            **kwargs,
+        )
 
     def get_git_diff(self, staged: bool = True) -> str:
         """Get git diff for context."""

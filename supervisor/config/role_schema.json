@@ -31,10 +31,6 @@
     "system_prompt": {
       "type": "string"
     },
-    "system_prompt_additions": {
-      "type": "string",
-      "description": "Additional system prompt content to append (for overlay roles)"
-    },
     "context": {
       "type": "object",
       "additionalProperties": true,
