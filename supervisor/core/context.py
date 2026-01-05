@@ -841,7 +841,7 @@ class ContextPacker:
             if key not in seen:
                 result.append(value)
 
-        return "\n\n---\n\n".join(result)
+        return "\n\n".join(result)
 
     def render_prompt(
         self,

@@ -150,18 +150,21 @@ Priority selection:
 
 **Legacy (`pack_context` via `_pack_with_budget`):**
 
-Uses fixed `PRIORITY_ORDER` (subset of all possible keys):
+Uses `PROTECTED_KEYS` and `PRUNABLE_PRIORITY_ORDER`:
 
 ```python
-PRIORITY_ORDER = [
-    "system_prompt",   # Can be pruned
-    "task",            # Can be pruned
-    "target_file",
+PROTECTED_KEYS = frozenset(["system_prompt", "task", "always_include"])  # Never pruned
+
+PRUNABLE_PRIORITY_ORDER = [
+    "target_file",     # High priority (last to prune)
+    "git_diff",
+    "changed_files",
     "imports",
     "related",
-    "tree",
+    "files",
+    "tree",            # Low priority (first to prune)
 ]
-# NOTE: Does NOT include: files, git_diff, changed_files, always_include
+# Unlisted keys (extra_context, etc.) are pruned before listed keys
 ```
 
 ### Context Protection by Flow
