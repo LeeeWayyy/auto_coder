@@ -180,6 +180,10 @@ class ContextPacker:
                 target_files=["src/main.py"],
             )
         """
+        # Centralize fallback logic: if templates are unavailable, use legacy packing
+        if self.jinja_env is None:
+            return self.pack_context(role, task_description, target_files, extra_context)
+
         # Step 1: Pack FILE context only (not system_prompt/task - template handles those)
         file_context = self.pack_file_context(role, target_files, extra_context)
 
@@ -817,11 +821,7 @@ class ContextPacker:
                 f"Allowed: {sorted(ALLOWED_TEMPLATES)}"
             )
 
-        if self.jinja_env is None:
-            # Fallback to simple prompt building - preserve prepacked context if provided
-            context = kwargs.get("context") or self.pack_context(role, task_description)
-            return f"{context}\n\n## Instructions\n\n{task_description}"
-
+        # jinja_env availability is checked in build_full_prompt
         # Let exceptions propagate to build_full_prompt for robust fallback
         template = self.jinja_env.get_template(template_name)
         return template.render(

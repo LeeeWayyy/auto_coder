@@ -351,7 +351,7 @@ Defined for context packing failures (currently unused - errors use fallback beh
 
 - Repomix timeout -> Fall back to simple packing
 - Repomix error -> Fall back to simple packing
-- Template error -> Fall back to `pack_context(role, task)` (note: `target_files` and `extra_context` are dropped in fallback)
+- Template error -> Fall back to `pack_context(role, task, target_files, extra_context)` to ensure no context is lost
 - Unreadable files -> Target files emit `[Could not read file]` placeholder; always_include and simple packing skip silently
 - Unknown template -> Raises ValueError
 
