@@ -245,12 +245,7 @@ class ContextPacker:
         # Budget for file context = total budget - template overhead
         # Clamp to prevent negative budget for small token_budget values
         file_budget = max(0, role.token_budget - (self.TEMPLATE_OVERHEAD_CHARS // 4))
-        if file_budget == 0:
-            # Overhead exceeds budget - return only protected content (always_include)
-            protected_content = context_parts.get("always_include", "")
-            if protected_content:
-                return protected_content + "\n\n[WARNING: Template overhead exceeds token budget; only always_include content shown]"
-            return "[WARNING: Template overhead exceeds token budget; no file context included]"
+        # Let _combine_file_context handle all budget scenarios including zero budget
         return self._combine_file_context(context_parts, file_budget, role)
 
     def _combine_file_context(
@@ -798,8 +793,8 @@ class ContextPacker:
             )
 
         if self.jinja_env is None:
-            # Fallback to simple prompt building
-            context = self.pack_context(role, task_description)
+            # Fallback to simple prompt building - preserve prepacked context if provided
+            context = kwargs.get("context") or self.pack_context(role, task_description)
             return f"{context}\n\n## Instructions\n\n{task_description}"
 
         try:
@@ -810,8 +805,8 @@ class ContextPacker:
                 **kwargs,
             )
         except Exception:
-            # Fallback on template error
-            context = self.pack_context(role, task_description)
+            # Fallback on template error - preserve prepacked context if provided
+            context = kwargs.get("context") or self.pack_context(role, task_description)
             return context
 
     def get_git_diff(self, staged: bool = True) -> str:

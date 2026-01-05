@@ -109,9 +109,8 @@ def parse_worker_output(raw_output: str, schema: type[T]) -> T:
     try:
         return schema.model_validate_json(json_str)
     except ValidationError as e:
-        # Pydantic ValidationError includes JSON syntax errors (type=json_invalid)
-        error_str = str(e)
-        if "json_invalid" in error_str.lower() or "invalid json" in error_str.lower():
+        # Pydantic ValidationError includes JSON syntax errors. Check for this specific type.
+        if any(err.get("type") == "json_invalid" for err in e.errors()):
             raise ParsingError(f"Invalid JSON in output: {e}")
         raise InvalidOutputError(f"Output doesn't match {schema.__name__} schema: {e}")
     except json.JSONDecodeError as e:
