@@ -178,6 +178,25 @@ class GateLoader:
     )
     ENV_DENYLIST_PREFIXES = ("SUPERVISOR_",)
 
+    # Shell binaries that require allow_shell=true
+    SHELL_BINARY_NAMES = frozenset({
+        "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
+        "cmd", "powershell", "pwsh",
+    })
+
+    # Command wrappers that may wrap shell invocations
+    COMMAND_WRAPPERS = frozenset({
+        "env", "command", "exec", "xargs", "nice", "nohup", "timeout",
+        "stdbuf", "ionice", "chrt", "taskset", "numactl", "time",
+        "chronic", "unbuffer", "sudo", "doas", "su", "runuser",
+    })
+
+    # env flags that take a following argument (must be handled specially)
+    ENV_FLAGS_WITH_ARGS = frozenset({"-C", "-u", "--chdir", "--unset"})
+
+    # Dangerous env flags that must be blocked entirely
+    ENV_BLOCKED_FLAGS = frozenset({"-S", "--split-string", "-i", "--ignore-environment"})
+
     def __init__(
         self,
         worktree_path: Path,
@@ -232,6 +251,12 @@ class GateLoader:
         if not isinstance(config["gates"], dict):
             raise GateConfigError(f"Invalid 'gates' in {source_path}: expected dict")
 
+        # Use class-level security constants (enables testing and reuse)
+        SHELL_BINARY_NAMES = self.SHELL_BINARY_NAMES
+        COMMAND_WRAPPERS = self.COMMAND_WRAPPERS
+        ENV_FLAGS_WITH_ARGS = self.ENV_FLAGS_WITH_ARGS
+        ENV_BLOCKED_FLAGS = self.ENV_BLOCKED_FLAGS
+
         valid_severities = {"error", "warning", "info"}
         gate_name_pattern = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
 
@@ -239,42 +264,6 @@ class GateLoader:
             normalized = pattern.replace("\\", "/")
             components = normalized.split("/")
             return ".." in components
-
-        SHELL_BINARY_NAMES = {
-            "bash",
-            "sh",
-            "zsh",
-            "fish",
-            "dash",
-            "ksh",
-            "csh",
-            "tcsh",
-            "cmd",
-            "powershell",
-            "pwsh",
-        }
-
-        COMMAND_WRAPPERS = {
-            "env",
-            "command",
-            "exec",
-            "xargs",
-            "nice",
-            "nohup",
-            "timeout",
-            "stdbuf",
-            "ionice",
-            "chrt",
-            "taskset",
-            "numactl",
-            "time",
-            "chronic",
-            "unbuffer",
-            "sudo",
-            "doas",
-            "su",
-            "runuser",
-        }
 
         def get_basename(arg: str) -> str:
             basename = arg.replace("\\", "/").split("/")[-1].lower()
@@ -321,15 +310,6 @@ class GateLoader:
                     continue
                 break
             return None
-
-        # SECURITY: env flags that take a following argument
-        # These must be handled specially to avoid bypass via "env -C /tmp PATH=/evil cmd"
-        ENV_FLAGS_WITH_ARGS = {"-C", "-u", "--chdir", "--unset"}
-
-        # SECURITY: env flags that are dangerous and must be blocked entirely:
-        # - -S/--split-string: parses argument into multiple args (can hide env assignments)
-        # - -i/--ignore-environment: clears environment, allowing fresh PATH to be set
-        ENV_BLOCKED_FLAGS = {"-S", "--split-string", "-i", "--ignore-environment"}
 
         def check_env_blocked_flags(cmd_list: list[str]) -> str | None:
             """Check if any blocked env flags are used in the command."""
@@ -1243,6 +1223,22 @@ class GateExecutor:
 
         try:
             git_env, git_safe_config = self._get_safe_git_env()
+
+            # SECURITY: Get list of tracked files to prevent allowed_writes from
+            # exempting modifications to clean tracked files (P1 security fix)
+            tracked_result = subprocess.run(
+                ["git"] + git_safe_config + ["ls-files", "-z"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=10,
+                env=git_env,
+            )
+            tracked_files: set[str] = set()
+            if tracked_result.returncode == 0:
+                for entry in tracked_result.stdout.split(b"\0"):
+                    if entry:
+                        tracked_files.add(entry.decode("utf-8", errors="surrogateescape"))
+
             result = subprocess.run(
                 ["git"] + git_safe_config + ["status", "--porcelain", "-z", "-uall"],
                 cwd=worktree_path,
@@ -1293,8 +1289,13 @@ class GateExecutor:
 
             for path in sorted(current_paths):
                 if path not in baseline.files:
-                    # New file - allowed_writes can exempt newly created files
-                    if _is_allowed(path):
+                    # SECURITY (P1): Check if file is tracked. Tracked files that were
+                    # clean before gate execution are NOT exempt from integrity checks,
+                    # even if they match allowed_writes. Only truly NEW untracked files
+                    # can be exempted by allowed_writes patterns.
+                    is_tracked = path in tracked_files
+                    if not is_tracked and _is_allowed(path):
+                        # Truly new untracked file matching allowed_writes - OK
                         continue
                     # Check if it's a symlink escaping worktree
                     file_path = worktree_path / path
@@ -1306,7 +1307,10 @@ class GateExecutor:
                             # SECURITY: New symlink escapes worktree
                             violations.append(f"{path} (new symlink escapes worktree)")
                             continue
-                    violations.append(path)
+                    if is_tracked:
+                        violations.append(f"{path} (tracked file modified)")
+                    else:
+                        violations.append(path)
                     continue
 
                 # SECURITY: Files that existed in baseline are ALWAYS checked,

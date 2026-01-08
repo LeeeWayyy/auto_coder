@@ -370,6 +370,16 @@ class TestGateExecutor:
         return executor
 
     @pytest.fixture
+    def mock_db(self):
+        """Create a mock Database with required methods."""
+        from unittest.mock import MagicMock
+
+        db = MagicMock()
+        db.append_event = MagicMock()
+        db.transaction = MagicMock()
+        return db
+
+    @pytest.fixture
     def gate_loader(self, tmp_path, temp_gate_file, monkeypatch):
         """Create a GateLoader with test config."""
         write_gates(temp_gate_file, {"test": {"command": ["echo", "test"]}})
@@ -377,14 +387,14 @@ class TestGateExecutor:
         return GateLoader(worktree_path=tmp_path)
 
     @pytest.fixture
-    def gate_executor(self, tmp_path, mock_executor, gate_loader):
-        """Create a GateExecutor with mock executor."""
+    def gate_executor(self, tmp_path, mock_executor, gate_loader, mock_db):
+        """Create a GateExecutor with mock executor and db."""
         from supervisor.core.gates import GateExecutor
 
         return GateExecutor(
             executor=mock_executor,
             gate_loader=gate_loader,
-            db=None,
+            db=mock_db,
         )
 
     def test_path_match_basic_patterns(self):

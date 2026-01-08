@@ -216,17 +216,20 @@ class EnhancedCircuitBreaker:
         self._half_open_used: dict[str, int] = {}
         self._half_open_start: dict[str, float] = {}  # Track when HALF_OPEN started
 
-        if self.db is not None:
+        # DRY: Check persistence capability once at init
+        self._persistence_enabled = (
+            self.db is not None and hasattr(self.db, "transaction")
+        )
+
+        if self._persistence_enabled:
             self._ensure_table()
             self._load_state()
 
     def _ensure_table(self) -> None:
         """Create persistence table if needed."""
-        if not self.db:
+        if not self._persistence_enabled:
             return
-        if not hasattr(self.db, "transaction"):
-            return
-        with self.db.transaction() as conn:
+        with self.db.transaction() as conn:  # type: ignore[union-attr]
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS circuit_breaker_state (
@@ -243,12 +246,10 @@ class EnhancedCircuitBreaker:
 
     def _load_state(self) -> None:
         """Load persisted state into memory."""
-        if not self.db:
-            return
-        if not hasattr(self.db, "transaction"):
+        if not self._persistence_enabled:
             return
         try:
-            with self.db.transaction() as conn:
+            with self.db.transaction() as conn:  # type: ignore[union-attr]
                 rows = conn.execute(
                     "SELECT key, state, failure_count, success_count, last_failure, last_success "
                     "FROM circuit_breaker_state"
@@ -289,16 +290,14 @@ class EnhancedCircuitBreaker:
 
     def _persist_state(self, key: str) -> None:
         """Persist state to SQLite if available."""
-        if not self.db:
-            return
-        if not hasattr(self.db, "transaction"):
+        if not self._persistence_enabled:
             return
         metrics = self._metrics.get(key)
         state = self._states.get(key, CircuitState.CLOSED)
         if metrics is None:
             return
         try:
-            with self.db.transaction() as conn:
+            with self.db.transaction() as conn:  # type: ignore[union-attr]
                 conn.execute(
                     """
                     INSERT INTO circuit_breaker_state
@@ -788,8 +787,7 @@ class ExecutionEngine:
                     # On last attempt, fall through to retry exhausted logic
 
                 elif on_fail_action == GateFailAction.WARN:
-                    # Warn action should not raise GateFailedError, but handle gracefully
-                    # Log warning and continue (don't fail the step)
+                    # Log warning but don't fail the step
                     self.db.append_event(
                         Event(
                             workflow_id=workflow_id,
