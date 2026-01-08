@@ -80,7 +80,7 @@ class StructuredFeedbackGenerator:
         """Parse pytest output into structured failures."""
         issues: list[dict[str, str]] = []
         summary_re = re.compile(r"^FAILED\s+(?P<test>[^\s]+)\s*-?\s*(?P<msg>.*)$")
-        section_re = re.compile(r"^_{3,}\s*(?P<test>[^_]+?)\s*_{3,}$")
+        section_re = re.compile(r"^_{3,}\s*(?P<test>.+?)\s*_{3,}$")
 
         lines = output.splitlines()
         for line in lines:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import hashlib
 import heapq
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -935,6 +937,8 @@ class GateExecutor:
                     "env": sorted_env,
                     "working_dir": config.working_dir or "",
                     "timeout": config.timeout,
+                    # Include integrity rules so tightening allowed_writes invalidates cache
+                    "allowed_writes": sorted(config.allowed_writes or []),
                 },
                 separators=(",", ":"),
                 ensure_ascii=True,
@@ -960,8 +964,9 @@ class GateExecutor:
 
                     skip = False
                     for pattern in self.CACHE_KEY_SKIP_PATTERNS:
-                        pattern_norm = pattern.replace("\\", "/")
-                        if normalized.startswith(pattern_norm) or f"/{pattern_norm}" in normalized:
+                        pattern_norm = pattern.replace("\\", "/").strip("/")
+                        # Check if pattern matches as a path component (gitignore-style)
+                        if normalized.startswith(pattern_norm + "/") or pattern_norm in normalized.split("/"):
                             skip = True
                             break
                     if skip:
@@ -993,8 +998,6 @@ class GateExecutor:
             # Include cache_inputs: additional files/patterns that affect the gate
             if config.cache_inputs:
                 _check_deadline()
-                import fnmatch
-
                 cache_input_files: list[str] = []
                 for pattern in config.cache_inputs:
                     _check_deadline()
@@ -1313,15 +1316,17 @@ class GateExecutor:
                         violations.append(path)
                     continue
 
-                # SECURITY: Files that existed in baseline are ALWAYS checked,
-                # even if they match allowed_writes. This prevents overly broad
-                # patterns (e.g., "*.py") from allowing modification of tracked
-                # source files.
+                # SECURITY: Tracked files in baseline are ALWAYS checked.
+                # Untracked files in baseline that match allowed_writes are exempt
+                # (for idempotency - gates can update their own artifacts).
+                is_tracked_file = path in tracked_files
+                is_exempt_untracked = not is_tracked_file and _is_allowed(path)
 
                 pre_mtime, pre_size, pre_hash = baseline.files[path]
                 file_path = worktree_path / path
                 if not file_path.exists():
-                    if pre_size not in (-1,):  # Was a file or symlink before
+                    # File was deleted - only allow if it's an exempt untracked file
+                    if pre_size not in (-1,) and not is_exempt_untracked:
                         violations.append(path)
                     continue
 
@@ -1330,8 +1335,9 @@ class GateExecutor:
                 was_symlink = pre_size == -2
 
                 if is_symlink != was_symlink:
-                    # Type changed - this is always a violation
-                    violations.append(path)
+                    # Type changed - violation unless exempt untracked
+                    if not is_exempt_untracked:
+                        violations.append(path)
                     continue
 
                 if is_symlink:
@@ -1343,7 +1349,7 @@ class GateExecutor:
                         try:
                             resolved_target.relative_to(resolved_worktree)
                         except ValueError:
-                            # Symlink points outside worktree - always a violation
+                            # Symlink points outside worktree - always a violation (security)
                             violations.append(f"{path} (symlink escapes worktree)")
                             continue
 
@@ -1351,15 +1357,16 @@ class GateExecutor:
                         symlink_target = str(file_path.readlink())
                         cur_target_hash = hashlib.sha256(symlink_target.encode()).hexdigest()[:32]
 
-                        # Check if symlink target changed
+                        # Check if symlink target changed (unless exempt untracked)
                         if pre_hash is not None and cur_target_hash != pre_hash:
-                            violations.append(path)
+                            if not is_exempt_untracked:
+                                violations.append(path)
                             continue
                     except OSError:
                         # Symlink is broken (can't resolve/readlink)
                         # Only flag as violation if it wasn't already broken in baseline
                         # pre_hash is None for broken symlinks in baseline (size=-2)
-                        if pre_hash is not None:
+                        if pre_hash is not None and not is_exempt_untracked:
                             # Was valid before, now broken - violation
                             violations.append(path)
                 elif file_path.is_file():
@@ -1368,7 +1375,8 @@ class GateExecutor:
                         cur_mtime = int(stat.st_mtime * 1000)
                         cur_size = stat.st_size
                         if cur_mtime != pre_mtime or cur_size != pre_size:
-                            violations.append(path)
+                            if not is_exempt_untracked:
+                                violations.append(path)
                             continue
 
                         if pre_hash is not None:
@@ -1377,23 +1385,28 @@ class GateExecutor:
                                 for chunk in iter(lambda: f.read(8192), b""):
                                     file_hasher.update(chunk)
                             cur_hash = file_hasher.hexdigest()[:32]
-                            if cur_hash != pre_hash:
+                            if cur_hash != pre_hash and not is_exempt_untracked:
                                 violations.append(path)
                     except OSError:
-                        violations.append(path)
+                        if not is_exempt_untracked:
+                            violations.append(path)
                 else:
-                    if pre_size >= 0:  # Was a regular file
+                    if pre_size >= 0 and not is_exempt_untracked:  # Was a regular file
                         violations.append(path)
 
             # Check for deleted files - files in baseline that are no longer present
-            # SECURITY: Files that existed in baseline are ALWAYS checked for deletion,
-            # even if they match allowed_writes. allowed_writes only exempts NEW files.
+            # SECURITY: Tracked files are ALWAYS checked. Untracked files matching
+            # allowed_writes can be deleted (for idempotency).
             for path, (pre_mtime, pre_size, pre_hash) in baseline.files.items():
                 if path in current_paths:
                     continue
                 file_path = worktree_path / path
                 if not file_path.exists() and pre_size != -1:
-                    violations.append(path)
+                    # Only flag deletion if it's a tracked file or doesn't match allowed_writes
+                    is_tracked_file = path in tracked_files
+                    is_exempt_untracked = not is_tracked_file and _is_allowed(path)
+                    if not is_exempt_untracked:
+                        violations.append(path)
 
             return (len(violations) == 0, violations)
         except Exception as e:
@@ -1659,8 +1672,6 @@ class GateExecutor:
         workflow_id: str,
         step_id: str,
     ) -> GateResult:
-        from copy import copy
-
         def _truncate(text: str, max_chars: int) -> str:
             if len(text) <= max_chars:
                 return text
