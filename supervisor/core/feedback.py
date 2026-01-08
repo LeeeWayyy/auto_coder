@@ -94,6 +94,8 @@ class StructuredFeedbackGenerator:
                 )
 
         # Parse failure sections for assertion lines
+        # Keep current_test until a new section is found (don't reset after first E line)
+        # This ensures all E lines from a test failure are captured
         current_test: str | None = None
         for line in lines:
             sec = section_re.match(line.strip())
@@ -107,7 +109,7 @@ class StructuredFeedbackGenerator:
                         "message": line[4:].strip() or "(error)",
                     }
                 )
-                current_test = None
+                # Don't reset current_test - continue collecting E lines for this test
 
         return issues[: self.MAX_ISSUES]
 
@@ -245,4 +247,9 @@ class StructuredFeedbackGenerator:
     def _truncate_output(output: str, max_chars: int) -> str:
         if len(output) <= max_chars:
             return output
-        return f"...[truncated {len(output) - max_chars} chars]...\n{output[-max_chars:]}"
+        # Keep head and tail for better context
+        truncated = len(output) - max_chars
+        half = max_chars // 2
+        head = output[:half]
+        tail = output[-half:]
+        return f"{head}\n...[truncated {truncated} chars]...\n{tail}"

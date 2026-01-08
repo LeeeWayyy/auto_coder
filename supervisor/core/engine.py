@@ -295,6 +295,15 @@ class EnhancedCircuitBreaker:
         metrics = self._metrics.get(key)
         state = self._states.get(key, CircuitState.CLOSED)
         if metrics is None:
+            # Key was reset/deleted - remove from DB
+            try:
+                with self.db.transaction() as conn:  # type: ignore[union-attr]
+                    conn.execute(
+                        "DELETE FROM circuit_breaker_state WHERE key = ?",
+                        (key,),
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to delete circuit breaker state for key '{key}': {e}")
             return
         try:
             with self.db.transaction() as conn:  # type: ignore[union-attr]
@@ -525,7 +534,7 @@ class ExecutionEngine:
         # Create sandboxed executor for gates/tests
         self.executor = get_sandboxed_executor(self.sandbox_config)
         self.workspace = IsolatedWorkspace(self.repo_path, self.executor, self.db)
-        self.circuit_breaker = CircuitBreaker()
+        self.circuit_breaker = EnhancedCircuitBreaker(db=self.db)
         self.error_classifier = ErrorClassifier()
 
         # CLI clients (lazily initialized per CLI name)
@@ -800,9 +809,10 @@ class ExecutionEngine:
                             },
                         )
                     )
-                    # Don't retry, don't fail - continue with the current output
-                    # This path shouldn't normally be reached since WARN gates don't raise
-                    break
+                    # WARN gates don't block execution - return the output
+                    # Note: output was parsed before GateFailedError was raised
+                    self.circuit_breaker.reset(circuit_key)
+                    return output
                 else:
                     # BLOCK: Gate failures block execution
                     self.db.append_event(

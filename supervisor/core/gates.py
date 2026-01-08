@@ -1356,7 +1356,12 @@ class GateExecutor:
                             violations.append(path)
                             continue
                     except OSError:
-                        violations.append(path)
+                        # Symlink is broken (can't resolve/readlink)
+                        # Only flag as violation if it wasn't already broken in baseline
+                        # pre_hash is None for broken symlinks in baseline (size=-2)
+                        if pre_hash is not None:
+                            # Was valid before, now broken - violation
+                            violations.append(path)
                 elif file_path.is_file():
                     try:
                         stat = file_path.stat()
