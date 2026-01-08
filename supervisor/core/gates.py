@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import heapq
 import json
 import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -900,8 +905,6 @@ class GateExecutor:
                 raise self.GateTimeout("Cache key computation timed out")
 
         try:
-            import hashlib
-
             _check_deadline()
             git_env, git_safe_config = self._get_safe_git_env()
 
@@ -1047,24 +1050,20 @@ class GateExecutor:
                         continue
                     stat = file_path.stat()
                     if stat.st_size > self.CACHE_KEY_MAX_FILE_SIZE:
-                        if config.force_hash_large_cache_inputs:
-                            # Use mtime + size as proxy for large files
-                            content_hasher.update(
-                                f"cache_input:{rel_path}:size={stat.st_size}:mtime={stat.st_mtime}\n".encode(
-                                    "utf-8"
-                                )
-                            )
-                        else:
+                        if not config.force_hash_large_cache_inputs:
                             return None  # File too large
-                    else:
-                        file_hasher = hashlib.sha256()
-                        with open(file_path, "rb") as f:
-                            for chunk in iter(lambda: f.read(8192), b""):
-                                file_hasher.update(chunk)
-                        file_hash = file_hasher.hexdigest()[:32]
-                        content_hasher.update(
-                            f"cache_input:{rel_path}:{file_hash}\n".encode("utf-8")
-                        )
+                        # force_hash_large_cache_inputs=True: hash the full file
+                        # even though it's large (may be slow but ensures correctness)
+
+                    # Hash the file contents
+                    file_hasher = hashlib.sha256()
+                    with open(file_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(8192), b""):
+                            file_hasher.update(chunk)
+                    file_hash = file_hasher.hexdigest()[:32]
+                    content_hasher.update(
+                        f"cache_input:{rel_path}:{file_hash}\n".encode("utf-8")
+                    )
 
             executor_image_id = getattr(self.executor, "image_id", None)
             if executor_image_id:
@@ -1077,21 +1076,9 @@ class GateExecutor:
             return None
 
     @staticmethod
-    def _path_match(path: str, pattern: str) -> bool:
-        """Git-style glob matching for allowed_writes patterns."""
-        import re
-
-        def _normalize(value: str) -> str:
-            value = value.replace("\\", "/")
-            while value.startswith("./"):
-                value = value[2:]
-            while "//" in value:
-                value = value.replace("//", "/")
-            return value
-
-        path = _normalize(path)
-        pattern = _normalize(pattern)
-
+    @functools.lru_cache(maxsize=256)
+    def _glob_to_regex(pattern: str) -> re.Pattern[str] | None:
+        """Convert a glob pattern to a compiled regex (cached)."""
         regex_parts: list[str] = []
         i = 0
         while i < len(pattern):
@@ -1126,17 +1113,35 @@ class GateExecutor:
                 regex_parts.append(re.escape(pattern[i]))
                 i += 1
 
-        regex = "^" + "".join(regex_parts) + "$"
+        regex_str = "^" + "".join(regex_parts) + "$"
         try:
-            return bool(re.match(regex, path))
+            return re.compile(regex_str)
         except re.error:
+            return None
+
+    @staticmethod
+    def _path_match(path: str, pattern: str) -> bool:
+        """Git-style glob matching for allowed_writes patterns."""
+
+        def _normalize(value: str) -> str:
+            value = value.replace("\\", "/")
+            while value.startswith("./"):
+                value = value[2:]
+            while "//" in value:
+                value = value.replace("//", "/")
+            return value
+
+        path = _normalize(path)
+        pattern = _normalize(pattern)
+
+        compiled = GateExecutor._glob_to_regex(pattern)
+        if compiled is None:
             return path == pattern
+        return bool(compiled.match(path))
 
     def _capture_worktree_baseline(self, worktree_path: Path) -> WorktreeBaseline | None:
         """Capture file states before gate execution."""
         try:
-            import hashlib
-
             git_env, git_safe_config = self._get_safe_git_env()
             result = subprocess.run(
                 ["git"] + git_safe_config + ["status", "--porcelain", "-z", "-uall"],
@@ -1237,8 +1242,6 @@ class GateExecutor:
             return any(self._path_match(normalized, pattern) for pattern in allowed)
 
         try:
-            import hashlib
-
             git_env, git_safe_config = self._get_safe_git_env()
             result = subprocess.run(
                 ["git"] + git_safe_config + ["status", "--porcelain", "-z", "-uall"],
@@ -1289,11 +1292,11 @@ class GateExecutor:
             resolved_worktree = worktree_path.resolve()
 
             for path in sorted(current_paths):
-                if _is_allowed(path):
-                    continue
-
                 if path not in baseline.files:
-                    # New file - check if it's a symlink escaping worktree
+                    # New file - allowed_writes can exempt newly created files
+                    if _is_allowed(path):
+                        continue
+                    # Check if it's a symlink escaping worktree
                     file_path = worktree_path / path
                     if file_path.is_symlink():
                         try:
@@ -1305,6 +1308,11 @@ class GateExecutor:
                             continue
                     violations.append(path)
                     continue
+
+                # SECURITY: Files that existed in baseline are ALWAYS checked,
+                # even if they match allowed_writes. This prevents overly broad
+                # patterns (e.g., "*.py") from allowing modification of tracked
+                # source files.
 
                 pre_mtime, pre_size, pre_hash = baseline.files[path]
                 file_path = worktree_path / path
@@ -1368,10 +1376,11 @@ class GateExecutor:
                     if pre_size >= 0:  # Was a regular file
                         violations.append(path)
 
+            # Check for deleted files - files in baseline that are no longer present
+            # SECURITY: Files that existed in baseline are ALWAYS checked for deletion,
+            # even if they match allowed_writes. allowed_writes only exempts NEW files.
             for path, (pre_mtime, pre_size, pre_hash) in baseline.files.items():
                 if path in current_paths:
-                    continue
-                if _is_allowed(path):
                     continue
                 file_path = worktree_path / path
                 if not file_path.exists() and pre_size != -1:
@@ -1415,12 +1424,6 @@ class GateExecutor:
         Path: {worktree}/.supervisor/artifacts/gates/{hashed_workflow_id}/{gate_name}-{timestamp}.log
         """
         try:
-            import hashlib
-            import os
-            import tempfile
-            import uuid
-            from datetime import datetime
-
             resolved_worktree = worktree_path.resolve()
             safe_workflow_id = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()[:32]
 

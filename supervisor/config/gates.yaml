@@ -28,7 +28,7 @@ gates:
 
   security:
     description: "Security scan"
-    command: ["bandit", "-r", "src/"]
+    command: ["bandit", "-r", "."]
     timeout: 180
     severity: "warning"
     parallel_safe: true

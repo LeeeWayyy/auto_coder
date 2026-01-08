@@ -9,6 +9,7 @@ Coordinates:
 """
 
 import hashlib
+import logging
 import threading
 import time
 import uuid
@@ -16,6 +17,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel
 
@@ -250,7 +253,8 @@ class EnhancedCircuitBreaker:
                     "SELECT key, state, failure_count, success_count, last_failure, last_success "
                     "FROM circuit_breaker_state"
                 ).fetchall()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to load circuit breaker state from DB: {e}")
             return
 
         with self._lock:
@@ -263,7 +267,8 @@ class EnhancedCircuitBreaker:
                     success_count = int(row["success_count"] or 0)
                     last_failure = row["last_failure"]
                     last_success = row["last_success"]
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Skipping malformed circuit breaker row: {e}")
                     continue
 
                 metrics = CircuitBreakerMetrics(
@@ -317,7 +322,8 @@ class EnhancedCircuitBreaker:
                         time.time(),
                     ),
                 )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to persist circuit breaker state for key '{key}': {e}")
             return
 
     def get_state(self, key: str) -> CircuitState:

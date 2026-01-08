@@ -355,3 +355,153 @@ class TestSecurityValidation:
         loader = GateLoader(worktree_path=tmp_path)
         with pytest.raises(GateConfigError, match="path traversal"):
             loader.load_gates()
+
+
+class TestGateExecutor:
+    """Tests for GateExecutor - gate execution, caching, and integrity checking."""
+
+    @pytest.fixture
+    def mock_executor(self):
+        """Create a mock SandboxedExecutor."""
+        from unittest.mock import MagicMock
+
+        executor = MagicMock()
+        executor.image_id = "test-image:latest"
+        return executor
+
+    @pytest.fixture
+    def gate_loader(self, tmp_path, temp_gate_file, monkeypatch):
+        """Create a GateLoader with test config."""
+        write_gates(temp_gate_file, {"test": {"command": ["echo", "test"]}})
+        monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
+        return GateLoader(worktree_path=tmp_path)
+
+    @pytest.fixture
+    def gate_executor(self, tmp_path, mock_executor, gate_loader):
+        """Create a GateExecutor with mock executor."""
+        from supervisor.core.gates import GateExecutor
+
+        return GateExecutor(
+            executor=mock_executor,
+            gate_loader=gate_loader,
+            db=None,
+        )
+
+    def test_path_match_basic_patterns(self):
+        """Test basic glob pattern matching."""
+        from supervisor.core.gates import GateExecutor
+
+        # Exact match
+        assert GateExecutor._path_match("file.txt", "file.txt")
+        assert not GateExecutor._path_match("file.txt", "other.txt")
+
+        # Single wildcard
+        assert GateExecutor._path_match("file.txt", "*.txt")
+        assert GateExecutor._path_match("test.py", "*.py")
+        assert not GateExecutor._path_match("file.txt", "*.py")
+
+        # Double wildcard (recursive)
+        assert GateExecutor._path_match("src/foo/bar.py", "src/**/*.py")
+        assert GateExecutor._path_match("src/bar.py", "src/**/*.py")
+        assert not GateExecutor._path_match("tests/foo.py", "src/**/*.py")
+
+        # Directory patterns
+        assert GateExecutor._path_match(".coverage", ".coverage")
+        assert GateExecutor._path_match("htmlcov/index.html", "htmlcov/**")
+        assert GateExecutor._path_match(".pytest_cache/v/cache", ".pytest_cache/**")
+
+    def test_path_match_normalizes_paths(self):
+        """Test that path matching normalizes slashes and leading ./"""
+        from supervisor.core.gates import GateExecutor
+
+        # Backslash normalization
+        assert GateExecutor._path_match("src\\foo\\bar.py", "src/**/*.py")
+
+        # Leading ./ normalization
+        assert GateExecutor._path_match("./foo/bar.txt", "foo/*.txt")
+        assert GateExecutor._path_match("foo/bar.txt", "./foo/*.txt")
+
+    def test_glob_to_regex_caching(self):
+        """Test that regex patterns are cached."""
+        from supervisor.core.gates import GateExecutor
+
+        # Clear cache
+        GateExecutor._glob_to_regex.cache_clear()
+
+        # First call should populate cache
+        result1 = GateExecutor._glob_to_regex("*.py")
+        assert result1 is not None
+
+        # Second call should return cached result
+        result2 = GateExecutor._glob_to_regex("*.py")
+        assert result1 is result2
+
+        # Check cache info
+        info = GateExecutor._glob_to_regex.cache_info()
+        assert info.hits >= 1
+
+    def test_secret_redaction(self, gate_executor):
+        """Test that secrets are properly redacted from output."""
+        test_cases = [
+            # GitHub PAT (36+ chars after ghp_)
+            ("token: ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ123456789012", "[REDACTED:github_pat]"),
+            # GitHub PAT v2
+            ("pat: github_pat_abc123_xyz789", "[REDACTED:github_pat_v2]"),
+            # GitHub OAuth (36+ chars after gho_)
+            ("oauth: gho_aBcDeFgHiJkLmNoPqRsTuVwXyZ123456789012", "[REDACTED:github_oauth]"),
+            # OpenAI key (48+ chars after sk-)
+            ("key: sk-aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcdefghijklmn", "[REDACTED:openai_key]"),
+            # AWS key (AKIA + 16 uppercase letters/numbers)
+            ("aws: AKIAIOSFODNN7EXAMPLE1", "[REDACTED:aws_access_key]"),
+            # Generic API key pattern
+            ("api_key: abc123def456", "api_key=[REDACTED]"),
+            # Generic token pattern
+            ("token: mytoken123", "token=[REDACTED]"),
+        ]
+
+        for input_text, expected_redaction in test_cases:
+            redacted = gate_executor._redact_secrets(input_text)
+            assert expected_redaction in redacted, f"Failed for: {input_text}"
+
+    def test_secret_redaction_preserves_non_secrets(self, gate_executor):
+        """Test that non-secret text is preserved."""
+        normal_text = "This is normal output with no secrets.\nTest passed!"
+        redacted = gate_executor._redact_secrets(normal_text)
+        assert redacted == normal_text
+
+    def test_worktree_baseline_dataclass(self):
+        """Test WorktreeBaseline dataclass works correctly."""
+        from supervisor.core.gates import WorktreeBaseline
+
+        baseline = WorktreeBaseline(
+            files={"test.py": (12345, 100, "abc123")},
+            pre_tracked_clean=True,
+        )
+
+        assert "test.py" in baseline.files
+        assert baseline.files["test.py"] == (12345, 100, "abc123")
+        assert baseline.pre_tracked_clean is True
+
+    def test_gate_result_timeout_flag(self):
+        """Test GateResult timed_out flag."""
+        from supervisor.core.gates import GateResult, GateStatus
+
+        # Normal result
+        normal = GateResult(
+            gate_name="test",
+            status=GateStatus.FAILED,
+            output="error",
+            duration_seconds=1.0,
+            timed_out=False,
+        )
+        assert not normal.timed_out
+
+        # Timed out result
+        timeout = GateResult(
+            gate_name="test",
+            status=GateStatus.FAILED,
+            output="timed out",
+            duration_seconds=300.0,
+            timed_out=True,
+        )
+        assert timeout.timed_out
