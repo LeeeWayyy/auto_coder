@@ -731,6 +731,29 @@ class ExecutionEngine:
                                 # Gate not defined - default to BLOCK
                                 effective_overrides[gate_name] = GateFailAction.BLOCK
 
+                    # Propagate optional (WARN) behavior from parent gates to dependencies.
+                    # If a gate is optional (required=false or on_fail=warn), its dependencies
+                    # should also be treated as optional so they don't block unexpectedly.
+                    def collect_dependencies(gate_name: str) -> set[str]:
+                        """Recursively collect all dependencies of a gate."""
+                        deps: set[str] = set()
+                        try:
+                            gate_config = worktree_gate_loader.get_gate(gate_name)
+                            for dep in gate_config.depends_on:
+                                if dep not in deps:
+                                    deps.add(dep)
+                                    deps.update(collect_dependencies(dep))
+                        except GateNotFoundError:
+                            pass
+                        return deps
+
+                    for gate_name in gates:
+                        if effective_overrides.get(gate_name) == GateFailAction.WARN:
+                            # This gate is optional - propagate to all its dependencies
+                            for dep in collect_dependencies(gate_name):
+                                if effective_overrides.get(dep) == GateFailAction.BLOCK:
+                                    effective_overrides[dep] = GateFailAction.WARN
+
                     gate_results = worktree_gate_executor.run_gates(
                         gate_names=gates,
                         worktree_path=ctx.worktree_path,
