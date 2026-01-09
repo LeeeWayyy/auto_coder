@@ -708,9 +708,12 @@ class ExecutionEngine:
                         db=self.db,
                     )
 
-                    # Build on_fail_overrides with severity defaults
+                    # Resolve all gates (including dependencies) upfront for on_fail logic
+                    resolved_gates = worktree_gate_loader.resolve_execution_order(gates)
+
+                    # Build on_fail_overrides for ALL gates (including dependencies)
                     effective_overrides: dict[str, GateFailAction] = {}
-                    for gate_name in gates:
+                    for gate_name in resolved_gates:
                         if gate_name in role.on_fail_overrides:
                             effective_overrides[gate_name] = role.on_fail_overrides[gate_name]
                         else:
@@ -736,20 +739,10 @@ class ExecutionEngine:
                     # Check for blocking failures (GateExecutor already logged events)
                     for gate_result in gate_results:
                         if gate_result.status == GateStatus.FAILED:
-                            # Look up on_fail action: check effective_overrides first,
-                            # then fall back to gate's severity (handles dependency gates)
-                            if gate_result.gate_name in effective_overrides:
-                                on_fail = effective_overrides[gate_result.gate_name]
-                            else:
-                                # Dependency gate not in original list - check its severity
-                                try:
-                                    dep_config = worktree_gate_loader.get_gate(gate_result.gate_name)
-                                    if dep_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
-                                        on_fail = GateFailAction.WARN
-                                    else:
-                                        on_fail = GateFailAction.BLOCK
-                                except GateNotFoundError:
-                                    on_fail = GateFailAction.BLOCK
+                            # All gates (including dependencies) resolved upfront
+                            on_fail = effective_overrides.get(
+                                gate_result.gate_name, GateFailAction.BLOCK
+                            )
 
                             if on_fail == GateFailAction.WARN:
                                 # Already logged by GateExecutor, continue

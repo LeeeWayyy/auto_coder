@@ -514,19 +514,21 @@ class GateExecutor:
                     break
 
                 entry = entries[i]
-                if not entry or len(entry) < 3:
+                # Git porcelain format: "XY path" where XY is 2-char status
+                # Minimum: 2 status chars + 1 space + 1 path char = 4
+                if not entry or len(entry) < 4:
                     i += 1
                     continue
 
                 entry_str = entry.decode("utf-8", errors="surrogateescape")
-                space_idx = entry_str.find(" ")
-                if space_idx < 2:
+                # SECURITY: Parse status as fixed 2-char field, path starts at index 3
+                # This correctly handles entries like " M foo.py" (unstaged changes)
+                # where the first status char is a space
+                status = entry_str[:2]
+                if len(entry_str) < 4 or entry_str[2] != " ":
                     i += 1
                     continue
-
-                status_token = entry_str[:space_idx]
-                status = status_token[:2]
-                path = entry_str[space_idx + 1 :]
+                path = entry_str[3:]
 
                 is_rename_copy = status[0] in ("R", "C") or status[1] in ("R", "C")
                 if is_rename_copy and (i + 1) < len(entries):
@@ -635,19 +637,21 @@ class GateExecutor:
             i = 0
             while i < len(entries):
                 entry = entries[i]
-                if not entry or len(entry) < 3:
+                # Git porcelain format: "XY path" where XY is 2-char status
+                # Minimum: 2 status chars + 1 space + 1 path char = 4
+                if not entry or len(entry) < 4:
                     i += 1
                     continue
 
                 entry_str = entry.decode("utf-8", errors="surrogateescape")
-                space_idx = entry_str.find(" ")
-                if space_idx < 2:
+                # SECURITY: Parse status as fixed 2-char field, path starts at index 3
+                # This correctly handles entries like " M foo.py" (unstaged changes)
+                # where the first status char is a space
+                status = entry_str[:2]
+                if len(entry_str) < 4 or entry_str[2] != " ":
                     i += 1
                     continue
-
-                status_token = entry_str[:space_idx]
-                status = status_token[:2]
-                path = entry_str[space_idx + 1 :]
+                path = entry_str[3:]
 
                 is_rename_copy = status[0] in ("R", "C") or status[1] in ("R", "C")
                 if is_rename_copy and (i + 1) < len(entries):
