@@ -1,0 +1,33 @@
+name: Request Gemini Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  request-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Gemini Code Assist review
+        uses: actions/github-script@v7
+        with:
+          # Use PAT if available (comments appear as token owner), fallback to GITHUB_TOKEN
+          # To use PAT: create one with 'repo' scope and add as repository secret named 'PAT'
+          github-token: ${{ secrets.PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const eventAction = context.payload.action;
+
+            console.log(`PR #${prNumber} - Event: ${eventAction}`);
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: '@gemini-code-assist please review this PR'
+            });
+
+            console.log(`Requested Gemini review for PR #${prNumber}`);

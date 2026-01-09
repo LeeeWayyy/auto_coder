@@ -9,16 +9,30 @@ Coordinates:
 """
 
 import hashlib
+import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel
 
 from supervisor.core.context import ContextPacker
+from supervisor.core.feedback import StructuredFeedbackGenerator
+from supervisor.core.gates import (
+    GateExecutor,
+    GateFailAction,
+    GateLoader,
+    GateNotFoundError,
+    GateResult,
+    GateSeverity,
+    GateStatus,
+)
 from supervisor.core.models import ErrorAction, ErrorCategory, Step, StepStatus
 from supervisor.core.parser import (
     GenericOutput,
@@ -169,6 +183,273 @@ class CircuitBreaker:
             self._failures.pop(step_id, None)
 
 
+class CircuitState(str, Enum):
+    """Circuit breaker state."""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+@dataclass
+class CircuitBreakerMetrics:
+    """Metrics for circuit breaker behavior."""
+
+    total_calls: int = 0
+    total_failures: int = 0
+    total_successes: int = 0
+    current_failures: int = 0
+    last_failure_time: float | None = None
+    last_success_time: float | None = None
+    state_changes: int = 0
+
+
+class EnhancedCircuitBreaker:
+    """Enhanced circuit breaker with half-open recovery and optional persistence."""
+
+    def __init__(
+        self,
+        max_failures: int = 5,
+        reset_timeout: int = 300,
+        half_open_timeout: int = 60,
+        db: Database | None = None,
+    ) -> None:
+        self.max_failures = max_failures
+        self.reset_timeout = reset_timeout
+        self.half_open_timeout = half_open_timeout  # Timeout for stuck HALF_OPEN state
+        self.db = db
+        self._lock = threading.RLock()
+        self._states: dict[str, CircuitState] = {}
+        self._metrics: dict[str, CircuitBreakerMetrics] = {}
+        self._half_open_used: dict[str, int] = {}
+        self._half_open_start: dict[str, float] = {}  # Track when HALF_OPEN started
+
+        # DRY: Check persistence capability once at init
+        self._persistence_enabled = (
+            self.db is not None and hasattr(self.db, "transaction")
+        )
+
+        if self._persistence_enabled:
+            self._ensure_table()
+            self._load_state()
+
+    def _ensure_table(self) -> None:
+        """Create persistence table if needed."""
+        if not self._persistence_enabled:
+            return
+        with self.db.transaction() as conn:  # type: ignore[union-attr]
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                    key TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    success_count INTEGER NOT NULL DEFAULT 0,
+                    last_failure REAL,
+                    last_success REAL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+
+    def _load_state(self) -> None:
+        """Load persisted state into memory."""
+        if not self._persistence_enabled:
+            return
+        try:
+            with self.db.transaction() as conn:  # type: ignore[union-attr]
+                rows = conn.execute(
+                    "SELECT key, state, failure_count, success_count, last_failure, last_success "
+                    "FROM circuit_breaker_state"
+                ).fetchall()
+        except Exception as e:
+            logger.warning(f"Failed to load circuit breaker state from DB: {e}")
+            return
+
+        with self._lock:
+            for row in rows:
+                try:
+                    key = row["key"]
+                    state_value = row["state"]
+                    state = CircuitState(state_value)
+                    failure_count = int(row["failure_count"] or 0)
+                    success_count = int(row["success_count"] or 0)
+                    last_failure = row["last_failure"]
+                    last_success = row["last_success"]
+                except Exception as e:
+                    logger.debug(f"Skipping malformed circuit breaker row: {e}")
+                    continue
+
+                metrics = CircuitBreakerMetrics(
+                    total_calls=failure_count + success_count,
+                    total_failures=failure_count,
+                    total_successes=success_count,
+                    current_failures=failure_count,
+                    last_failure_time=last_failure,
+                    last_success_time=last_success,
+                    state_changes=0,
+                )
+                self._states[key] = state
+                self._metrics[key] = metrics
+                if state == CircuitState.HALF_OPEN:
+                    self._half_open_used[key] = 0
+                    # Assume HALF_OPEN started at load time (best effort for persistence)
+                    self._half_open_start[key] = time.time()
+
+    def _persist_state(self, key: str) -> None:
+        """Persist state to SQLite if available."""
+        if not self._persistence_enabled:
+            return
+        metrics = self._metrics.get(key)
+        state = self._states.get(key, CircuitState.CLOSED)
+        if metrics is None:
+            # Key was reset/deleted - remove from DB
+            try:
+                with self.db.transaction() as conn:  # type: ignore[union-attr]
+                    conn.execute(
+                        "DELETE FROM circuit_breaker_state WHERE key = ?",
+                        (key,),
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to delete circuit breaker state for key '{key}': {e}")
+            return
+        try:
+            with self.db.transaction() as conn:  # type: ignore[union-attr]
+                conn.execute(
+                    """
+                    INSERT INTO circuit_breaker_state
+                        (key, state, failure_count, success_count, last_failure, last_success, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        state=excluded.state,
+                        failure_count=excluded.failure_count,
+                        success_count=excluded.success_count,
+                        last_failure=excluded.last_failure,
+                        last_success=excluded.last_success,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        key,
+                        state.value,
+                        metrics.current_failures,
+                        metrics.total_successes,
+                        metrics.last_failure_time,
+                        metrics.last_success_time,
+                        time.time(),
+                    ),
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist circuit breaker state for key '{key}': {e}")
+            return
+
+    def get_state(self, key: str) -> CircuitState:
+        """Return state, transitioning OPEN->HALF_OPEN after timeout."""
+        with self._lock:
+            state = self._states.get(key, CircuitState.CLOSED)
+            metrics = self._metrics.get(key)
+            now = time.time()
+
+            if state == CircuitState.OPEN and metrics and metrics.last_failure_time:
+                if now - metrics.last_failure_time >= self.reset_timeout:
+                    self._states[key] = CircuitState.HALF_OPEN
+                    self._half_open_used[key] = 0
+                    self._half_open_start[key] = now  # Track when HALF_OPEN started
+                    metrics.state_changes += 1
+                    self._persist_state(key)
+                    return CircuitState.HALF_OPEN
+
+            # HALF_OPEN timeout: if probe was issued but never reported, reset probe allowance
+            if state == CircuitState.HALF_OPEN:
+                half_open_start = self._half_open_start.get(key)
+                used = self._half_open_used.get(key, 0)
+                if half_open_start and used >= 1:
+                    # Probe was issued (used >= 1) - check if it timed out
+                    if now - half_open_start >= self.half_open_timeout:
+                        # Probe never reported - allow a new probe
+                        self._half_open_used[key] = 0
+                        self._half_open_start[key] = now
+
+            return state
+
+    def can_execute(self, key: str) -> bool:
+        """Return True if execution is allowed for this key.
+
+        Thread-safe: entire check-then-act sequence is atomic via RLock.
+        """
+        with self._lock:
+            state = self.get_state(key)  # This also handles HALF_OPEN timeout
+            if state == CircuitState.CLOSED:
+                return True
+            if state == CircuitState.OPEN:
+                return False
+            # HALF_OPEN: allow one probe
+            used = self._half_open_used.get(key, 0)
+            if used >= 1:
+                return False
+            self._half_open_used[key] = used + 1
+            self._half_open_start[key] = time.time()  # Track probe start time
+            return True
+
+    def is_open(self, key: str) -> bool:
+        """Compatibility helper: True if circuit should block execution."""
+        return not self.can_execute(key)
+
+    def record_failure(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            metrics = self._metrics.setdefault(key, CircuitBreakerMetrics())
+
+            # SECURITY: Expire old failure counts based on reset_timeout.
+            # This prevents sporadic failures spread over long periods from
+            # accumulating and opening the circuit unexpectedly.
+            if metrics.last_failure_time is not None:
+                if now - metrics.last_failure_time >= self.reset_timeout:
+                    metrics.current_failures = 0
+
+            metrics.total_calls += 1
+            metrics.total_failures += 1
+            metrics.current_failures += 1
+            metrics.last_failure_time = now
+
+            state = self._states.get(key, CircuitState.CLOSED)
+            if state in (CircuitState.CLOSED, CircuitState.HALF_OPEN):
+                if metrics.current_failures >= self.max_failures or state == CircuitState.HALF_OPEN:
+                    self._states[key] = CircuitState.OPEN
+                    metrics.state_changes += 1
+            self._persist_state(key)
+
+    def record_success(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            metrics = self._metrics.setdefault(key, CircuitBreakerMetrics())
+            metrics.total_calls += 1
+            metrics.total_successes += 1
+            metrics.current_failures = 0
+            metrics.last_success_time = now
+
+            state = self._states.get(key, CircuitState.CLOSED)
+            if state == CircuitState.HALF_OPEN:
+                self._states[key] = CircuitState.CLOSED
+                metrics.state_changes += 1
+                self._half_open_used[key] = 0
+                self._half_open_start.pop(key, None)  # Clean up tracking
+            self._persist_state(key)
+
+    def reset(self, key: str) -> None:
+        """Reset breaker state and metrics for a key."""
+        with self._lock:
+            self._states.pop(key, None)
+            self._metrics.pop(key, None)
+            self._half_open_used.pop(key, None)
+            self._half_open_start.pop(key, None)  # Clean up tracking
+            self._persist_state(key)
+
+    def get_metrics(self, key: str) -> CircuitBreakerMetrics:
+        """Return metrics for a key (default if missing)."""
+        with self._lock:
+            return self._metrics.get(key, CircuitBreakerMetrics())
+
+
 class ErrorClassifier:
     """Classify errors for appropriate handling."""
 
@@ -272,8 +553,17 @@ class ExecutionEngine:
         # Create sandboxed executor for gates/tests
         self.executor = get_sandboxed_executor(self.sandbox_config)
         self.workspace = IsolatedWorkspace(self.repo_path, self.executor, self.db)
-        self.circuit_breaker = CircuitBreaker()
+        self.circuit_breaker = EnhancedCircuitBreaker(db=self.db)
         self.error_classifier = ErrorClassifier()
+
+        # Gate execution system - uses GateExecutor for caching, integrity, dependencies
+        # Enable project-specific gate configs from .supervisor/gates.yaml
+        self.gate_loader = GateLoader(self.repo_path, allow_project_gates=True)
+        self.gate_executor = GateExecutor(
+            executor=self.executor,
+            gate_loader=self.gate_loader,
+            db=self.db,
+        )
 
         # CLI clients (lazily initialized per CLI name)
         self._cli_clients: dict[str, SandboxedLLMClient] = {}
@@ -411,30 +701,87 @@ class ExecutionEngine:
                     schema = self._get_schema_for_role(role)
                     output = adapter.parse_output(result.stdout, schema)
 
-                    # Run gates IN THE WORKTREE before applying changes
-                    for gate_name in gates:
-                        passed, gate_output = self.workspace._run_gate(
-                            gate_name, ctx.worktree_path
-                        )
-                        if not passed:
-                            self.db.append_event(
-                                Event(
-                                    workflow_id=workflow_id,
-                                    event_type=EventType.GATE_FAILED,
-                                    step_id=step_id,
-                                    payload={"gate": gate_name, "output": _truncate_output(gate_output, 1000)},
-                                )
-                            )
-                            raise GateFailedError(gate_name, gate_output)
+                    # Run gates IN THE WORKTREE using GateExecutor
+                    # GateExecutor handles: dependency order, caching, integrity, event logging
+                    # Enable project-specific gate configs from .supervisor/gates.yaml
+                    worktree_gate_loader = GateLoader(ctx.worktree_path, allow_project_gates=True)
+                    worktree_gate_executor = GateExecutor(
+                        executor=self.executor,
+                        gate_loader=worktree_gate_loader,
+                        db=self.db,
+                    )
 
-                        self.db.append_event(
-                            Event(
-                                workflow_id=workflow_id,
-                                event_type=EventType.GATE_PASSED,
-                                step_id=step_id,
-                                payload={"gate": gate_name},
+                    # Resolve all gates (including dependencies) upfront for on_fail logic
+                    resolved_gates = worktree_gate_loader.resolve_execution_order(gates)
+
+                    # Build on_fail_overrides for ALL gates (including dependencies)
+                    effective_overrides: dict[str, GateFailAction] = {}
+                    for gate_name in resolved_gates:
+                        if gate_name in role.on_fail_overrides:
+                            effective_overrides[gate_name] = role.on_fail_overrides[gate_name]
+                        else:
+                            # Use gate's severity as default action
+                            try:
+                                gate_config = worktree_gate_loader.get_gate(gate_name)
+                                if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
+                                    effective_overrides[gate_name] = GateFailAction.WARN
+                                else:
+                                    effective_overrides[gate_name] = GateFailAction.BLOCK
+                            except GateNotFoundError:
+                                # Gate not defined - default to BLOCK
+                                effective_overrides[gate_name] = GateFailAction.BLOCK
+
+                    # Propagate optional (WARN) behavior from parent gates to dependencies.
+                    # If a gate is optional (required=false or on_fail=warn), its dependencies
+                    # should also be treated as optional so they don't block unexpectedly.
+                    deps_cache: dict[str, set[str]] = {}
+
+                    def collect_dependencies(gate_name: str) -> set[str]:
+                        """Recursively collect all dependencies of a gate (memoized)."""
+                        if gate_name in deps_cache:
+                            return deps_cache[gate_name]
+
+                        deps: set[str] = set()
+                        try:
+                            gate_config = worktree_gate_loader.get_gate(gate_name)
+                            for dep in gate_config.depends_on:
+                                if dep not in deps:
+                                    deps.add(dep)
+                                    deps.update(collect_dependencies(dep))
+                        except GateNotFoundError:
+                            pass
+
+                        deps_cache[gate_name] = deps
+                        return deps
+
+                    for gate_name in gates:
+                        if effective_overrides.get(gate_name) == GateFailAction.WARN:
+                            # This gate is optional - propagate to all its dependencies
+                            for dep in collect_dependencies(gate_name):
+                                if effective_overrides.get(dep) == GateFailAction.BLOCK:
+                                    effective_overrides[dep] = GateFailAction.WARN
+
+                    gate_results = worktree_gate_executor.run_gates(
+                        gate_names=gates,
+                        worktree_path=ctx.worktree_path,
+                        workflow_id=workflow_id,
+                        step_id=step_id,
+                        on_fail_overrides=effective_overrides,
+                    )
+
+                    # Check for blocking failures (GateExecutor already logged events)
+                    for gate_result in gate_results:
+                        if gate_result.status == GateStatus.FAILED:
+                            # All gates (including dependencies) resolved upfront
+                            on_fail = effective_overrides.get(
+                                gate_result.gate_name, GateFailAction.BLOCK
                             )
-                        )
+
+                            if on_fail == GateFailAction.WARN:
+                                # Already logged by GateExecutor, continue
+                                continue
+                            # BLOCK or RETRY_WITH_FEEDBACK: raise exception
+                            raise GateFailedError(gate_result.gate_name, gate_result.output)
 
                     # ONLY after gates pass: apply changes to main tree
                     # Use file lock to prevent race conditions with parallel execution
@@ -507,18 +854,47 @@ class ExecutionEngine:
                 self.circuit_breaker.reset(circuit_key)
                 return output
 
-            except GateFailedError:
-                # Gate failures are not retried - they indicate the work is wrong
-                self.db.append_event(
-                    Event(
-                        workflow_id=workflow_id,
-                        event_type=EventType.STEP_FAILED,
-                        step_id=step_id,
-                        role=role_name,
-                        payload={"error": "Gate verification failed"},
+            except GateFailedError as e:
+                # WARN gates are handled inline before raising GateFailedError.
+                # This exception handler only handles BLOCK and RETRY_WITH_FEEDBACK actions.
+                on_fail_action = role.on_fail_overrides.get(e.gate_name, GateFailAction.BLOCK)
+
+                if on_fail_action == GateFailAction.RETRY_WITH_FEEDBACK:
+                    # Generate structured feedback and continue retry loop
+                    gate_result = GateResult(
+                        gate_name=e.gate_name,
+                        status=GateStatus.FAILED,
+                        output=e.output,
+                        duration_seconds=0.0,  # Not tracked at this level
                     )
-                )
-                raise
+                    feedback_gen = StructuredFeedbackGenerator()
+                    feedback = feedback_gen.generate(
+                        gate_result, context=task_description
+                    )
+                    last_error = e
+                    self.circuit_breaker.record_failure(circuit_key)
+
+                    if attempt < retry_policy.max_attempts - 1:
+                        time.sleep(retry_policy.get_delay(attempt))
+                        continue  # Explicitly continue to next attempt
+                    # On last attempt, fall through to retry exhausted logic
+
+                else:
+                    # BLOCK (or unexpected WARN - which shouldn't reach here):
+                    # Gate failures block execution
+                    self.db.append_event(
+                        Event(
+                            workflow_id=workflow_id,
+                            event_type=EventType.STEP_FAILED,
+                            step_id=step_id,
+                            role=role_name,
+                            payload={
+                                "error": f"Gate '{e.gate_name}' failed (blocking)",
+                                "gate": e.gate_name,
+                            },
+                        )
+                    )
+                    raise
 
             except ApplyError as e:
                 # CRITICAL: Apply errors are FATAL - do NOT retry

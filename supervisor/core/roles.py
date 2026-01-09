@@ -15,6 +15,8 @@ from typing import Any
 import jsonschema
 import yaml
 
+from supervisor.core.gates import GateFailAction
+
 # Valid role name pattern: alphanumeric, underscores, hyphens only
 # Prevents path traversal attacks via names like "../../etc/passwd"
 _VALID_ROLE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]*$")
@@ -39,6 +41,18 @@ class RoleCycleError(Exception):
 
 
 @dataclass
+class RoleGateConfig:
+    """Gate configuration within a role.
+
+    Supports both legacy format (list of strings) and new format (list of dicts).
+    """
+
+    name: str
+    on_fail: GateFailAction | None = None
+    required: bool = True
+
+
+@dataclass
 class RoleConfig:
     """Configuration for a worker role."""
 
@@ -48,7 +62,7 @@ class RoleConfig:
     flags: list[str]
     system_prompt: str
     context: dict[str, Any]
-    gates: list[str]
+    gates: list[RoleGateConfig]
     config: dict[str, Any]
     extends: str | None = None
     base_role: str | None = None  # Root of extends chain (planner/implementer/reviewer)
@@ -72,6 +86,26 @@ class RoleConfig:
     @property
     def timeout(self) -> int:
         return self.config.get("timeout", 300)
+
+    @property
+    def gate_names(self) -> list[str]:
+        return [gate.name for gate in self.gates]
+
+    @property
+    def on_fail_overrides(self) -> dict[str, GateFailAction]:
+        """Get on_fail overrides for gates.
+
+        Gates with explicit on_fail get that value.
+        Gates with required=false (and no explicit on_fail) get WARN.
+        """
+        overrides: dict[str, GateFailAction] = {}
+        for gate in self.gates:
+            if gate.on_fail is not None:
+                overrides[gate.name] = gate.on_fail
+            elif not gate.required:
+                # required=false means gate failures should not block execution
+                overrides[gate.name] = GateFailAction.WARN
+        return overrides
 
 
 @dataclass
@@ -170,7 +204,8 @@ class RoleLoader:
         # This allows overlay roles to omit inherited fields like system_prompt
         self._validate_merged_config(config)
 
-        return self._dict_to_role(config, base_role=base_role)
+        parsed_config = self._parse_role_config(config)
+        return self._dict_to_role(parsed_config, base_role=base_role)
 
     def _find_role_file(self, name: str) -> Path:
         """Find role file in search paths."""
@@ -233,6 +268,58 @@ class RoleLoader:
                 f"Invalid role schema definition (bug in role_schema.json): {e.message}"
             )
 
+    def _parse_gates(self, gates_config: list) -> list[RoleGateConfig]:
+        """Parse gates from role config, supporting string and dict formats."""
+        parsed: list[RoleGateConfig] = []
+        for idx, item in enumerate(gates_config):
+            if isinstance(item, str):
+                if not item:
+                    raise RoleValidationError("Gate name cannot be empty")
+                parsed.append(RoleGateConfig(name=item))
+                continue
+
+            if isinstance(item, dict):
+                if "name" not in item or not isinstance(item["name"], str):
+                    raise RoleValidationError(
+                        f"Gate entry at index {idx} must include string 'name'"
+                    )
+                name = item["name"]
+                required = item.get("required", True)
+                if not isinstance(required, bool):
+                    raise RoleValidationError(
+                        f"Gate '{name}' field 'required' must be boolean"
+                    )
+                on_fail_value = item.get("on_fail")
+                on_fail: GateFailAction | None = None
+                if on_fail_value is not None:
+                    if not isinstance(on_fail_value, str):
+                        raise RoleValidationError(
+                            f"Gate '{name}' field 'on_fail' must be string if set"
+                        )
+                    try:
+                        on_fail = GateFailAction(on_fail_value.lower())
+                    except ValueError as exc:
+                        valid = ", ".join(a.value for a in GateFailAction)
+                        raise RoleValidationError(
+                            f"Gate '{name}' field 'on_fail' must be one of: {valid}"
+                        ) from exc
+                parsed.append(
+                    RoleGateConfig(name=name, on_fail=on_fail, required=required)
+                )
+                continue
+
+            raise RoleValidationError(
+                f"Gate entry at index {idx} must be string or dict"
+            )
+
+        return parsed
+
+    def _parse_role_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Normalize role config for runtime use."""
+        parsed = config.copy()
+        parsed["gates"] = self._parse_gates(parsed.get("gates", []))
+        return parsed
+
     def _merge_configs(self, parent: RoleConfig, child: dict[str, Any]) -> dict[str, Any]:
         """Merge child config into parent with proper semantics.
 
@@ -249,7 +336,7 @@ class RoleLoader:
             "flags": parent.flags.copy(),
             "system_prompt": parent.system_prompt,
             "context": parent.context.copy(),
-            "gates": parent.gates.copy(),
+            "gates": self._serialize_gates(parent.gates),
             "config": parent.config.copy(),
         }
 
@@ -291,6 +378,19 @@ class RoleLoader:
             else:
                 result[key] = value
         return result
+
+    def _serialize_gates(self, gates: list[RoleGateConfig]) -> list[Any]:
+        """Convert RoleGateConfig list back to config-friendly list."""
+        serialized: list[Any] = []
+        for gate in gates:
+            if gate.on_fail is None and gate.required:
+                serialized.append(gate.name)
+            else:
+                data: dict[str, Any] = {"name": gate.name, "required": gate.required}
+                if gate.on_fail is not None:
+                    data["on_fail"] = gate.on_fail.value
+                serialized.append(data)
+        return serialized
 
     def _dict_to_role(self, config: dict[str, Any], base_role: str | None = None) -> RoleConfig:
         """Convert dict to RoleConfig with base_role for template/schema resolution."""

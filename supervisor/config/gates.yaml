@@ -1,0 +1,40 @@
+# supervisor/config/gates.yaml
+# Default gate configurations - built-in gates for common verification tasks
+# These can be overridden by user-global (~/.supervisor/gates.yaml) or
+# project-specific (.supervisor/gates.yaml) configurations.
+
+gates:
+  test:
+    description: "Run unit tests"
+    command: ["pytest", "-v", "--tb=short", "-p", "no:cacheprovider"]
+    timeout: 300
+    parallel_safe: false
+    allowed_writes: [".coverage", "htmlcov/**", ".pytest_cache/**"]
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+
+  lint:
+    description: "Run linter"
+    command: ["ruff", "check", "."]
+    timeout: 60
+    parallel_safe: true
+
+  type_check:
+    description: "Run type checker"
+    command: ["mypy", "."]
+    timeout: 120
+    depends_on: ["lint"]
+    parallel_safe: true
+
+  security:
+    description: "Security scan"
+    command: ["bandit", "-r", "."]
+    timeout: 180
+    severity: "warning"
+    parallel_safe: true
+
+  format_check:
+    description: "Check code formatting"
+    command: ["ruff", "format", "--check", "."]
+    timeout: 60
+    parallel_safe: true
