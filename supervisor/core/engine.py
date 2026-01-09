@@ -28,6 +28,7 @@ from supervisor.core.gates import (
     GateExecutor,
     GateFailAction,
     GateLoader,
+    GateNotFoundError,
     GateResult,
     GateSeverity,
     GateStatus,
@@ -394,6 +395,14 @@ class EnhancedCircuitBreaker:
         now = time.time()
         with self._lock:
             metrics = self._metrics.setdefault(key, CircuitBreakerMetrics())
+
+            # SECURITY: Expire old failure counts based on reset_timeout.
+            # This prevents sporadic failures spread over long periods from
+            # accumulating and opening the circuit unexpectedly.
+            if metrics.last_failure_time is not None:
+                if now - metrics.last_failure_time >= self.reset_timeout:
+                    metrics.current_failures = 0
+
             metrics.total_calls += 1
             metrics.total_failures += 1
             metrics.current_failures += 1
@@ -710,7 +719,8 @@ class ExecutionEngine:
                                     effective_overrides[gate_name] = GateFailAction.WARN
                                 else:
                                     effective_overrides[gate_name] = GateFailAction.BLOCK
-                            except Exception:
+                            except GateNotFoundError:
+                                # Gate not defined - default to BLOCK
                                 effective_overrides[gate_name] = GateFailAction.BLOCK
 
                     gate_results = worktree_gate_executor.run_gates(
@@ -803,15 +813,10 @@ class ExecutionEngine:
                 return output
 
             except GateFailedError as e:
-                # Check the on_fail action for this gate
-                # Note: WARN gates are now handled inline (before raising), so this
-                # exception handler mainly handles BLOCK and RETRY_WITH_FEEDBACK.
-                # Severity defaults are still respected here for consistency.
-                if e.gate_name in role.on_fail_overrides:
-                    on_fail_action = role.on_fail_overrides[e.gate_name]
-                else:
-                    # Default to BLOCK (severity would have been checked inline)
-                    on_fail_action = GateFailAction.BLOCK
+                # WARN gates are handled inline before raising GateFailedError (lines 728-730).
+                # This exception handler only handles BLOCK and RETRY_WITH_FEEDBACK actions.
+                # We use effective_overrides built earlier for consistency.
+                on_fail_action = role.on_fail_overrides.get(e.gate_name, GateFailAction.BLOCK)
 
                 if on_fail_action == GateFailAction.RETRY_WITH_FEEDBACK:
                     # Generate structured feedback and continue retry loop
@@ -833,26 +838,9 @@ class ExecutionEngine:
                         continue  # Explicitly continue to next attempt
                     # On last attempt, fall through to retry exhausted logic
 
-                elif on_fail_action == GateFailAction.WARN:
-                    # Log warning but don't fail the step
-                    self.db.append_event(
-                        Event(
-                            workflow_id=workflow_id,
-                            event_type=EventType.GATE_FAILED,
-                            step_id=step_id,
-                            payload={
-                                "gate": e.gate_name,
-                                "severity": "warning",
-                                "output": _truncate_output(e.output, 1000),
-                            },
-                        )
-                    )
-                    # WARN gates don't block execution - return the output
-                    # Note: output was parsed before GateFailedError was raised
-                    self.circuit_breaker.reset(circuit_key)
-                    return output
                 else:
-                    # BLOCK: Gate failures block execution
+                    # BLOCK (or unexpected WARN - which shouldn't reach here):
+                    # Gate failures block execution
                     self.db.append_event(
                         Event(
                             workflow_id=workflow_id,

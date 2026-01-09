@@ -172,10 +172,21 @@ class GateLoader:
         return None
 
     def _check_env_blocked_flags(self, cmd_list: list[str]) -> str | None:
-        """Check if any blocked env flags are used in the command."""
-        for arg in cmd_list:
+        """Check if any blocked env flags are used with an 'env' wrapper.
+
+        SECURITY: Only check for blocked flags (-i, -S, etc.) within env's arguments.
+        Commands like 'grep -i' or 'sed -i' are legitimate and should not be blocked.
+        """
+        # First, find if there's an env wrapper
+        env_index = self._find_env_wrapper_index(cmd_list)
+        if env_index is None:
+            return None  # No env wrapper, no need to check for env-specific flags
+
+        # Only scan arguments between env and the actual command
+        env_args = cmd_list[env_index + 1 :]
+        for arg in env_args:
             if arg == "--":
-                break
+                break  # Options end at --
             if arg in self.ENV_BLOCKED_FLAGS:
                 return arg
             for blocked in self.ENV_BLOCKED_FLAGS:
@@ -186,6 +197,11 @@ class GateLoader:
                 for char in arg[1:]:
                     if f"-{char}" in self.ENV_BLOCKED_FLAGS:
                         return f"-{char}"
+            # If this arg is not a flag and not an assignment, it's the command - stop
+            if not arg.startswith("-"):
+                is_assign, _ = self._is_env_assignment(arg)
+                if not is_assign:
+                    break
         return None
 
     def _check_env_denylist_bypass(self, cmd_list: list[str]) -> str | None:
@@ -233,15 +249,23 @@ class GateLoader:
         return None
 
     def _scan_env_assignments(self, args: list[str]) -> str | None:
-        """Scan arguments for denylisted environment variable assignments."""
+        """Scan arguments for denylisted environment variable assignments.
+
+        SECURITY: env syntax is `env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]`
+        NAME=VALUE assignments can appear AFTER `--`, so we must NOT stop scanning at `--`.
+        The `--` only ends option parsing, not the assignment section.
+        """
         skip_next = False
+        past_options = False  # Track whether we've passed the options section
         for arg in args:
             if skip_next:
                 skip_next = False
                 continue
             if arg == "--":
-                break
-            if arg.startswith("-"):
+                # `--` ends options, but assignments follow - continue scanning
+                past_options = True
+                continue
+            if not past_options and arg.startswith("-"):
                 if arg in self.ENV_FLAGS_WITH_ARGS or any(
                     arg.startswith(f + "=") for f in self.ENV_FLAGS_WITH_ARGS
                 ):
@@ -256,6 +280,7 @@ class GateLoader:
                     if key.upper().startswith(prefix):
                         return key
             elif not is_assign:
+                # Non-assignment, non-option = start of COMMAND, stop scanning
                 break
         return None
 

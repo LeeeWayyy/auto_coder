@@ -77,25 +77,19 @@ class StructuredFeedbackGenerator:
         return ""
 
     def _parse_pytest(self, output: str) -> list[dict[str, str]]:
-        """Parse pytest output into structured failures."""
-        issues: list[dict[str, str]] = []
+        """Parse pytest output into structured failures.
+
+        Prioritizes detailed failure sections (E lines) over summary FAILED lines
+        to avoid duplicate entries and provide more specific error context.
+        """
+        detailed_issues: list[dict[str, str]] = []
+        summary_issues: list[dict[str, str]] = []
         summary_re = re.compile(r"^FAILED\s+(?P<test>[^\s]+)\s*-?\s*(?P<msg>.*)$")
         section_re = re.compile(r"^_{3,}\s*(?P<test>.+?)\s*_{3,}$")
 
         lines = output.splitlines()
-        for line in lines:
-            m = summary_re.match(line.strip())
-            if m:
-                issues.append(
-                    {
-                        "test": m.group("test"),
-                        "message": m.group("msg").strip() or "(no message)",
-                    }
-                )
 
-        # Parse failure sections for assertion lines
-        # Keep current_test until a new section is found (don't reset after first E line)
-        # This ensures all E lines from a test failure are captured
+        # Parse detailed failure sections (E lines) - preferred source
         current_test: str | None = None
         for line in lines:
             sec = section_re.match(line.strip())
@@ -103,7 +97,7 @@ class StructuredFeedbackGenerator:
                 current_test = sec.group("test").strip()
                 continue
             if current_test and line.startswith("E   "):
-                issues.append(
+                detailed_issues.append(
                     {
                         "test": current_test,
                         "message": line[4:].strip() or "(error)",
@@ -111,6 +105,19 @@ class StructuredFeedbackGenerator:
                 )
                 # Don't reset current_test - continue collecting E lines for this test
 
+        # Parse summary FAILED lines - fallback only
+        for line in lines:
+            m = summary_re.match(line.strip())
+            if m:
+                summary_issues.append(
+                    {
+                        "test": m.group("test"),
+                        "message": m.group("msg").strip() or "(no message)",
+                    }
+                )
+
+        # Prioritize detailed issues; use summary only as fallback
+        issues = detailed_issues if detailed_issues else summary_issues
         return issues[: self.MAX_ISSUES]
 
     def _parse_ruff(self, output: str) -> list[dict[str, str]]:

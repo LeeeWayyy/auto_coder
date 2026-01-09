@@ -553,7 +553,7 @@ class GateExecutor:
                         try:
                             symlink_target = str(file_path.readlink())
                             # Hash the symlink target for change detection
-                            target_hash = hashlib.sha256(symlink_target.encode()).hexdigest()[:32]
+                            target_hash = hashlib.sha256(symlink_target.encode("utf-8")).hexdigest()[:32]
                             baseline[path] = (0, -2, target_hash)  # -2 indicates symlink
                         except OSError:
                             baseline[path] = (0, -2, None)
@@ -738,7 +738,7 @@ class GateExecutor:
 
                         # Change detection: hash the symlink target
                         symlink_target = str(file_path.readlink())
-                        cur_target_hash = hashlib.sha256(symlink_target.encode()).hexdigest()[:32]
+                        cur_target_hash = hashlib.sha256(symlink_target.encode("utf-8")).hexdigest()[:32]
 
                         # Check if symlink target changed (unless exempt untracked)
                         if pre_hash is not None and cur_target_hash != pre_hash:
