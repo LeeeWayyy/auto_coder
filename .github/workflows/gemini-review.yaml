@@ -4,6 +4,9 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+permissions:
+  pull-requests: write
+
 jobs:
   request-review:
     runs-on: ubuntu-latest
@@ -11,9 +14,9 @@ jobs:
       - name: Request Gemini Code Assist review
         uses: actions/github-script@v7
         with:
-          # Use PAT to make comment appear as from the token owner
-          # Create a PAT with 'repo' scope and add it as repository secret named 'PAT'
-          github-token: ${{ secrets.PAT }}
+          # Use PAT if available (comments appear as token owner), fallback to GITHUB_TOKEN
+          # To use PAT: create one with 'repo' scope and add as repository secret named 'PAT'
+          github-token: ${{ secrets.PAT || secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = context.payload.pull_request.number;
             const eventAction = context.payload.action;
