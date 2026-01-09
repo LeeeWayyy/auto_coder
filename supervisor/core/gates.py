@@ -24,6 +24,12 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+try:
+    from filelock import FileLock, Timeout as FileLockTimeout
+except ImportError:
+    FileLock = None  # type: ignore[misc, assignment]
+    FileLockTimeout = None  # type: ignore[misc, assignment]
+
 logger = logging.getLogger(__name__)
 
 PACKAGE_DIR = Path(__file__).parent.parent
@@ -241,7 +247,372 @@ class GateLoader:
 
         self._basic_validate(config, source_path)
 
+    # Static validation helpers (extracted for testability and reuse)
+    _GATE_NAME_PATTERN = re.compile(
+        r"^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$"
+    )
+    _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    _VALID_SEVERITIES = frozenset({"error", "warning", "info"})
+    _BOOL_FIELDS = (
+        "parallel_safe",
+        "cache",
+        "skip_on_dependency_failure",
+        "allow_shell",
+        "force_hash_large_cache_inputs",
+    )
+
+    @staticmethod
+    def _has_path_traversal(pattern: str) -> bool:
+        """Check if a pattern contains path traversal components."""
+        normalized = pattern.replace("\\", "/")
+        return ".." in normalized.split("/")
+
+    @staticmethod
+    def _get_basename(arg: str) -> str:
+        """Extract lowercase basename from a command argument."""
+        basename = arg.replace("\\", "/").split("/")[-1].lower()
+        if basename.endswith(".exe"):
+            basename = basename[:-4]
+        return basename
+
+    def _is_shell_binary(self, executable: str) -> bool:
+        """Check if an executable is a shell binary."""
+        return self._get_basename(executable) in self.SHELL_BINARY_NAMES
+
+    @staticmethod
+    def _is_env_assignment(arg: str) -> tuple[bool, str | None]:
+        """Check if an argument is an environment variable assignment."""
+        if "=" not in arg or arg.startswith("=") or arg.startswith("-"):
+            return (False, None)
+        key = arg.split("=", 1)[0]
+        if not key or not (key[0].isalpha() or key[0] == "_"):
+            return (False, None)
+        if all(c.isalnum() or c == "_" for c in key):
+            return (True, key)
+        return (False, None)
+
+    def _detect_shell_invocation(self, cmd_list: list[str]) -> str | None:
+        """Detect if a command invokes a shell binary."""
+        if not cmd_list:
+            return None
+
+        found_double_dash = False
+        for arg in cmd_list:
+            if arg == "--":
+                found_double_dash = True
+                continue
+            if found_double_dash:
+                if self._is_shell_binary(arg):
+                    return arg
+                break
+            if arg.startswith("-"):
+                continue
+            is_assign, _ = self._is_env_assignment(arg)
+            if is_assign:
+                continue
+            if self._is_shell_binary(arg):
+                return arg
+            if self._get_basename(arg) in self.COMMAND_WRAPPERS:
+                continue
+            break
+        return None
+
+    def _check_env_blocked_flags(self, cmd_list: list[str]) -> str | None:
+        """Check if any blocked env flags are used in the command."""
+        for arg in cmd_list:
+            if arg == "--":
+                break
+            if arg in self.ENV_BLOCKED_FLAGS:
+                return arg
+            for blocked in self.ENV_BLOCKED_FLAGS:
+                if arg.startswith(blocked + "="):
+                    return blocked
+            # Check for combined short flags like -iS or -Si
+            if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+                for char in arg[1:]:
+                    if f"-{char}" in self.ENV_BLOCKED_FLAGS:
+                        return f"-{char}"
+        return None
+
+    def _check_env_denylist_bypass(self, cmd_list: list[str]) -> str | None:
+        """Check if command attempts to bypass env denylist via wrappers."""
+        if not cmd_list or len(cmd_list) < 2:
+            return None
+
+        env_index = self._find_env_wrapper_index(cmd_list)
+        if env_index is None:
+            return None
+
+        return self._scan_env_assignments(cmd_list[env_index + 1 :])
+
+    def _find_env_wrapper_index(self, cmd_list: list[str]) -> int | None:
+        """Find the index of an 'env' wrapper in the command."""
+        found_double_dash = False
+        skip_next = False
+        for idx, arg in enumerate(cmd_list):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--":
+                found_double_dash = True
+                continue
+            if found_double_dash:
+                if self._get_basename(arg) == "env":
+                    return idx
+                break
+            if arg.startswith("-"):
+                if arg in self.ENV_FLAGS_WITH_ARGS or any(
+                    arg.startswith(f + "=") for f in self.ENV_FLAGS_WITH_ARGS
+                ):
+                    if "=" not in arg:
+                        skip_next = True
+                continue
+            is_assign, _ = self._is_env_assignment(arg)
+            if is_assign:
+                continue
+            basename = self._get_basename(arg)
+            if basename == "env":
+                return idx
+            if basename in self.COMMAND_WRAPPERS:
+                continue
+            break
+        return None
+
+    def _scan_env_assignments(self, args: list[str]) -> str | None:
+        """Scan arguments for denylisted environment variable assignments."""
+        skip_next = False
+        for arg in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--":
+                break
+            if arg.startswith("-"):
+                if arg in self.ENV_FLAGS_WITH_ARGS or any(
+                    arg.startswith(f + "=") for f in self.ENV_FLAGS_WITH_ARGS
+                ):
+                    if "=" not in arg:
+                        skip_next = True
+                continue
+            is_assign, key = self._is_env_assignment(arg)
+            if is_assign and key:
+                if key.upper() in self.ENV_DENYLIST:
+                    return key
+                for prefix in self.ENV_DENYLIST_PREFIXES:
+                    if key.upper().startswith(prefix):
+                        return key
+            elif not is_assign:
+                break
+        return None
+
+    def _validate_pattern_list(
+        self, patterns: list, field_name: str, gate_name: str, source_path: Path
+    ) -> None:
+        """Validate a list of path patterns (allowed_writes or cache_inputs)."""
+        if not isinstance(patterns, list):
+            raise GateConfigError(
+                f"Gate '{gate_name}' {field_name} must be list in {source_path}"
+            )
+        for i, pattern in enumerate(patterns):
+            if not isinstance(pattern, str):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' {field_name}[{i}] must be string in {source_path}"
+                )
+            if not pattern.strip():
+                raise GateConfigError(
+                    f"Gate '{gate_name}' {field_name}[{i}] cannot be empty in {source_path}"
+                )
+            if pattern.startswith("/"):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' {field_name}[{i}]: absolute paths not allowed "
+                    f"(got '{pattern}') in {source_path}"
+                )
+            if len(pattern) >= 2 and pattern[1] == ":" and pattern[0].isalpha():
+                raise GateConfigError(
+                    f"Gate '{gate_name}' {field_name}[{i}]: Windows absolute paths "
+                    f"not allowed (got '{pattern}') in {source_path}"
+                )
+            if self._has_path_traversal(pattern):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' {field_name}[{i}]: path traversal not allowed "
+                    f"(got '{pattern}') in {source_path}"
+                )
+            if "\\" in pattern:
+                raise GateConfigError(
+                    f"Gate '{gate_name}' {field_name}[{i}]: backslash not allowed "
+                    f"(got '{pattern}') in {source_path}. Use forward slashes."
+                )
+
+    def _validate_command(
+        self, cmd: object, gate_name: str, gate_config: dict, source_path: Path
+    ) -> None:
+        """Validate gate command configuration."""
+        if isinstance(cmd, str):
+            raise GateConfigError(
+                f"Gate '{gate_name}' command must be a list, not string "
+                f"(got '{cmd[:50]}...') in {source_path}. "
+                "SECURITY: String commands enable shell injection. "
+                'Use: command: ["pytest", "-v"] instead of command: "pytest -v"'
+            )
+        if not isinstance(cmd, list):
+            raise GateConfigError(
+                f"Gate '{gate_name}' command must be a list in {source_path}"
+            )
+        if len(cmd) == 0:
+            raise GateConfigError(
+                f"Gate '{gate_name}' command cannot be empty in {source_path}"
+            )
+        if not all(isinstance(c, str) for c in cmd):
+            raise GateConfigError(
+                f"Gate '{gate_name}' command items must all be strings in {source_path}"
+            )
+
+        # Security checks
+        shell_binary = self._detect_shell_invocation(cmd)
+        if shell_binary and not gate_config.get("allow_shell", False):
+            raise GateConfigError(
+                f"Gate '{gate_name}' uses shell binary '{shell_binary}' but "
+                "allow_shell is not set. SECURITY: Shell commands bypass "
+                "injection protection. If needed, set allow_shell: true."
+            )
+
+        blocked_flag = self._check_env_blocked_flags(cmd)
+        if blocked_flag:
+            raise GateConfigError(
+                f"Gate '{gate_name}' uses blocked env flag '{blocked_flag}'. "
+                "SECURITY: -S/--split-string and -i/--ignore-environment are blocked "
+                "because they can bypass environment variable security checks."
+            )
+
+        denylisted_env = self._check_env_denylist_bypass(cmd)
+        if denylisted_env:
+            raise GateConfigError(
+                f"Gate '{gate_name}' attempts to set denylisted environment variable "
+                f"'{denylisted_env}' via env wrapper. SECURITY: Denylisted variables "
+                "cannot be overridden, including via wrappers."
+            )
+
+    def _validate_env(
+        self, env: object, gate_name: str, source_path: Path
+    ) -> None:
+        """Validate gate environment configuration."""
+        if not isinstance(env, dict):
+            raise GateConfigError(
+                f"Gate '{gate_name}' env must be dict in {source_path}"
+            )
+        for k, v in env.items():
+            if not isinstance(k, str):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' env key must be string, got {type(k).__name__} "
+                    f"in {source_path}"
+                )
+            if not isinstance(v, str):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' env['{k}'] value must be string, "
+                    f"got {type(v).__name__} in {source_path}"
+                )
+            if not self._ENV_NAME_PATTERN.match(k):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' env key '{k}' is invalid. "
+                    f"Must be a valid POSIX identifier in {source_path}"
+                )
+            if "\0" in k or "=" in k:
+                raise GateConfigError(
+                    f"Gate '{gate_name}' env key '{k}' contains invalid characters "
+                    f"in {source_path}"
+                )
+
+    def _validate_single_gate(
+        self, gate_name: str, gate_config: dict, source_path: Path
+    ) -> None:
+        """Validate a single gate configuration."""
+        if not isinstance(gate_name, str):
+            raise GateConfigError(f"Invalid gate name in {source_path}: {gate_name}")
+
+        if not self._GATE_NAME_PATTERN.match(gate_name):
+            raise GateConfigError(
+                f"Invalid gate name '{gate_name}' in {source_path}. "
+                "Gate names must match pattern "
+                "[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9] "
+                "(no leading/trailing dots, no path separators)"
+            )
+
+        if not isinstance(gate_config, dict):
+            raise GateConfigError(
+                f"Invalid config for gate '{gate_name}' in {source_path}"
+            )
+
+        if "command" not in gate_config:
+            raise GateConfigError(
+                f"Gate '{gate_name}' missing required 'command' in {source_path}"
+            )
+
+        self._validate_command(
+            gate_config["command"], gate_name, gate_config, source_path
+        )
+
+        if "timeout" in gate_config:
+            timeout = gate_config["timeout"]
+            if not isinstance(timeout, int):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' timeout must be int in {source_path}"
+                )
+            if timeout <= 0:
+                raise GateConfigError(
+                    f"Gate '{gate_name}' timeout must be > 0 in {source_path}"
+                )
+            if timeout > 3600:
+                raise GateConfigError(
+                    f"Gate '{gate_name}' timeout must be <= 3600 (1 hour) in {source_path}"
+                )
+
+        if "depends_on" in gate_config:
+            deps = gate_config["depends_on"]
+            if not isinstance(deps, list):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' depends_on must be list in {source_path}"
+                )
+            if not all(isinstance(d, str) for d in deps):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' depends_on items must all be strings in {source_path}"
+                )
+
+        if "severity" in gate_config:
+            sev = gate_config["severity"]
+            if not isinstance(sev, str) or sev.lower() not in self._VALID_SEVERITIES:
+                raise GateConfigError(
+                    f"Gate '{gate_name}' severity must be one of {self._VALID_SEVERITIES} "
+                    f"in {source_path}"
+                )
+
+        for field in self._BOOL_FIELDS:
+            if field in gate_config and not isinstance(gate_config[field], bool):
+                raise GateConfigError(
+                    f"Gate '{gate_name}' {field} must be boolean in {source_path}"
+                )
+
+        if "working_dir" in gate_config and not isinstance(
+            gate_config["working_dir"], str
+        ):
+            raise GateConfigError(
+                f"Gate '{gate_name}' working_dir must be string in {source_path}"
+            )
+
+        if "env" in gate_config:
+            self._validate_env(gate_config["env"], gate_name, source_path)
+
+        if "allowed_writes" in gate_config:
+            self._validate_pattern_list(
+                gate_config["allowed_writes"], "allowed_writes", gate_name, source_path
+            )
+
+        if "cache_inputs" in gate_config:
+            self._validate_pattern_list(
+                gate_config["cache_inputs"], "cache_inputs", gate_name, source_path
+            )
+
     def _basic_validate(self, config: dict, source_path: Path) -> None:
+        """Validate gate configuration structure and security constraints."""
         if not isinstance(config, dict):
             raise GateConfigError(
                 f"Invalid config in {source_path}: expected dict, got {type(config)}"
@@ -253,385 +624,8 @@ class GateLoader:
         if not isinstance(config["gates"], dict):
             raise GateConfigError(f"Invalid 'gates' in {source_path}: expected dict")
 
-        # Use class-level security constants (enables testing and reuse)
-        SHELL_BINARY_NAMES = self.SHELL_BINARY_NAMES
-        COMMAND_WRAPPERS = self.COMMAND_WRAPPERS
-        ENV_FLAGS_WITH_ARGS = self.ENV_FLAGS_WITH_ARGS
-        ENV_BLOCKED_FLAGS = self.ENV_BLOCKED_FLAGS
-
-        valid_severities = {"error", "warning", "info"}
-        gate_name_pattern = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
-
-        def has_path_traversal_component(pattern: str) -> bool:
-            normalized = pattern.replace("\\", "/")
-            components = normalized.split("/")
-            return ".." in components
-
-        def get_basename(arg: str) -> str:
-            basename = arg.replace("\\", "/").split("/")[-1].lower()
-            if basename.endswith(".exe"):
-                basename = basename[:-4]
-            return basename
-
-        def is_shell_binary(executable: str) -> bool:
-            return get_basename(executable) in SHELL_BINARY_NAMES
-
-        def is_env_assignment(arg: str) -> tuple[bool, str | None]:
-            if "=" not in arg or arg.startswith("=") or arg.startswith("-"):
-                return (False, None)
-            key = arg.split("=", 1)[0]
-            if not key:
-                return (False, None)
-            if not (key[0].isalpha() or key[0] == "_"):
-                return (False, None)
-            if all(c.isalnum() or c == "_" for c in key):
-                return (True, key)
-            return (False, None)
-
-        def detect_shell_invocation(cmd_list: list[str]) -> str | None:
-            if not cmd_list:
-                return None
-
-            found_double_dash = False
-            for arg in cmd_list:
-                if arg == "--":
-                    found_double_dash = True
-                    continue
-                if found_double_dash:
-                    if is_shell_binary(arg):
-                        return arg
-                    break
-                if arg.startswith("-"):
-                    continue
-                is_assign, _ = is_env_assignment(arg)
-                if is_assign:
-                    continue
-                if is_shell_binary(arg):
-                    return arg
-                if get_basename(arg) in COMMAND_WRAPPERS:
-                    continue
-                break
-            return None
-
-        def check_env_blocked_flags(cmd_list: list[str]) -> str | None:
-            """Check if any blocked env flags are used in the command."""
-            for arg in cmd_list:
-                if arg == "--":
-                    break
-                # Check for exact match or --flag=value form
-                if arg in ENV_BLOCKED_FLAGS:
-                    return arg
-                for blocked in ENV_BLOCKED_FLAGS:
-                    if arg.startswith(blocked + "="):
-                        return blocked
-                # Check for combined short flags like -iS or -Si
-                if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
-                    for char in arg[1:]:
-                        if f"-{char}" in ENV_BLOCKED_FLAGS:
-                            return f"-{char}"
-            return None
-
-        def check_env_denylist_bypass(cmd_list: list[str]) -> str | None:
-            if not cmd_list or len(cmd_list) < 2:
-                return None
-
-            env_index = None
-            found_double_dash = False
-            skip_next = False
-            for idx, arg in enumerate(cmd_list):
-                if skip_next:
-                    skip_next = False
-                    continue
-                if arg == "--":
-                    found_double_dash = True
-                    continue
-                if found_double_dash:
-                    if get_basename(arg) == "env":
-                        env_index = idx
-                    break
-                if arg.startswith("-"):
-                    # SECURITY: Handle flags that take arguments (e.g., -C /path)
-                    # Skip the next argument to prevent bypass
-                    if arg in ENV_FLAGS_WITH_ARGS or any(
-                        arg.startswith(f + "=") for f in ENV_FLAGS_WITH_ARGS
-                    ):
-                        # -C=path or --chdir=path: argument is attached, don't skip next
-                        if "=" not in arg:
-                            skip_next = True
-                    continue
-                is_assign, _ = is_env_assignment(arg)
-                if is_assign:
-                    continue
-                basename = get_basename(arg)
-                if basename == "env":
-                    env_index = idx
-                    break
-                if basename in COMMAND_WRAPPERS:
-                    continue
-                break
-
-            if env_index is None:
-                return None
-
-            # Now scan arguments after env for denylisted assignments
-            skip_next = False
-            for arg in cmd_list[env_index + 1 :]:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if arg == "--":
-                    break
-                if arg.startswith("-"):
-                    # SECURITY: Handle env flags with arguments after env itself
-                    if arg in ENV_FLAGS_WITH_ARGS or any(
-                        arg.startswith(f + "=") for f in ENV_FLAGS_WITH_ARGS
-                    ):
-                        if "=" not in arg:
-                            skip_next = True
-                    continue
-                is_assign, key = is_env_assignment(arg)
-                if is_assign and key:
-                    if key.upper() in self.ENV_DENYLIST:
-                        return key
-                    for prefix in self.ENV_DENYLIST_PREFIXES:
-                        if key.upper().startswith(prefix):
-                            return key
-                elif not is_assign:
-                    break
-            return None
-
         for gate_name, gate_config in config["gates"].items():
-            if not isinstance(gate_name, str):
-                raise GateConfigError(f"Invalid gate name in {source_path}: {gate_name}")
-
-            if not gate_name_pattern.match(gate_name):
-                raise GateConfigError(
-                    f"Invalid gate name '{gate_name}' in {source_path}. "
-                    "Gate names must match pattern "
-                    "[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9] "
-                    "(no leading/trailing dots, no path separators)"
-                )
-
-            if not isinstance(gate_config, dict):
-                raise GateConfigError(
-                    f"Invalid config for gate '{gate_name}' in {source_path}"
-                )
-
-            if "command" not in gate_config:
-                raise GateConfigError(
-                    f"Gate '{gate_name}' missing required 'command' in {source_path}"
-                )
-
-            cmd = gate_config["command"]
-            if isinstance(cmd, str):
-                raise GateConfigError(
-                    f"Gate '{gate_name}' command must be a list, not string "
-                    f"(got '{cmd[:50]}...') in {source_path}. "
-                    "SECURITY: String commands enable shell injection. "
-                    'Use: command: ["pytest", "-v"] instead of command: "pytest -v"'
-                )
-            if not isinstance(cmd, list):
-                raise GateConfigError(
-                    f"Gate '{gate_name}' command must be a list in {source_path}"
-                )
-            if len(cmd) == 0:
-                raise GateConfigError(
-                    f"Gate '{gate_name}' command cannot be empty in {source_path}"
-                )
-            if not all(isinstance(c, str) for c in cmd):
-                raise GateConfigError(
-                    f"Gate '{gate_name}' command items must all be strings in {source_path}"
-                )
-
-            shell_binary = detect_shell_invocation(cmd)
-            if shell_binary:
-                allow_shell = gate_config.get("allow_shell", False)
-                if not allow_shell:
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' uses shell binary '{shell_binary}' but "
-                        "allow_shell is not set. SECURITY: Shell commands bypass "
-                        "injection protection. If needed, set allow_shell: true."
-                    )
-
-            # SECURITY: Check for blocked env flags that allow bypassing security checks
-            blocked_flag = check_env_blocked_flags(cmd)
-            if blocked_flag:
-                raise GateConfigError(
-                    f"Gate '{gate_name}' uses blocked env flag '{blocked_flag}'. "
-                    "SECURITY: -S/--split-string and -i/--ignore-environment are blocked "
-                    "because they can bypass environment variable security checks."
-                )
-
-            denylisted_env = check_env_denylist_bypass(cmd)
-            if denylisted_env:
-                raise GateConfigError(
-                    f"Gate '{gate_name}' attempts to set denylisted environment variable "
-                    f"'{denylisted_env}' via env wrapper. SECURITY: Denylisted variables "
-                    "cannot be overridden, including via wrappers."
-                )
-
-            if "timeout" in gate_config:
-                timeout = gate_config["timeout"]
-                if not isinstance(timeout, int):
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' timeout must be int in {source_path}"
-                    )
-                if timeout <= 0:
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' timeout must be > 0 in {source_path}"
-                    )
-                if timeout > 3600:
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' timeout must be <= 3600 (1 hour) in {source_path}"
-                    )
-
-            if "depends_on" in gate_config:
-                deps = gate_config["depends_on"]
-                if not isinstance(deps, list):
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' depends_on must be list in {source_path}"
-                    )
-                if not all(isinstance(d, str) for d in deps):
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' depends_on items must all be strings in {source_path}"
-                    )
-
-            if "severity" in gate_config:
-                sev = gate_config["severity"]
-                if not isinstance(sev, str) or sev.lower() not in valid_severities:
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' severity must be one of {valid_severities} "
-                        f"in {source_path}"
-                    )
-
-            bool_fields = [
-                "parallel_safe",
-                "cache",
-                "skip_on_dependency_failure",
-                "allow_shell",
-                "force_hash_large_cache_inputs",
-            ]
-            for field in bool_fields:
-                if field in gate_config and not isinstance(gate_config[field], bool):
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' {field} must be boolean in {source_path}"
-                    )
-
-            if "working_dir" in gate_config and not isinstance(
-                gate_config["working_dir"], str
-            ):
-                raise GateConfigError(
-                    f"Gate '{gate_name}' working_dir must be string in {source_path}"
-                )
-
-            if "env" in gate_config:
-                env = gate_config["env"]
-                if not isinstance(env, dict):
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' env must be dict in {source_path}"
-                    )
-                env_name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-                for k, v in env.items():
-                    if not isinstance(k, str):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' env key must be string, got {type(k).__name__} "
-                            f"in {source_path}"
-                        )
-                    if not isinstance(v, str):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' env['{k}'] value must be string, "
-                            f"got {type(v).__name__} in {source_path}"
-                        )
-                    if not env_name_pattern.match(k):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' env key '{k}' is invalid. "
-                            f"Must be a valid POSIX identifier in {source_path}"
-                        )
-                    if "\0" in k or "=" in k:
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' env key '{k}' contains invalid characters "
-                            f"in {source_path}"
-                        )
-
-            if "allowed_writes" in gate_config:
-                allowed = gate_config["allowed_writes"]
-                if not isinstance(allowed, list):
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' allowed_writes must be list in {source_path}"
-                    )
-                for i, pattern in enumerate(allowed):
-                    if not isinstance(pattern, str):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' allowed_writes[{i}] must be string in {source_path}"
-                        )
-                    if not pattern.strip():
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' allowed_writes[{i}] cannot be empty in {source_path}"
-                        )
-                    if pattern.startswith("/"):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' allowed_writes[{i}]: absolute paths not allowed "
-                            f"(got '{pattern}') in {source_path}"
-                        )
-                    if (
-                        len(pattern) >= 2
-                        and pattern[1] == ":"
-                        and pattern[0].isalpha()
-                    ):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' allowed_writes[{i}]: Windows absolute paths "
-                            f"not allowed (got '{pattern}') in {source_path}"
-                        )
-                    if has_path_traversal_component(pattern):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' allowed_writes[{i}]: path traversal not allowed "
-                            f"(got '{pattern}') in {source_path}"
-                        )
-                    if "\\" in pattern:
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' allowed_writes[{i}]: backslash not allowed "
-                            f"(got '{pattern}') in {source_path}. Use forward slashes."
-                        )
-
-            if "cache_inputs" in gate_config:
-                cache_inputs = gate_config["cache_inputs"]
-                if not isinstance(cache_inputs, list):
-                    raise GateConfigError(
-                        f"Gate '{gate_name}' cache_inputs must be list in {source_path}"
-                    )
-                for i, pattern in enumerate(cache_inputs):
-                    if not isinstance(pattern, str):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' cache_inputs[{i}] must be string in {source_path}"
-                        )
-                    if not pattern.strip():
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' cache_inputs[{i}] cannot be empty in {source_path}"
-                        )
-                    if pattern.startswith("/"):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' cache_inputs[{i}]: absolute paths not allowed "
-                            f"(got '{pattern}') in {source_path}"
-                        )
-                    if (
-                        len(pattern) >= 2
-                        and pattern[1] == ":"
-                        and pattern[0].isalpha()
-                    ):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' cache_inputs[{i}]: Windows absolute paths "
-                            f"not allowed (got '{pattern}') in {source_path}"
-                        )
-                    if has_path_traversal_component(pattern):
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' cache_inputs[{i}]: path traversal not allowed "
-                            f"(got '{pattern}') in {source_path}"
-                        )
-                    if "\\" in pattern:
-                        raise GateConfigError(
-                            f"Gate '{gate_name}' cache_inputs[{i}]: backslash not allowed "
-                            f"(got '{pattern}') in {source_path}. Use forward slashes."
-                        )
+            self._validate_single_gate(gate_name, gate_config, source_path)
 
     def load_gates(self) -> dict[str, GateConfig]:
         if self._loaded:
@@ -1058,10 +1052,35 @@ class GateExecutor:
         except Exception:
             return None
 
+    # ReDoS protection constants
+    _MAX_GLOB_PATTERN_LENGTH = 1024
+    _MAX_CONSECUTIVE_WILDCARDS = 10
+    _MAX_CHARACTER_CLASS_LENGTH = 64
+
     @staticmethod
     @functools.lru_cache(maxsize=256)
     def _glob_to_regex(pattern: str) -> re.Pattern[str] | None:
-        """Convert a glob pattern to a compiled regex (cached)."""
+        """Convert a glob pattern to a compiled regex (cached).
+
+        Includes ReDoS protection:
+        - Pattern length limit
+        - Consecutive wildcard limit
+        - Character class length limit
+        """
+        # SECURITY: ReDoS protection - limit pattern length
+        if len(pattern) > GateExecutor._MAX_GLOB_PATTERN_LENGTH:
+            return None
+
+        # SECURITY: ReDoS protection - detect consecutive wildcards
+        wildcard_count = 0
+        for char in pattern:
+            if char in "*?":
+                wildcard_count += 1
+                if wildcard_count > GateExecutor._MAX_CONSECUTIVE_WILDCARDS:
+                    return None
+            else:
+                wildcard_count = 0
+
         regex_parts: list[str] = []
         i = 0
         while i < len(pattern):
@@ -1095,7 +1114,11 @@ class GateExecutor:
                 while j < len(pattern) and pattern[j] != "]":
                     j += 1
                 if j < len(pattern):
-                    regex_parts.append(pattern[i : j + 1])
+                    # SECURITY: ReDoS protection - limit character class length
+                    char_class = pattern[i : j + 1]
+                    if len(char_class) > GateExecutor._MAX_CHARACTER_CLASS_LENGTH:
+                        return None
+                    regex_parts.append(char_class)
                     i = j + 1
                 else:
                     regex_parts.append(re.escape(pattern[i]))
@@ -1130,8 +1153,19 @@ class GateExecutor:
             return path == pattern
         return bool(compiled.match(path))
 
+    # Baseline capture size limits (prevents memory exhaustion)
+    _MAX_BASELINE_FILES = 10000  # Maximum files to track in baseline
+    _MAX_BASELINE_FILE_SIZE = 50 * 1024 * 1024  # 50MB - skip hash for larger files
+    _MAX_GIT_OUTPUT_SIZE = 10 * 1024 * 1024  # 10MB git status output limit
+
     def _capture_worktree_baseline(self, worktree_path: Path) -> WorktreeBaseline | None:
-        """Capture file states before gate execution."""
+        """Capture file states before gate execution.
+
+        Size limits are enforced to prevent memory exhaustion:
+        - Max files: _MAX_BASELINE_FILES
+        - Max file size for hashing: _MAX_BASELINE_FILE_SIZE
+        - Max git output: _MAX_GIT_OUTPUT_SIZE
+        """
         try:
             git_env, git_safe_config = self._get_safe_git_env()
             result = subprocess.run(
@@ -1146,11 +1180,28 @@ class GateExecutor:
                 logger.warning(f"Baseline capture failed (git status): {stderr}")
                 return None
 
+            # SECURITY: Limit git output size to prevent memory exhaustion
+            if len(result.stdout) > self._MAX_GIT_OUTPUT_SIZE:
+                logger.warning(
+                    f"Baseline capture aborted: git status output too large "
+                    f"({len(result.stdout)} > {self._MAX_GIT_OUTPUT_SIZE} bytes)"
+                )
+                return None
+
             baseline: dict[str, tuple[int, int, str | None]] = {}
             has_tracked_changes = False
             entries = result.stdout.split(b"\0")
             i = 0
+            file_count = 0
             while i < len(entries):
+                # SECURITY: Limit number of files to prevent memory exhaustion
+                if file_count >= self._MAX_BASELINE_FILES:
+                    logger.warning(
+                        f"Baseline capture truncated: too many files "
+                        f"({file_count} >= {self._MAX_BASELINE_FILES})"
+                    )
+                    break
+
                 entry = entries[i]
                 if not entry or len(entry) < 3:
                     i += 1
@@ -1182,6 +1233,7 @@ class GateExecutor:
                     has_tracked_changes = True
 
                 file_path = worktree_path / path
+                file_count += 1
                 try:
                     # SECURITY: Track symlinks separately to detect symlink attacks
                     # Use size=-2 to indicate symlink (vs -1 for non-file/error)
@@ -1198,12 +1250,17 @@ class GateExecutor:
                         stat = file_path.stat()
                         mtime = int(stat.st_mtime * 1000)
                         size = stat.st_size
-                        file_hasher = hashlib.sha256()
-                        with open(file_path, "rb") as f:
-                            for chunk in iter(lambda: f.read(8192), b""):
-                                file_hasher.update(chunk)
-                        content_hash = file_hasher.hexdigest()[:32]
-                        baseline[path] = (mtime, size, content_hash)
+
+                        # SECURITY: Skip hashing for very large files (use mtime+size only)
+                        if size > self._MAX_BASELINE_FILE_SIZE:
+                            baseline[path] = (mtime, size, None)
+                        else:
+                            file_hasher = hashlib.sha256()
+                            with open(file_path, "rb") as f:
+                                for chunk in iter(lambda: f.read(8192), b""):
+                                    file_hasher.update(chunk)
+                            content_hash = file_hasher.hexdigest()[:32]
+                            baseline[path] = (mtime, size, content_hash)
                     else:
                         baseline[path] = (0, -1, None)
                 except OSError:
@@ -1967,439 +2024,89 @@ class GateExecutor:
             return results
 
 
-class ArtifactLock:
-    """File-based lock for artifact operations (fcntl on Unix, msvcrt on Windows).
+class BaseFileLock:
+    """Base class for file-based locks using filelock package.
 
+    Uses the robust, well-tested filelock library for cross-platform locking.
     Provides both inter-process (file-based) and intra-process (threading) synchronization.
+    """
+
+    LOCK_TIMEOUT: int = 30
+    LOCK_FILENAME: str = ".lock"
+
+    def __init__(self, worktree_path: Path):
+        if FileLock is None:
+            raise RuntimeError(
+                "The 'filelock' package is required for locking. "
+                "Install with: pip install filelock"
+            )
+        self.worktree_path = worktree_path.resolve()
+        self._filelock: FileLock | None = None
+        self.acquired = False
+
+    def __enter__(self) -> "BaseFileLock":
+        supervisor_dir = self.worktree_path / ".supervisor"
+
+        # SECURITY: Check for symlink attacks
+        if supervisor_dir.exists() and supervisor_dir.is_symlink():
+            logger.warning("SECURITY: .supervisor is a symlink; lock disabled.")
+            return self
+
+        try:
+            supervisor_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning(f"Cannot create .supervisor directory for {self.LOCK_FILENAME}")
+            return self
+
+        # SECURITY: Verify directory doesn't escape worktree
+        try:
+            supervisor_dir.resolve().relative_to(self.worktree_path)
+        except ValueError:
+            logger.warning("SECURITY: .supervisor escapes worktree; lock disabled.")
+            return self
+
+        lock_path = supervisor_dir / self.LOCK_FILENAME
+
+        # SECURITY: Check lock file isn't a symlink
+        if lock_path.exists() and lock_path.is_symlink():
+            logger.warning(f"SECURITY: {self.LOCK_FILENAME} is a symlink; lock disabled.")
+            return self
+
+        try:
+            self._filelock = FileLock(str(lock_path), timeout=self.LOCK_TIMEOUT)
+            self._filelock.acquire()
+            self.acquired = True
+        except FileLockTimeout:
+            logger.warning(f"{self.__class__.__name__} timeout after {self.LOCK_TIMEOUT}s")
+        except Exception as e:
+            logger.warning(f"Failed to acquire {self.__class__.__name__}: {e}")
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._filelock is not None and self.acquired:
+            try:
+                self._filelock.release()
+            except Exception:
+                pass
+        return False
+
+
+class ArtifactLock(BaseFileLock):
+    """File-based lock for artifact operations.
+
+    Uses filelock for robust cross-platform locking.
     """
 
     LOCK_TIMEOUT = 30
-    _MAX_THREAD_LOCKS = 100  # Limit memory usage from thread locks
-
-    # Class-level thread locks for intra-process synchronization
-    _thread_locks: dict[str, threading.Lock] = {}
-    _thread_locks_guard = threading.Lock()
-
-    @classmethod
-    def _get_thread_lock(cls, lock_path: Path) -> threading.Lock:
-        """Get or create a thread lock for the given path."""
-        key = str(lock_path.resolve())
-        with cls._thread_locks_guard:
-            if key not in cls._thread_locks:
-                # Evict unlocked entries if we're at capacity
-                if len(cls._thread_locks) >= cls._MAX_THREAD_LOCKS:
-                    cls._cleanup_unlocked_locks()
-                cls._thread_locks[key] = threading.Lock()
-            return cls._thread_locks[key]
-
-    @classmethod
-    def _cleanup_unlocked_locks(cls) -> None:
-        """Remove locks that are not currently held (best-effort cleanup)."""
-        # Must be called while holding _thread_locks_guard
-        to_remove = []
-        for key, lock in cls._thread_locks.items():
-            # Try to acquire lock without blocking - if we can, it's not held
-            if lock.acquire(blocking=False):
-                lock.release()
-                to_remove.append(key)
-        for key in to_remove[:len(to_remove) // 2]:  # Remove half of unlocked locks
-            del cls._thread_locks[key]
-
-    @staticmethod
-    def _open_lock_file_safe(lock_path: Path):
-        """Open lock file without following symlinks."""
-        import os
-        import sys
-
-        if lock_path.is_symlink():
-            raise OSError(f"Lock file is a symlink: {lock_path}")
-
-        if sys.platform != "win32":
-            flags = os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW
-            try:
-                fd = os.open(str(lock_path), flags, 0o600)
-                return os.fdopen(fd, "w")
-            except OSError as e:
-                if e.errno == 40:  # ELOOP
-                    raise OSError(f"Lock file is a symlink: {lock_path}")
-                raise
-        else:
-            # Best-effort Windows safe open using CreateFileW.
-            try:
-                import ctypes
-                from ctypes import wintypes
-
-                GENERIC_WRITE = 0x40000000
-                FILE_SHARE_READ = 0x00000001
-                FILE_SHARE_WRITE = 0x00000002
-                CREATE_ALWAYS = 2
-                FILE_ATTRIBUTE_NORMAL = 0x80
-                FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-                INVALID_HANDLE_VALUE = -1
-
-                CreateFileW = ctypes.windll.kernel32.CreateFileW
-                CreateFileW.argtypes = [
-                    wintypes.LPCWSTR,
-                    wintypes.DWORD,
-                    wintypes.DWORD,
-                    ctypes.c_void_p,
-                    wintypes.DWORD,
-                    wintypes.DWORD,
-                    wintypes.HANDLE,
-                ]
-                CreateFileW.restype = wintypes.HANDLE
-
-                handle = CreateFileW(
-                    str(lock_path),
-                    GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                    None,
-                )
-                if handle == INVALID_HANDLE_VALUE:
-                    raise OSError(f"CreateFileW failed for lock file: {lock_path}")
-
-                import msvcrt
-
-                fd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
-                return os.fdopen(fd, "w")
-            except (ImportError, OSError, AttributeError) as e:
-                raise OSError(
-                    f"Windows: cannot safely open lock file: {lock_path}. Error: {e}"
-                )
-
-    def __init__(self, worktree_path: Path, exclusive: bool = True):
-        self.worktree_path = worktree_path.resolve()
-        self.exclusive = exclusive
-        self.lock_file = None
-        self.acquired = False
-        self._thread_lock: threading.Lock | None = None
-        self._thread_lock_acquired = False
-
-    def __enter__(self) -> "ArtifactLock":
-        import sys
-        import time
-
-        supervisor_dir = self.worktree_path / ".supervisor"
-        if supervisor_dir.is_symlink():
-            logger.warning("SECURITY: .supervisor is a symlink; lock disabled.")
-            return self
-
-        # Acquire thread lock first for intra-process synchronization
-        lock_path = supervisor_dir / ".artifact_lock"
-        self._thread_lock = self._get_thread_lock(lock_path)
-        start_thread = time.time()
-        while True:
-            if self._thread_lock.acquire(blocking=False):
-                self._thread_lock_acquired = True
-                break
-            if time.time() - start_thread > self.LOCK_TIMEOUT:
-                logger.warning("Artifact thread lock timeout")
-                return self
-            time.sleep(0.05)
-
-        try:
-            supervisor_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            logger.warning("Cannot create .supervisor directory for artifact lock")
-            self._release_thread_lock()
-            return self
-
-        try:
-            supervisor_dir.resolve().relative_to(self.worktree_path)
-        except ValueError:
-            logger.warning("SECURITY: .supervisor escapes worktree; lock disabled.")
-            self._release_thread_lock()
-            return self
-
-        try:
-            self.lock_file = self._open_lock_file_safe(lock_path)
-
-            start = time.time()
-            if sys.platform == "win32":
-                import msvcrt
-
-                mode = msvcrt.LK_NBLCK if self.exclusive else msvcrt.LK_NBRLCK
-                while True:
-                    try:
-                        msvcrt.locking(self.lock_file.fileno(), mode, 1)
-                        self.acquired = True
-                        break
-                    except OSError:
-                        if time.time() - start > self.LOCK_TIMEOUT:
-                            logger.warning("Artifact lock timeout")
-                            break
-                        time.sleep(0.1)
-            else:
-                import fcntl
-
-                lock_op = fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH
-                while True:
-                    try:
-                        fcntl.flock(self.lock_file.fileno(), lock_op | fcntl.LOCK_NB)
-                        self.acquired = True
-                        break
-                    except BlockingIOError:
-                        if time.time() - start > self.LOCK_TIMEOUT:
-                            logger.warning("Artifact lock timeout")
-                            break
-                        time.sleep(0.1)
-        except OSError as e:
-            logger.warning(f"Failed to acquire artifact lock: {e}")
-            self._release_thread_lock()
-
-        return self
-
-    def _release_thread_lock(self) -> None:
-        """Release thread lock if held."""
-        if self._thread_lock_acquired and self._thread_lock:
-            try:
-                self._thread_lock.release()
-            except RuntimeError:
-                pass  # Not locked
-            self._thread_lock_acquired = False
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        import sys
-
-        if self.lock_file:
-            try:
-                if self.acquired:
-                    if sys.platform == "win32":
-                        import msvcrt
-
-                        try:
-                            msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-                        except OSError:
-                            pass
-                    else:
-                        import fcntl
-
-                        fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
-                self.lock_file.close()
-            except OSError:
-                pass
-
-        # Release thread lock after file lock
-        self._release_thread_lock()
-        return False
+    LOCK_FILENAME = ".artifact_lock"
 
 
-class WorktreeLock:
+class WorktreeLock(BaseFileLock):
     """Lock for exclusive gate execution in a worktree.
 
-    Provides both inter-process (file-based) and intra-process (threading) synchronization.
+    Uses filelock for robust cross-platform locking.
     """
 
     LOCK_TIMEOUT = 60
-    _MAX_THREAD_LOCKS = 100  # Limit memory usage from thread locks
-
-    # Class-level thread locks for intra-process synchronization
-    _thread_locks: dict[str, threading.Lock] = {}
-    _thread_locks_guard = threading.Lock()
-
-    @classmethod
-    def _get_thread_lock(cls, lock_path: Path) -> threading.Lock:
-        """Get or create a thread lock for the given path."""
-        key = str(lock_path.resolve())
-        with cls._thread_locks_guard:
-            if key not in cls._thread_locks:
-                # Evict unlocked entries if we're at capacity
-                if len(cls._thread_locks) >= cls._MAX_THREAD_LOCKS:
-                    cls._cleanup_unlocked_locks()
-                cls._thread_locks[key] = threading.Lock()
-            return cls._thread_locks[key]
-
-    @classmethod
-    def _cleanup_unlocked_locks(cls) -> None:
-        """Remove locks that are not currently held (best-effort cleanup)."""
-        # Must be called while holding _thread_locks_guard
-        to_remove = []
-        for key, lock in cls._thread_locks.items():
-            # Try to acquire lock without blocking - if we can, it's not held
-            if lock.acquire(blocking=False):
-                lock.release()
-                to_remove.append(key)
-        for key in to_remove[:len(to_remove) // 2]:  # Remove half of unlocked locks
-            del cls._thread_locks[key]
-
-    @staticmethod
-    def _open_lock_file_safe(lock_path: Path):
-        """Open lock file without following symlinks."""
-        import os
-        import sys
-
-        if lock_path.is_symlink():
-            raise OSError(f"Lock file is a symlink: {lock_path}")
-
-        if sys.platform != "win32":
-            flags = os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW
-            try:
-                fd = os.open(str(lock_path), flags, 0o600)
-                return os.fdopen(fd, "w")
-            except OSError as e:
-                if e.errno == 40:  # ELOOP
-                    raise OSError(f"Lock file is a symlink: {lock_path}")
-                raise
-        else:
-            try:
-                import ctypes
-                from ctypes import wintypes
-
-                GENERIC_WRITE = 0x40000000
-                FILE_SHARE_READ = 0x00000001
-                FILE_SHARE_WRITE = 0x00000002
-                CREATE_ALWAYS = 2
-                FILE_ATTRIBUTE_NORMAL = 0x80
-                FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-                INVALID_HANDLE_VALUE = -1
-
-                CreateFileW = ctypes.windll.kernel32.CreateFileW
-                CreateFileW.argtypes = [
-                    wintypes.LPCWSTR,
-                    wintypes.DWORD,
-                    wintypes.DWORD,
-                    ctypes.c_void_p,
-                    wintypes.DWORD,
-                    wintypes.DWORD,
-                    wintypes.HANDLE,
-                ]
-                CreateFileW.restype = wintypes.HANDLE
-
-                handle = CreateFileW(
-                    str(lock_path),
-                    GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                    None,
-                )
-                if handle == INVALID_HANDLE_VALUE:
-                    raise OSError(f"CreateFileW failed for lock file: {lock_path}")
-
-                import msvcrt
-
-                fd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
-                return os.fdopen(fd, "w")
-            except (ImportError, OSError, AttributeError) as e:
-                raise OSError(
-                    f"Windows: cannot safely open lock file: {lock_path}. Error: {e}"
-                )
-
-    def __init__(self, worktree_path: Path):
-        self.worktree_path = worktree_path.resolve()
-        self.lock_file = None
-        self.acquired = False
-        self._thread_lock: threading.Lock | None = None
-        self._thread_lock_acquired = False
-
-    def _release_thread_lock(self) -> None:
-        """Release thread lock if held."""
-        if self._thread_lock_acquired and self._thread_lock:
-            try:
-                self._thread_lock.release()
-            except RuntimeError:
-                pass  # Not locked
-            self._thread_lock_acquired = False
-
-    def __enter__(self) -> "WorktreeLock":
-        import sys
-        import time
-
-        supervisor_dir = self.worktree_path / ".supervisor"
-        if supervisor_dir.is_symlink():
-            logger.warning("SECURITY: .supervisor is a symlink; lock disabled.")
-            return self
-
-        # Acquire thread lock first for intra-process synchronization
-        lock_path = supervisor_dir / ".worktree_lock"
-        self._thread_lock = self._get_thread_lock(lock_path)
-        start_thread = time.time()
-        while True:
-            if self._thread_lock.acquire(blocking=False):
-                self._thread_lock_acquired = True
-                break
-            if time.time() - start_thread > self.LOCK_TIMEOUT:
-                logger.warning("Worktree thread lock timeout")
-                return self
-            time.sleep(0.05)
-
-        try:
-            supervisor_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            logger.warning("Cannot create .supervisor directory for worktree lock")
-            self._release_thread_lock()
-            return self
-
-        try:
-            supervisor_dir.resolve().relative_to(self.worktree_path)
-        except ValueError:
-            logger.warning("SECURITY: .supervisor escapes worktree; lock disabled.")
-            self._release_thread_lock()
-            return self
-
-        try:
-            self.lock_file = self._open_lock_file_safe(lock_path)
-
-            start = time.time()
-            if sys.platform == "win32":
-                import msvcrt
-
-                mode = msvcrt.LK_NBLCK
-                while True:
-                    try:
-                        msvcrt.locking(self.lock_file.fileno(), mode, 1)
-                        self.acquired = True
-                        break
-                    except OSError:
-                        if time.time() - start > self.LOCK_TIMEOUT:
-                            logger.warning("Worktree lock timeout")
-                            break
-                        time.sleep(0.1)
-            else:
-                import fcntl
-
-                lock_op = fcntl.LOCK_EX
-                while True:
-                    try:
-                        fcntl.flock(self.lock_file.fileno(), lock_op | fcntl.LOCK_NB)
-                        self.acquired = True
-                        break
-                    except BlockingIOError:
-                        if time.time() - start > self.LOCK_TIMEOUT:
-                            logger.warning("Worktree lock timeout")
-                            break
-                        time.sleep(0.1)
-        except OSError as e:
-            logger.warning(f"Failed to acquire worktree lock: {e}")
-            self._release_thread_lock()
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        import sys
-
-        if self.lock_file:
-            try:
-                if self.acquired:
-                    if sys.platform == "win32":
-                        import msvcrt
-
-                        try:
-                            msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-                        except OSError:
-                            pass
-                    else:
-                        import fcntl
-
-                        fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
-                self.lock_file.close()
-            except OSError:
-                pass
-
-        # Release thread lock after file lock
-        self._release_thread_lock()
-        return False
+    LOCK_FILENAME = ".worktree_lock"

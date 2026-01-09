@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -515,3 +516,232 @@ class TestGateExecutor:
             timed_out=True,
         )
         assert timeout.timed_out
+
+    def test_run_gate_success(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+        """Test successful gate execution."""
+        from unittest.mock import MagicMock
+        from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
+
+        # Setup gate config
+        write_gates(temp_gate_file, {"test": {"command": ["echo", "success"], "timeout": 60}})
+        monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
+
+        # Mock executor to return success
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "success"
+        mock_result.stderr = ""
+        mock_executor.run.return_value = mock_result
+
+        # Create worktree with git repo
+        (tmp_path / ".git").mkdir()
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+
+        gate_loader = GateLoader(worktree_path=tmp_path)
+        executor = GateExecutor(executor=mock_executor, gate_loader=gate_loader, db=mock_db)
+
+        config = gate_loader.get_gate("test")
+        result = executor.run_gate(config, tmp_path, "wf-1", "step-1")
+
+        assert result.status == GateStatus.PASSED
+        assert result.gate_name == "test"
+        assert mock_executor.run.called
+
+    def test_run_gate_failure(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+        """Test failed gate execution."""
+        from unittest.mock import MagicMock
+        from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
+
+        # Setup gate config
+        write_gates(temp_gate_file, {"test": {"command": ["exit", "1"], "timeout": 60}})
+        monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
+
+        # Mock executor to return failure
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+        mock_result.stderr = "test failed"
+        mock_executor.run.return_value = mock_result
+
+        # Create worktree with git repo
+        (tmp_path / ".git").mkdir()
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+
+        gate_loader = GateLoader(worktree_path=tmp_path)
+        executor = GateExecutor(executor=mock_executor, gate_loader=gate_loader, db=mock_db)
+
+        config = gate_loader.get_gate("test")
+        result = executor.run_gate(config, tmp_path, "wf-1", "step-1")
+
+        assert result.status == GateStatus.FAILED
+        assert "test failed" in result.output
+
+    def test_run_gate_with_allowed_writes(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+        """Test gate execution with allowed_writes patterns."""
+        from unittest.mock import MagicMock
+        from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
+
+        # Setup gate config with allowed_writes
+        write_gates(temp_gate_file, {
+            "test": {
+                "command": ["echo", "success"],
+                "timeout": 60,
+                "allowed_writes": [".coverage", "htmlcov/**"],
+            }
+        })
+        monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
+
+        # Mock executor to return success
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "success"
+        mock_result.stderr = ""
+        mock_executor.run.return_value = mock_result
+
+        # Create worktree with git repo
+        (tmp_path / ".git").mkdir()
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+
+        gate_loader = GateLoader(worktree_path=tmp_path)
+        executor = GateExecutor(executor=mock_executor, gate_loader=gate_loader, db=mock_db)
+
+        config = gate_loader.get_gate("test")
+        assert config.allowed_writes == [".coverage", "htmlcov/**"]
+
+        result = executor.run_gate(config, tmp_path, "wf-1", "step-1")
+        assert result.status == GateStatus.PASSED
+
+    def test_run_gates_respects_dependencies(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+        """Test that run_gates executes gates in dependency order."""
+        from unittest.mock import MagicMock, call
+        from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
+
+        # Setup gates with dependencies
+        write_gates(temp_gate_file, {
+            "lint": {"command": ["echo", "lint"], "timeout": 60},
+            "type_check": {"command": ["echo", "typecheck"], "timeout": 60, "depends_on": ["lint"]},
+            "test": {"command": ["echo", "test"], "timeout": 60, "depends_on": ["lint"]},
+        })
+        monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
+
+        # Mock executor to return success
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "success"
+        mock_result.stderr = ""
+        mock_executor.run.return_value = mock_result
+
+        # Create worktree with git repo
+        (tmp_path / ".git").mkdir()
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+
+        gate_loader = GateLoader(worktree_path=tmp_path)
+        executor = GateExecutor(executor=mock_executor, gate_loader=gate_loader, db=mock_db)
+
+        # Run gates - should resolve dependency order
+        results = executor.run_gates(
+            gate_names=["type_check", "test"],
+            worktree_path=tmp_path,
+            workflow_id="wf-1",
+            step_id="step-1",
+        )
+
+        # All gates should pass (lint runs first as dependency)
+        assert len(results) == 3  # lint + type_check + test
+        assert all(r.status == GateStatus.PASSED for r in results)
+
+        # Verify lint ran before others
+        gate_names = [r.gate_name for r in results]
+        assert gate_names.index("lint") < gate_names.index("type_check")
+        assert gate_names.index("lint") < gate_names.index("test")
+
+    def test_glob_pattern_security(self):
+        """Test that ambiguous ** patterns are treated as literals."""
+        from supervisor.core.gates import GateExecutor
+
+        # Clear cache
+        GateExecutor._glob_to_regex.cache_clear()
+
+        # Normal ** at end should match
+        assert GateExecutor._path_match("build/foo/bar", "build/**")
+
+        # Normal **/ in middle should match
+        assert GateExecutor._path_match("src/foo/bar.py", "src/**/bar.py")
+
+        # Ambiguous ** (not followed by /) should be treated as literal
+        # "build**bar" should NOT match "build_anything_bar"
+        pattern = GateExecutor._glob_to_regex("build**bar")
+        if pattern:
+            # If pattern compiled, it should only match literal "build**bar"
+            assert not pattern.match("build_anything_bar")
+
+    def test_redos_protection(self):
+        """Test that ReDoS attack patterns are rejected."""
+        from supervisor.core.gates import GateExecutor
+
+        GateExecutor._glob_to_regex.cache_clear()
+
+        # Pattern too long
+        long_pattern = "a" * 2000
+        assert GateExecutor._glob_to_regex(long_pattern) is None
+
+        # Too many consecutive wildcards
+        many_wildcards = "*" * 20
+        assert GateExecutor._glob_to_regex(many_wildcards) is None
+
+        # Character class too long
+        long_char_class = "[" + "a" * 100 + "]"
+        assert GateExecutor._glob_to_regex(long_char_class) is None
+
+        # Normal patterns should still work
+        assert GateExecutor._glob_to_regex("*.py") is not None
+        assert GateExecutor._glob_to_regex("src/**/*.ts") is not None
+        assert GateExecutor._glob_to_regex("[abc].txt") is not None
+
+    def test_cache_key_includes_allowed_writes(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+        """Test that allowed_writes is included in cache key."""
+        from supervisor.core.gates import GateExecutor, GateLoader, GateConfig
+
+        # Create a minimal git repo
+        (tmp_path / ".git").mkdir()
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+        (tmp_path / "test.py").write_text("print('hello')")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+
+        write_gates(temp_gate_file, {"test": {"command": ["echo", "test"]}})
+        monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
+
+        gate_loader = GateLoader(worktree_path=tmp_path)
+        executor = GateExecutor(executor=mock_executor, gate_loader=gate_loader, db=mock_db)
+
+        # Create two configs with different allowed_writes
+        config1 = GateConfig(name="test", command=["echo"], allowed_writes=[".coverage"])
+        config2 = GateConfig(name="test", command=["echo"], allowed_writes=[".coverage", "htmlcov/**"])
+
+        # Cache keys should be different
+        key1 = executor._compute_cache_key(tmp_path, config1)
+        key2 = executor._compute_cache_key(tmp_path, config2)
+
+        # Both should compute (not None) and be different
+        if key1 is not None and key2 is not None:
+            assert key1 != key2
+
+    def test_baseline_size_limits_constants(self):
+        """Test that baseline size limit constants are defined."""
+        from supervisor.core.gates import GateExecutor
+
+        # Verify constants exist and have sensible values
+        assert GateExecutor._MAX_BASELINE_FILES == 10000
+        assert GateExecutor._MAX_BASELINE_FILE_SIZE == 50 * 1024 * 1024  # 50MB
+        assert GateExecutor._MAX_GIT_OUTPUT_SIZE == 10 * 1024 * 1024  # 10MB

@@ -24,7 +24,14 @@ from pydantic import BaseModel
 
 from supervisor.core.context import ContextPacker
 from supervisor.core.feedback import StructuredFeedbackGenerator
-from supervisor.core.gates import GateFailAction, GateLoader, GateResult, GateSeverity, GateStatus
+from supervisor.core.gates import (
+    GateExecutor,
+    GateFailAction,
+    GateLoader,
+    GateResult,
+    GateSeverity,
+    GateStatus,
+)
 from supervisor.core.models import ErrorAction, ErrorCategory, Step, StepStatus
 from supervisor.core.parser import (
     GenericOutput,
@@ -537,6 +544,14 @@ class ExecutionEngine:
         self.circuit_breaker = EnhancedCircuitBreaker(db=self.db)
         self.error_classifier = ErrorClassifier()
 
+        # Gate execution system - uses GateExecutor for caching, integrity, dependencies
+        self.gate_loader = GateLoader(self.repo_path)
+        self.gate_executor = GateExecutor(
+            executor=self.executor,
+            gate_loader=self.gate_loader,
+            db=self.db,
+        )
+
         # CLI clients (lazily initialized per CLI name)
         self._cli_clients: dict[str, SandboxedLLMClient] = {}
         self._cli_clients_lock = threading.Lock()  # Thread-safe client initialization
@@ -673,66 +688,48 @@ class ExecutionEngine:
                     schema = self._get_schema_for_role(role)
                     output = adapter.parse_output(result.stdout, schema)
 
-                    # Run gates IN THE WORKTREE before applying changes
+                    # Run gates IN THE WORKTREE using GateExecutor
+                    # GateExecutor handles: dependency order, caching, integrity, event logging
+                    worktree_gate_loader = GateLoader(ctx.worktree_path)
+                    worktree_gate_executor = GateExecutor(
+                        executor=self.executor,
+                        gate_loader=worktree_gate_loader,
+                        db=self.db,
+                    )
+
+                    # Build on_fail_overrides with severity defaults
+                    effective_overrides: dict[str, GateFailAction] = {}
                     for gate_name in gates:
-                        passed, gate_output = self.workspace._run_gate(
-                            gate_name, ctx.worktree_path
-                        )
-                        if not passed:
-                            # Check on_fail action BEFORE raising - WARN gates should
-                            # log and continue, allowing changes to be applied
-                            # Respect gate severity as default when no override specified
-                            if gate_name in role.on_fail_overrides:
-                                on_fail_action = role.on_fail_overrides[gate_name]
-                            else:
-                                # Look up gate's default severity
-                                try:
-                                    gate_loader = GateLoader(ctx.worktree_path)
-                                    gate_config = gate_loader.get_gate(gate_name)
-                                    # Map severity to action: WARNING/INFO -> WARN, ERROR -> BLOCK
-                                    if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
-                                        on_fail_action = GateFailAction.WARN
-                                    else:
-                                        on_fail_action = GateFailAction.BLOCK
-                                except Exception:
-                                    # Gate not found in new system, default to BLOCK
-                                    on_fail_action = GateFailAction.BLOCK
+                        if gate_name in role.on_fail_overrides:
+                            effective_overrides[gate_name] = role.on_fail_overrides[gate_name]
+                        else:
+                            # Use gate's severity as default action
+                            try:
+                                gate_config = worktree_gate_loader.get_gate(gate_name)
+                                if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
+                                    effective_overrides[gate_name] = GateFailAction.WARN
+                                else:
+                                    effective_overrides[gate_name] = GateFailAction.BLOCK
+                            except Exception:
+                                effective_overrides[gate_name] = GateFailAction.BLOCK
 
-                            if on_fail_action == GateFailAction.WARN:
-                                # Log warning but continue - don't block apply
-                                self.db.append_event(
-                                    Event(
-                                        workflow_id=workflow_id,
-                                        event_type=EventType.GATE_FAILED,
-                                        step_id=step_id,
-                                        payload={
-                                            "gate": gate_name,
-                                            "severity": "warning",
-                                            "output": _truncate_output(gate_output, 1000),
-                                        },
-                                    )
-                                )
-                                continue  # Continue to next gate, don't block
+                    gate_results = worktree_gate_executor.run_gates(
+                        gate_names=gates,
+                        worktree_path=ctx.worktree_path,
+                        workflow_id=workflow_id,
+                        step_id=step_id,
+                        on_fail_overrides=effective_overrides,
+                    )
 
+                    # Check for blocking failures (GateExecutor already logged events)
+                    for gate_result in gate_results:
+                        if gate_result.status == GateStatus.FAILED:
+                            on_fail = effective_overrides.get(gate_result.gate_name, GateFailAction.BLOCK)
+                            if on_fail == GateFailAction.WARN:
+                                # Already logged by GateExecutor, continue
+                                continue
                             # BLOCK or RETRY_WITH_FEEDBACK: raise exception
-                            self.db.append_event(
-                                Event(
-                                    workflow_id=workflow_id,
-                                    event_type=EventType.GATE_FAILED,
-                                    step_id=step_id,
-                                    payload={"gate": gate_name, "output": _truncate_output(gate_output, 1000)},
-                                )
-                            )
-                            raise GateFailedError(gate_name, gate_output)
-
-                        self.db.append_event(
-                            Event(
-                                workflow_id=workflow_id,
-                                event_type=EventType.GATE_PASSED,
-                                step_id=step_id,
-                                payload={"gate": gate_name},
-                            )
-                        )
+                            raise GateFailedError(gate_result.gate_name, gate_result.output)
 
                     # ONLY after gates pass: apply changes to main tree
                     # Use file lock to prevent race conditions with parallel execution
