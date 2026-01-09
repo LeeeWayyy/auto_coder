@@ -73,9 +73,35 @@
     "gates": {
       "type": "array",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Gate name as simple string"
+          },
+          {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Gate name"
+              },
+              "required": {
+                "type": "boolean",
+                "default": true,
+                "description": "If false, gate failures don't block execution"
+              },
+              "on_fail": {
+                "type": "string",
+                "enum": ["block", "retry_with_feedback", "warn"],
+                "description": "Action to take when gate fails"
+              }
+            }
+          }
+        ]
       },
-      "description": "Simple gate commands as strings. Structured GateConfig deferred to Phase 3."
+      "description": "Gates to run. Can be strings (gate names) or objects with name, required, on_fail."
     },
     "config": {
       "type": "object",

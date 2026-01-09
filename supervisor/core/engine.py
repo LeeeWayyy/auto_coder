@@ -554,7 +554,8 @@ class ExecutionEngine:
         self.error_classifier = ErrorClassifier()
 
         # Gate execution system - uses GateExecutor for caching, integrity, dependencies
-        self.gate_loader = GateLoader(self.repo_path)
+        # Enable project-specific gate configs from .supervisor/gates.yaml
+        self.gate_loader = GateLoader(self.repo_path, allow_project_gates=True)
         self.gate_executor = GateExecutor(
             executor=self.executor,
             gate_loader=self.gate_loader,
@@ -699,7 +700,8 @@ class ExecutionEngine:
 
                     # Run gates IN THE WORKTREE using GateExecutor
                     # GateExecutor handles: dependency order, caching, integrity, event logging
-                    worktree_gate_loader = GateLoader(ctx.worktree_path)
+                    # Enable project-specific gate configs from .supervisor/gates.yaml
+                    worktree_gate_loader = GateLoader(ctx.worktree_path, allow_project_gates=True)
                     worktree_gate_executor = GateExecutor(
                         executor=self.executor,
                         gate_loader=worktree_gate_loader,

@@ -93,11 +93,19 @@ class RoleConfig:
 
     @property
     def on_fail_overrides(self) -> dict[str, GateFailAction]:
-        return {
-            gate.name: gate.on_fail
-            for gate in self.gates
-            if gate.on_fail is not None
-        }
+        """Get on_fail overrides for gates.
+
+        Gates with explicit on_fail get that value.
+        Gates with required=false (and no explicit on_fail) get WARN.
+        """
+        overrides: dict[str, GateFailAction] = {}
+        for gate in self.gates:
+            if gate.on_fail is not None:
+                overrides[gate.name] = gate.on_fail
+            elif not gate.required:
+                # required=false means gate failures should not block execution
+                overrides[gate.name] = GateFailAction.WARN
+        return overrides
 
 
 @dataclass
