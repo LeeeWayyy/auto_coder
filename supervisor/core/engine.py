@@ -734,8 +734,13 @@ class ExecutionEngine:
                     # Propagate optional (WARN) behavior from parent gates to dependencies.
                     # If a gate is optional (required=false or on_fail=warn), its dependencies
                     # should also be treated as optional so they don't block unexpectedly.
+                    deps_cache: dict[str, set[str]] = {}
+
                     def collect_dependencies(gate_name: str) -> set[str]:
-                        """Recursively collect all dependencies of a gate."""
+                        """Recursively collect all dependencies of a gate (memoized)."""
+                        if gate_name in deps_cache:
+                            return deps_cache[gate_name]
+
                         deps: set[str] = set()
                         try:
                             gate_config = worktree_gate_loader.get_gate(gate_name)
@@ -745,6 +750,8 @@ class ExecutionEngine:
                                     deps.update(collect_dependencies(dep))
                         except GateNotFoundError:
                             pass
+
+                        deps_cache[gate_name] = deps
                         return deps
 
                     for gate_name in gates:
