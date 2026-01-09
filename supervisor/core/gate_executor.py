@@ -673,19 +673,25 @@ class GateExecutor:
                     # even if they match allowed_writes. Only truly NEW untracked files
                     # can be exempted by allowed_writes patterns.
                     is_tracked = path in tracked_files
-                    if not is_tracked and _is_allowed(path):
-                        # Truly new untracked file matching allowed_writes - OK
-                        continue
-                    # Check if it's a symlink escaping worktree
                     file_path = worktree_path / path
+
+                    # SECURITY (P1): ALWAYS check for symlink escape, even for allowed_writes.
+                    # A malicious gate could create an allowed path as a symlink pointing
+                    # outside the worktree, bypassing integrity guarantees.
                     if file_path.is_symlink():
                         try:
                             resolved_target = file_path.resolve()
                             resolved_target.relative_to(resolved_worktree)
                         except (ValueError, OSError):
-                            # SECURITY: New symlink escapes worktree
-                            violations.append(f"{path} (new symlink escapes worktree)")
+                            # SECURITY: Symlink escapes worktree - always a violation
+                            violations.append(f"{path} (symlink escapes worktree)")
                             continue
+
+                    # After symlink check passes, allow new untracked files matching allowed_writes
+                    if not is_tracked and _is_allowed(path):
+                        # Truly new untracked file matching allowed_writes - OK
+                        continue
+
                     if is_tracked:
                         violations.append(f"{path} (tracked file modified)")
                     else:

@@ -30,6 +30,10 @@ class StructuredFeedbackGenerator:
     MAX_ISSUES = 20
     MAX_OUTPUT_CHARS = 4000
 
+    # Windows path regex part: handles drive letters (C:\), UNC (\\server\share),
+    # and extended paths (\\?\C:\). Used across multiple parsers.
+    _WIN_PATH_RE = r"(?:[A-Za-z]:|\\\\(?:[?.]\\)?(?:[A-Za-z]:)?)?[^:\n]+"
+
     def __init__(self) -> None:
         self._parsers: dict[str, Callable[[str], list[dict[str, str]]]] = {
             "pytest": self._parse_pytest,
@@ -54,12 +58,9 @@ class StructuredFeedbackGenerator:
 
         if "pytest" in lowered or "failed" in lowered and "collected" in lowered:
             return "pytest"
-        # Handle Windows paths: drive letters (C:\), UNC (\\server\share), extended (\\?\C:\)
-        # Pattern: optional drive OR UNC prefix, then path without colons
-        win_path = r"(?:[A-Za-z]:|\\\\(?:[?.]\\)?(?:[A-Za-z]:)?)?[^:\n]+"
-        if "ruff" in lowered or re.search(rf"^{win_path}:\d+:\d+:\s*[A-Z]\d+\s+", output, re.M):
+        if "ruff" in lowered or re.search(rf"^{self._WIN_PATH_RE}:\d+:\d+:\s*[A-Z]\d+\s+", output, re.M):
             return "ruff"
-        if "mypy" in lowered or re.search(rf"^{win_path}:\d+:\s*error:", output, re.M):
+        if "mypy" in lowered or re.search(rf"^{self._WIN_PATH_RE}:\d+:\s*error:", output, re.M):
             return "mypy"
         if "bandit" in lowered or "severity:" in lowered and "confidence:" in lowered:
             return "bandit"
@@ -123,9 +124,8 @@ class StructuredFeedbackGenerator:
     def _parse_ruff(self, output: str) -> list[dict[str, str]]:
         """Parse ruff/flake8 output into structured violations."""
         issues: list[dict[str, str]] = []
-        # Handle Windows paths: drive (C:\), UNC (\\server\share), extended (\\?\C:\)
         pattern = re.compile(
-            r"^(?P<file>(?:[A-Za-z]:|\\\\(?:[?.]\\)?(?:[A-Za-z]:)?)?[^:\n]+):(?P<line>\d+):(?P<col>\d+):\s*(?P<code>[A-Z]\d+)\s+(?P<msg>.+)$",
+            rf"^(?P<file>{self._WIN_PATH_RE}):(?P<line>\d+):(?P<col>\d+):\s*(?P<code>[A-Z]\d+)\s+(?P<msg>.+)$",
             re.M,
         )
         for m in pattern.finditer(output):
@@ -143,9 +143,8 @@ class StructuredFeedbackGenerator:
     def _parse_mypy(self, output: str) -> list[dict[str, str]]:
         """Parse mypy output into structured type errors."""
         issues: list[dict[str, str]] = []
-        # Handle Windows paths: drive (C:\), UNC (\\server\share), extended (\\?\C:\)
         pattern = re.compile(
-            r"^(?P<file>(?:[A-Za-z]:|\\\\(?:[?.]\\)?(?:[A-Za-z]:)?)?[^:\n]+):(?P<line>\d+):(?:\s*(?P<col>\d+):)?\s*error:\s*(?P<msg>.+?)(?:\s+\[(?P<code>[^\]]+)\])?$",
+            rf"^(?P<file>{self._WIN_PATH_RE}):(?P<line>\d+):(?:\s*(?P<col>\d+):)?\s*error:\s*(?P<msg>.+?)(?:\s+\[(?P<code>[^\]]+)\])?$",
             re.M,
         )
         for m in pattern.finditer(output):
@@ -166,8 +165,9 @@ class StructuredFeedbackGenerator:
         # Bandit text format blocks
         issue_re = re.compile(r"^Issue:\s*(?P<issue>.+)$", re.M)
         severity_re = re.compile(r"^Severity:\s*(?P<severity>\w+)\s+Confidence:\s*(?P<confidence>\w+)", re.M)
-        # Handle Windows paths: drive (C:\), UNC (\\server\share), extended (\\?\C:\)
-        location_re = re.compile(r"^Location:\s*(?P<file>(?:[A-Za-z]:|\\\\(?:[?.]\\)?(?:[A-Za-z]:)?)?[^:]+):(?P<line>\d+)", re.M)
+        # For bandit location, use [^:]+ instead of [^:\n]+ since format is single-line
+        bandit_path_re = self._WIN_PATH_RE.replace("[^:\n]+", "[^:]+")
+        location_re = re.compile(rf"^Location:\s*(?P<file>{bandit_path_re}):(?P<line>\d+)", re.M)
 
         issue_iter = list(issue_re.finditer(output))
         if not issue_iter:

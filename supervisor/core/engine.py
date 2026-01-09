@@ -736,7 +736,21 @@ class ExecutionEngine:
                     # Check for blocking failures (GateExecutor already logged events)
                     for gate_result in gate_results:
                         if gate_result.status == GateStatus.FAILED:
-                            on_fail = effective_overrides.get(gate_result.gate_name, GateFailAction.BLOCK)
+                            # Look up on_fail action: check effective_overrides first,
+                            # then fall back to gate's severity (handles dependency gates)
+                            if gate_result.gate_name in effective_overrides:
+                                on_fail = effective_overrides[gate_result.gate_name]
+                            else:
+                                # Dependency gate not in original list - check its severity
+                                try:
+                                    dep_config = worktree_gate_loader.get_gate(gate_result.gate_name)
+                                    if dep_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
+                                        on_fail = GateFailAction.WARN
+                                    else:
+                                        on_fail = GateFailAction.BLOCK
+                                except GateNotFoundError:
+                                    on_fail = GateFailAction.BLOCK
+
                             if on_fail == GateFailAction.WARN:
                                 # Already logged by GateExecutor, continue
                                 continue
@@ -815,9 +829,8 @@ class ExecutionEngine:
                 return output
 
             except GateFailedError as e:
-                # WARN gates are handled inline before raising GateFailedError (lines 728-730).
+                # WARN gates are handled inline before raising GateFailedError.
                 # This exception handler only handles BLOCK and RETRY_WITH_FEEDBACK actions.
-                # We use effective_overrides built earlier for consistency.
                 on_fail_action = role.on_fail_overrides.get(e.gate_name, GateFailAction.BLOCK)
 
                 if on_fail_action == GateFailAction.RETRY_WITH_FEEDBACK:
