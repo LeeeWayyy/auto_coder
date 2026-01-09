@@ -11,13 +11,14 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 from copy import copy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -809,8 +810,6 @@ class GateExecutor:
     @classmethod
     def _get_safe_hooks_dir(cls) -> Path:
         if cls._safe_hooks_dir is None:
-            import tempfile
-
             cls._safe_hooks_dir = Path(
                 tempfile.mkdtemp(prefix="supervisor_safe_hooks_")
             )
@@ -830,9 +829,6 @@ class GateExecutor:
 
     def _get_safe_git_env(self) -> tuple[dict[str, str], list[str]]:
         """Get sanitized environment and safe config for git subprocess calls."""
-        import os
-        import sys
-
         git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         git_env["GIT_CONFIG_NOSYSTEM"] = "1"
         git_env["GIT_CONFIG_GLOBAL"] = "NUL" if sys.platform == "win32" else "/dev/null"
@@ -1389,14 +1385,21 @@ class GateExecutor:
 
                 pre_mtime, pre_size, pre_hash = baseline.files[path]
                 file_path = worktree_path / path
-                if not file_path.exists():
+
+                # SECURITY: Check if file/symlink still exists using is_symlink() first
+                # to avoid false "deleted" reports for broken symlinks.
+                # A broken symlink (target missing) returns False for exists() but
+                # True for is_symlink(), so we check symlink status first.
+                is_symlink = file_path.is_symlink()
+                file_exists = is_symlink or file_path.exists()
+
+                if not file_exists:
                     # File was deleted - only allow if it's an exempt untracked file
                     if pre_size not in (-1,) and not is_exempt_untracked:
                         violations.append(path)
                     continue
 
                 # SECURITY: Check if file type changed (file <-> symlink)
-                is_symlink = file_path.is_symlink()
                 was_symlink = pre_size == -2
 
                 if is_symlink != was_symlink:
@@ -1636,8 +1639,6 @@ class GateExecutor:
         retention_days: int = GateResult.ARTIFACT_RETENTION_DAYS,
     ) -> int:
         """Remove expired artifacts and enforce global size cap."""
-        from datetime import datetime, timedelta
-
         resolved_worktree = worktree_path.resolve()
         supervisor_dir = resolved_worktree / ".supervisor"
         if supervisor_dir.exists() and supervisor_dir.is_symlink():
