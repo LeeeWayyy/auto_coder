@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from supervisor.core.context import ContextPacker
 from supervisor.core.feedback import StructuredFeedbackGenerator
-from supervisor.core.gates import GateFailAction, GateResult, GateStatus
+from supervisor.core.gates import GateFailAction, GateLoader, GateResult, GateSeverity, GateStatus
 from supervisor.core.models import ErrorAction, ErrorCategory, Step, StepStatus
 from supervisor.core.parser import (
     GenericOutput,
@@ -679,6 +679,42 @@ class ExecutionEngine:
                             gate_name, ctx.worktree_path
                         )
                         if not passed:
+                            # Check on_fail action BEFORE raising - WARN gates should
+                            # log and continue, allowing changes to be applied
+                            # Respect gate severity as default when no override specified
+                            if gate_name in role.on_fail_overrides:
+                                on_fail_action = role.on_fail_overrides[gate_name]
+                            else:
+                                # Look up gate's default severity
+                                try:
+                                    gate_loader = GateLoader(ctx.worktree_path)
+                                    gate_config = gate_loader.get_gate(gate_name)
+                                    # Map severity to action: WARNING/INFO -> WARN, ERROR -> BLOCK
+                                    if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
+                                        on_fail_action = GateFailAction.WARN
+                                    else:
+                                        on_fail_action = GateFailAction.BLOCK
+                                except Exception:
+                                    # Gate not found in new system, default to BLOCK
+                                    on_fail_action = GateFailAction.BLOCK
+
+                            if on_fail_action == GateFailAction.WARN:
+                                # Log warning but continue - don't block apply
+                                self.db.append_event(
+                                    Event(
+                                        workflow_id=workflow_id,
+                                        event_type=EventType.GATE_FAILED,
+                                        step_id=step_id,
+                                        payload={
+                                            "gate": gate_name,
+                                            "severity": "warning",
+                                            "output": _truncate_output(gate_output, 1000),
+                                        },
+                                    )
+                                )
+                                continue  # Continue to next gate, don't block
+
+                            # BLOCK or RETRY_WITH_FEEDBACK: raise exception
                             self.db.append_event(
                                 Event(
                                     workflow_id=workflow_id,
@@ -771,9 +807,14 @@ class ExecutionEngine:
 
             except GateFailedError as e:
                 # Check the on_fail action for this gate
-                on_fail_action = role.on_fail_overrides.get(
-                    e.gate_name, GateFailAction.BLOCK
-                )
+                # Note: WARN gates are now handled inline (before raising), so this
+                # exception handler mainly handles BLOCK and RETRY_WITH_FEEDBACK.
+                # Severity defaults are still respected here for consistency.
+                if e.gate_name in role.on_fail_overrides:
+                    on_fail_action = role.on_fail_overrides[e.gate_name]
+                else:
+                    # Default to BLOCK (severity would have been checked inline)
+                    on_fail_action = GateFailAction.BLOCK
 
                 if on_fail_action == GateFailAction.RETRY_WITH_FEEDBACK:
                     # Generate structured feedback and continue retry loop

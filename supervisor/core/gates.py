@@ -1067,10 +1067,18 @@ class GateExecutor:
         while i < len(pattern):
             if i + 1 < len(pattern) and pattern[i : i + 2] == "**":
                 if i + 2 < len(pattern) and pattern[i + 2] == "/":
+                    # **/ matches zero or more directory components
                     regex_parts.append("(?:.*/)?")
                     i += 3
-                else:
+                elif i + 2 == len(pattern):
+                    # ** at end of pattern matches everything remaining
                     regex_parts.append(".*")
+                    i += 2
+                else:
+                    # SECURITY: ** not followed by / and not at end is ambiguous.
+                    # e.g., "build**bar" could match "build_evil_bar" unexpectedly.
+                    # Treat as literal "**" to prevent overly broad matching.
+                    regex_parts.append(re.escape("**"))
                     i += 2
             elif pattern[i] == "*":
                 regex_parts.append("[^/]*")
