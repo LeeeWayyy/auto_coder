@@ -372,14 +372,17 @@ class EnhancedCircuitBreaker:
             return state
 
     def can_execute(self, key: str) -> bool:
-        """Return True if execution is allowed for this key."""
-        state = self.get_state(key)  # This also handles HALF_OPEN timeout
-        if state == CircuitState.CLOSED:
-            return True
-        if state == CircuitState.OPEN:
-            return False
-        # HALF_OPEN: allow one probe
+        """Return True if execution is allowed for this key.
+
+        Thread-safe: entire check-then-act sequence is atomic via RLock.
+        """
         with self._lock:
+            state = self.get_state(key)  # This also handles HALF_OPEN timeout
+            if state == CircuitState.CLOSED:
+                return True
+            if state == CircuitState.OPEN:
+                return False
+            # HALF_OPEN: allow one probe
             used = self._half_open_used.get(key, 0)
             if used >= 1:
                 return False
