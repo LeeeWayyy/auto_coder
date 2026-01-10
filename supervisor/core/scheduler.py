@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from supervisor.core.state import Database, Event, EventType
+from supervisor.core.utils import normalize_repo_path
 
 if TYPE_CHECKING:
     from supervisor.core.models import Component, ComponentStatus
@@ -45,8 +46,9 @@ class DependencyNotFoundError(SchedulerError):
 class DependencyEdge:
     """Represents a dependency relationship."""
 
-    from_id: str  # The component that depends on another
-    to_id: str  # The dependency (must complete first)
+    # FIX (PR review): Corrected comments - they were swapped
+    from_id: str  # The dependency (must complete first)
+    to_id: str  # The component that depends on from_id
     edge_type: str  # "explicit" (declared) or "phase" (implicit)
 
 
@@ -101,9 +103,8 @@ class DAGScheduler:
     def _normalize_path(self, p: str, fail_closed: bool = True) -> str:
         """Normalize a file path to canonical repo-relative form.
 
-        FIX (Codex v4): Ensures consistent path comparison for conflict detection.
-        FIX (Codex v5): Fail-closed for out-of-repo paths to prevent missed conflicts.
-        ./a.py, a.py, and /full/path/to/repo/a.py all normalize to "a.py".
+        FIX (PR review): Delegates to shared utility to avoid code duplication.
+        Scheduler uses fail_closed=True by default for strict conflict detection.
 
         Args:
             p: File path (relative or absolute)
@@ -115,26 +116,7 @@ class DAGScheduler:
         Raises:
             ValueError: If path resolves outside repo root and fail_closed=True
         """
-        path = Path(p)
-        repo_root = self.repo_path.resolve()
-
-        if path.is_absolute():
-            resolved = path.resolve()
-        else:
-            resolved = (repo_root / path).resolve()
-
-        try:
-            return str(resolved.relative_to(repo_root))
-        except ValueError:
-            # FIX (Codex v5): Fail-closed - raise instead of warn-and-return
-            if fail_closed:
-                raise ValueError(
-                    f"Path '{p}' resolves outside repo root '{repo_root}'. "
-                    "All component files must be within the repository."
-                )
-            # Only for cases where we want to continue (not used in current impl)
-            logger.warning(f"Path '{p}' resolves outside repo root")
-            return p
+        return normalize_repo_path(p, self.repo_path, fail_closed=fail_closed)
 
     def build_graph(self, feature_id: str) -> None:
         """Build dependency graph from feature's components.

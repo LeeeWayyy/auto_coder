@@ -28,6 +28,7 @@ from supervisor.core.scheduler import (
     WorkflowBlockedError,
 )
 from supervisor.core.state import Database, Event, EventType
+from supervisor.core.utils import normalize_repo_path
 
 if TYPE_CHECKING:
     from supervisor.core.engine import ExecutionEngine
@@ -491,22 +492,10 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         files_in_progress: set[str] = set()
         files_lock = threading.Lock()
 
-        # FIX (Codex/Gemini review): Normalize paths relative to repo root, not cwd
+        # FIX (PR review): Use shared utility for consistent path normalization
         def normalize_path(p: str) -> str:
-            """Normalize path to consistent repo-relative form.
-
-            FIX (PR review): Resolve relative paths from repo_path, not CWD.
-            """
-            path = Path(p)
-            # If relative, resolve from repo_path; if absolute, use as-is
-            if not path.is_absolute():
-                path = self.repo_path / path
-            resolved = path.resolve()
-            try:
-                return str(resolved.relative_to(self.repo_path.resolve()))
-            except ValueError:
-                # Path outside repo - use resolved absolute path
-                return str(resolved)
+            """Normalize path using shared utility."""
+            return normalize_repo_path(p, self.repo_path, fail_closed=False)
 
         executor = ThreadPoolExecutor(max_workers=self.max_parallel_workers)
         try:
@@ -522,38 +511,38 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     last_progress_time = time.time()
                     last_completed_count = current_completed
 
-                # FIX (Codex review): Wall-clock stall detection for hanging components
-                elapsed_since_progress = time.time() - last_progress_time
-                if elapsed_since_progress > self.max_stall_seconds:
-                    # Check for timed-out components
-                    now = time.time()
-                    timed_out = [
-                        (f, c) for f, c in active_futures.items()
-                        if now - future_start_times.get(f, now) > self.component_timeout
-                    ]
-                    if timed_out:
-                        # FIX (Codex review v4): Mark components failed but DON'T release file locks
-                        # The thread may still be writing - keep locks until future.done()
-                        for future, comp in timed_out:
-                            future.cancel()  # Request cancellation (won't stop running thread)
-                            # Move to timed_out_futures - DON'T release file locks yet
-                            del active_futures[future]
-                            future_start_times.pop(future, None)
-                            timed_out_futures[future] = comp  # Track for later cleanup
-                            self._scheduler.update_component_status(
-                                comp.id,
-                                ComponentStatus.FAILED,
-                                error=f"Component timed out after {self.component_timeout}s",
-                                workflow_id=feature_id,
-                            )
-                            logger.error(f"Component '{comp.id}' timed out after {self.component_timeout}s")
-                        last_progress_time = time.time()  # Reset after handling
-
-                    elif not active_futures:
-                        raise WorkflowBlockedError(
-                            f"Feature '{feature_id}' stalled for {elapsed_since_progress:.0f}s "
-                            "with no progress. Possible deadlock."
+                # FIX (PR review): Check per-component timeouts independently of stall detection
+                # This ensures hung components are caught even when other work progresses
+                now = time.time()
+                timed_out = [
+                    (f, c) for f, c in active_futures.items()
+                    if now - future_start_times.get(f, now) > self.component_timeout
+                ]
+                if timed_out:
+                    # FIX (Codex review v4): Mark components failed but DON'T release file locks
+                    # The thread may still be writing - keep locks until future.done()
+                    for future, comp in timed_out:
+                        future.cancel()  # Request cancellation (won't stop running thread)
+                        # Move to timed_out_futures - DON'T release file locks yet
+                        del active_futures[future]
+                        future_start_times.pop(future, None)
+                        timed_out_futures[future] = comp  # Track for later cleanup
+                        self._scheduler.update_component_status(
+                            comp.id,
+                            ComponentStatus.FAILED,
+                            error=f"Component timed out after {self.component_timeout}s",
+                            workflow_id=feature_id,
                         )
+                        logger.error(f"Component '{comp.id}' timed out after {self.component_timeout}s")
+                    last_progress_time = time.time()  # Reset after handling timeouts
+
+                # FIX (Codex review): Wall-clock stall detection for deadlocks
+                elapsed_since_progress = time.time() - last_progress_time
+                if elapsed_since_progress > self.max_stall_seconds and not active_futures:
+                    raise WorkflowBlockedError(
+                        f"Feature '{feature_id}' stalled for {elapsed_since_progress:.0f}s "
+                        "with no progress. Possible deadlock."
+                    )
 
                 # FIX (Codex review v4): Check for completed timed-out futures and release their file locks
                 completed_timed_out = [f for f in timed_out_futures if f.done()]

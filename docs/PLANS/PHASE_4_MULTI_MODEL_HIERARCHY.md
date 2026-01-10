@@ -1366,6 +1366,16 @@ class PlannerDocsetStrategy(ContextStrategy):
         if tree_output:
             parts["tree"] = f"## Project Structure\n\n```\n{tree_output}\n```"
 
+        # Combine with budget enforcement
+        combined = self._combine_with_budget(parts, self.token_budget)
+
+        return ContextResult(
+            content=combined,
+            token_count=len(combined) // 4,
+            files_included=files_included,
+            truncated=len(combined) < sum(len(p) for p in parts.values()),
+        )
+
     def _get_file_tree(self, repo_path: Path, max_depth: int = 3) -> str:
         """Get file tree using tree command or Python fallback.
 
@@ -1404,16 +1414,6 @@ class PlannerDocsetStrategy(ContextStrategy):
 
         walk_tree(repo_path)
         return "\n".join(lines)
-
-        # Combine with budget enforcement
-        combined = self._combine_with_budget(parts, self.token_budget)
-
-        return ContextResult(
-            content=combined,
-            token_count=len(combined) // 4,
-            files_included=files_included,
-            truncated=len(combined) < sum(len(p) for p in parts.values()),
-        )
 
     def _combine_with_budget(self, parts: dict[str, str], budget: int) -> str:
         """Combine parts within token budget, respecting priority."""
