@@ -269,6 +269,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         for j, comp_data in enumerate(components):
             symbolic_id, generated_id = self._create_component_from_plan(
+                feature_id=feature_id,
                 phase_id=phase_id,
                 component_number=j + 1,
                 component_data=comp_data,
@@ -288,6 +289,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
     def _create_component_from_plan(
         self,
+        feature_id: str,
         phase_id: str,
         component_number: int,
         component_data: dict[str, Any],
@@ -296,6 +298,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         FIX (Codex fresh review): Returns symbolic ID mapping for dependency resolution.
         FIX (Codex v9 review): Prefixes symbolic IDs with phase_id to ensure global uniqueness.
+        FIX (PR review): Accepts feature_id to avoid unnecessary DB lookup in create_component.
 
         The planner can specify a 'symbolic_id' field for cross-referencing dependencies.
         If not provided, the title is used as a fallback symbolic ID.
@@ -315,6 +318,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         # This prevents collision when same title appears in different phases
         symbolic_id = f"{phase_id}:{raw_symbolic_id}" if raw_symbolic_id else None
 
+        # FIX (PR review): Pass feature_id directly to avoid DB lookup
         self.db.create_component(
             component_id=generated_id,
             phase_id=phase_id,
@@ -323,6 +327,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             depends_on=component_data.get("depends_on", []),  # Will be remapped in pass 2
             assigned_role=component_data.get("role", "implementer"),
             description=component_data.get("description", ""),
+            feature_id=feature_id,
         )
 
         return symbolic_id, generated_id
@@ -488,12 +493,20 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         # FIX (Codex/Gemini review): Normalize paths relative to repo root, not cwd
         def normalize_path(p: str) -> str:
-            """Normalize path to consistent repo-relative form."""
+            """Normalize path to consistent repo-relative form.
+
+            FIX (PR review): Resolve relative paths from repo_path, not CWD.
+            """
+            path = Path(p)
+            # If relative, resolve from repo_path; if absolute, use as-is
+            if not path.is_absolute():
+                path = self.repo_path / path
+            resolved = path.resolve()
             try:
-                return str(Path(p).resolve().relative_to(self.repo_path))
+                return str(resolved.relative_to(self.repo_path.resolve()))
             except ValueError:
                 # Path outside repo - use resolved absolute path
-                return str(Path(p).resolve())
+                return str(resolved)
 
         executor = ThreadPoolExecutor(max_workers=self.max_parallel_workers)
         try:

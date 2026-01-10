@@ -208,14 +208,12 @@ class TestModelRouterCostEstimation:
         assert cost_codex < cost_claude
 
     def test_estimate_cost_unknown_model(self):
-        """Test cost estimation for unknown model defaults to 1.0."""
+        """Test cost estimation for unknown model raises ValueError."""
         router = ModelRouter()
 
-        cost = router.estimate_cost("unknown", input_tokens=1000, output_tokens=500)
-        # For unknown models, relative_cost is 1.0
-        # Cost = total_tokens / 1000 * 1.0 = 1500 / 1000 * 1.0 = 1.5
-        # But the actual implementation returns 1.0 as a flat rate for unknown
-        assert cost == 1.0
+        # FIX (PR review): Unknown models should raise error, not return misleading default
+        with pytest.raises(ValueError, match="Unknown model CLI"):
+            router.estimate_cost("unknown", input_tokens=1000, output_tokens=500)
 
 
 class TestModelRouterHelpers:

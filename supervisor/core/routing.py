@@ -208,10 +208,14 @@ class ModelRouter:
 
         Returns relative cost units (1.0 = baseline Claude cost).
         Actual pricing should be configured separately.
+
+        Raises:
+            ValueError: If CLI is unknown (cannot estimate cost)
         """
         profile = MODEL_PROFILES.get(cli)
         if not profile:
-            return 1.0
+            # FIX (PR review): Raise error instead of returning misleading default
+            raise ValueError(f"Unknown model CLI '{cli}' - cannot estimate cost.")
 
         # Simplified relative cost based on token counts
         total_tokens = input_tokens + output_tokens

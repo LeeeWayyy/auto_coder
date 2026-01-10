@@ -1053,6 +1053,7 @@ class Database:
         depends_on: list[str] | None = None,
         assigned_role: str = "implementer",
         description: str = "",
+        feature_id: str | None = None,
     ) -> None:
         """Create a new component via event sourcing.
 
@@ -1064,16 +1065,19 @@ class Database:
             depends_on: List of component IDs this depends on
             assigned_role: Role to execute this component (default: "implementer")
             description: Component description
+            feature_id: Parent feature ID (optional, avoids DB lookup if provided)
         """
-        # Get feature_id from phase_id (phase format: "FEATURE_ID-PHN")
-        # We need it for the workflow_id in the event
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT feature_id FROM phases WHERE id = ?", (phase_id,)
-            ).fetchone()
-            if not row:
-                raise ValueError(f"Phase '{phase_id}' not found")
-            feature_id = row["feature_id"]
+        # FIX (PR review): Accept feature_id directly to avoid unnecessary DB lookup
+        # Caller (workflow.py) already knows the feature_id, so pass it through
+        if feature_id is None:
+            # Fallback: Get feature_id from phase_id (for backwards compatibility)
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT feature_id FROM phases WHERE id = ?", (phase_id,)
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"Phase '{phase_id}' not found")
+                feature_id = row["feature_id"]
 
         self.append_event(
             Event(

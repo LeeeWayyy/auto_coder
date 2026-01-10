@@ -1361,19 +1361,49 @@ class PlannerDocsetStrategy(ContextStrategy):
                 parts["adrs"] = "## Architecture Decision Records\n\n" + "\n\n".join(adr_content)
 
         # File tree (compressed)
+        # FIX (PR review): Uses helper method with Python fallback for portability
+        tree_output = self._get_file_tree(repo_path)
+        if tree_output:
+            parts["tree"] = f"## Project Structure\n\n```\n{tree_output}\n```"
+
+    def _get_file_tree(self, repo_path: Path, max_depth: int = 3) -> str:
+        """Get file tree using tree command or Python fallback.
+
+        FIX (Gemini review): Ensures context is available even without tree command.
+        """
+        # Try tree command first (better formatting)
         try:
             tree_output = subprocess.run(
-                ["tree", "-L", "3", "-I", "node_modules|.git|__pycache__|.venv|venv"],
+                ["tree", "-L", str(max_depth), "-I", "node_modules|.git|__pycache__|.venv|venv"],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
             if tree_output.returncode == 0:
-                parts["tree"] = f"## Project Structure\n\n```\n{tree_output.stdout}\n```"
+                return tree_output.stdout
         except Exception:
-            # tree command not available, skip
             pass
+
+        # Python fallback using os.walk
+        IGNORE_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".pytest_cache"}
+        lines = [str(repo_path.name)]
+
+        def walk_tree(path: Path, prefix: str = "", depth: int = 0) -> None:
+            if depth >= max_depth:
+                return
+            entries = sorted(path.iterdir(), key=lambda e: (not e.is_dir(), e.name))
+            entries = [e for e in entries if e.name not in IGNORE_DIRS]
+            for i, entry in enumerate(entries):
+                is_last = i == len(entries) - 1
+                connector = "└── " if is_last else "├── "
+                lines.append(f"{prefix}{connector}{entry.name}")
+                if entry.is_dir():
+                    extension = "    " if is_last else "│   "
+                    walk_tree(entry, prefix + extension, depth + 1)
+
+        walk_tree(repo_path)
+        return "\n".join(lines)
 
         # Combine with budget enforcement
         combined = self._combine_with_budget(parts, self.token_budget)
