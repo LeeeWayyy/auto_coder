@@ -5,6 +5,7 @@ Phase 4 deliverable 4.1: Dependency-aware scheduling of components.
 
 import logging
 import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -217,11 +218,12 @@ class DAGScheduler:
         in_degree = {node: len(deps) for node, deps in self._dependencies.items()}
 
         # Initialize queue with zero in-degree nodes
-        queue = [node for node, deg in in_degree.items() if deg == 0]
+        # FIX (PR review): Use deque for O(1) popleft instead of O(n) list.pop(0)
+        queue = deque(node for node, deg in in_degree.items() if deg == 0)
         visited = 0
 
         while queue:
-            node = queue.pop(0)
+            node = queue.popleft()
             visited += 1
 
             for dependent in self._dependents.get(node, []):

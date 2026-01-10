@@ -376,13 +376,23 @@ class ImplementerTargetedStrategy(ContextStrategy):
         """Resolve Python imports from target files.
 
         Uses AST parsing to extract imports and map to file paths.
+        FIX (PR review): Now handles relative imports (from . import X, from .. import Y).
         """
-        imports = set()
+        imports: set[str] = set()  # Absolute module names
+        file_paths: list[str] = []
 
         for tf in target_files:
             path = repo_path / tf
             if not path.exists() or not tf.endswith(".py"):
                 continue
+
+            # Get the package path for resolving relative imports
+            # e.g., "supervisor/core/strategies.py" -> ["supervisor", "core"]
+            tf_parts = Path(tf).parts
+            if tf_parts[-1] == "__init__.py":
+                package_parts = list(tf_parts[:-1])
+            else:
+                package_parts = list(tf_parts[:-1])  # Directory containing the file
 
             try:
                 tree = ast.parse(path.read_text())
@@ -391,13 +401,28 @@ class ImplementerTargetedStrategy(ContextStrategy):
                         for alias in node.names:
                             imports.add(alias.name)
                     elif isinstance(node, ast.ImportFrom):
-                        if node.module:
-                            imports.add(node.module)
+                        level = node.level  # 0=absolute, 1=from ., 2=from .., etc.
+                        module = node.module or ""
+
+                        if level == 0:
+                            # Absolute import
+                            if module:
+                                imports.add(module)
+                        else:
+                            # Relative import - resolve based on current file's package
+                            # Go up 'level' directories from current package
+                            if level <= len(package_parts):
+                                base_parts = package_parts[:-level] if level > 0 else package_parts
+                                if module:
+                                    full_module = ".".join(base_parts + module.split("."))
+                                else:
+                                    full_module = ".".join(base_parts)
+                                if full_module:
+                                    imports.add(full_module)
             except SyntaxError:
                 continue
 
         # Convert module names to file paths
-        file_paths = []
         for imp in imports:
             # Try direct module file
             parts = imp.split(".")

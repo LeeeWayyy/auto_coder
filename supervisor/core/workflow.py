@@ -255,12 +255,23 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         """
         phase_id = f"{feature_id}-PH{sequence}"
 
+        # FIX (PR review): Convert interfaces dict to list format for Phase model
+        # Planner may return {"name": {type, definition}} but Phase expects list[Interface]
+        raw_interfaces = phase_data.get("interfaces", {})
+        if isinstance(raw_interfaces, dict):
+            interfaces_list = [
+                {"name": name, **props} if isinstance(props, dict) else {"name": name, "definition": str(props)}
+                for name, props in raw_interfaces.items()
+            ]
+        else:
+            interfaces_list = raw_interfaces if isinstance(raw_interfaces, list) else []
+
         self.db.create_phase(
             phase_id=phase_id,
             feature_id=feature_id,
             title=phase_data.get("title", f"Phase {sequence}"),
             sequence=sequence,
-            interfaces=phase_data.get("interfaces", {}),
+            interfaces=interfaces_list,
         )
 
         # Create components for this phase, tracking ID mappings
