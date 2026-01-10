@@ -495,9 +495,10 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         try:
             while not self._scheduler.is_feature_complete():
                 # Check for progress (any new completions)
+                # FIX (PR review): Use _components and check c.status, not _component_status
                 current_completed = len([
-                    c for c in self._scheduler._component_status.values()
-                    if c.name == "COMPLETED"
+                    c for c in self._scheduler._components.values()
+                    if c.status == ComponentStatus.COMPLETED
                 ])
                 if current_completed > last_completed_count:
                     # Progress made - reset wall-clock timer
@@ -652,11 +653,17 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 f"Files to create/modify: {', '.join(component.files) if component.files else 'As needed'}"
             )
 
+            # FIX (PR review): Load role config to get its configured CLI
+            # This ensures custom/overlay roles with explicit CLI settings are respected
+            role_config = self.engine.role_loader.load_role(role_name)
+            role_cli = role_config.cli if role_config else None
+
             # FIX (Gemini review): Use ModelRouter for intelligent model selection
             # Estimate context size based on number of files
             estimated_context = len(component.files) * 5000 if component.files else 10000
             selected_model = self._router.select_model(
                 role_name=role_name,
+                role_cli=role_cli,  # Pass role's configured CLI to respect explicit config
                 context_size=estimated_context,
             )
             logger.debug(
@@ -674,8 +681,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
             # FIX (Codex review v3): Check current status before updating to COMPLETED
             # A timed-out component may still complete; ignore late results
-            current_status = self._scheduler._component_status.get(component.id)
-            if current_status == ComponentStatus.FAILED:
+            # FIX (PR review): Use _components dict to get component status
+            comp = self._scheduler._components.get(component.id)
+            if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' completed after timeout - ignoring late result"
                 )
@@ -696,8 +704,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
             # FIX (Codex review v4): Don't overwrite timeout error with exception error
-            current_status = self._scheduler._component_status.get(component.id)
-            if current_status == ComponentStatus.FAILED:
+            # FIX (PR review): Use _components dict to get component status
+            comp = self._scheduler._components.get(component.id)
+            if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' raised exception after timeout - ignoring"
                 )

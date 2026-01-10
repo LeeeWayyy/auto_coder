@@ -141,13 +141,17 @@ class ModelRouter:
         ]:
             return "codex"
 
-        # Cost preference
-        if self.prefer_cost:
-            # Choose cheapest that has required capability
-            if task_type and task_type in MODEL_PROFILES["codex"].strengths:
-                return "codex"
-            if task_type and task_type in MODEL_PROFILES["gemini"].strengths:
-                return "gemini"
+        # Cost preference - FIX (PR review): Make generic instead of hardcoding models
+        if self.prefer_cost and task_type:
+            # Find all models with this capability and sort by cost
+            capable_models = [
+                (cli, profile)
+                for cli, profile in MODEL_PROFILES.items()
+                if task_type in profile.strengths
+            ]
+            if capable_models:
+                capable_models.sort(key=lambda x: x[1].relative_cost)
+                return capable_models[0][0]
 
         return default
 
