@@ -305,54 +305,8 @@ class ParallelReviewer:
             summary=summary,
         )
 
-    def _run_single_review(
-        self,
-        role: str,
-        task_description: str,
-        workflow_id: str,
-        target_files: list[str] | None,
-        extra_context: dict[str, str] | None,
-    ) -> ReviewResult:
-        """Execute a single reviewer and wrap result."""
-        start_time = time.time()
-        role_config = self.engine.role_loader.load_role(role)
-
-        try:
-            output = self.engine.run_role(
-                role_name=role,
-                task_description=task_description,
-                workflow_id=workflow_id,
-                target_files=target_files,
-                extra_context=extra_context,
-            )
-
-            duration = time.time() - start_time
-
-            # Determine if approved (check output.status or review_status)
-            approved = False
-            if hasattr(output, "status"):
-                approved = output.status == "APPROVED"
-            if hasattr(output, "review_status"):
-                approved = output.review_status == "APPROVED"
-
-            return ReviewResult(
-                role_name=role,
-                cli=role_config.cli,
-                output=output,
-                duration_seconds=duration,
-                success=approved,
-            )
-
-        except Exception as e:
-            duration = time.time() - start_time
-            return ReviewResult(
-                role_name=role,
-                cli=role_config.cli,
-                output=None,
-                duration_seconds=duration,
-                success=False,
-                error=str(e),
-            )
+    # FIX (Gemini review): Removed unused _run_single_review method
+    # run_parallel_review uses _run_single_review_with_cancel instead
 
     def _run_single_review_with_cancel(
         self,

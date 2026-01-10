@@ -668,6 +668,10 @@ class Database:
                 )
                 # Check if phase is complete (pass event_id for ordering guard)
                 self._check_phase_completion(conn, event.component_id, event_id)
+                # FIX (Codex review): Also check for phase failure rollup
+                # If a component failed earlier while others were pending, and now
+                # all remaining components are complete, we need to mark phase as FAILED
+                self._check_phase_failure(conn, event.component_id, event_id)
 
             case EventType.COMPONENT_FAILED:
                 # Conditional update for race condition safety

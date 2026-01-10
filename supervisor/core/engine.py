@@ -1207,13 +1207,8 @@ class ExecutionEngine:
             WorkflowBlockedError: If no progress can be made
         """
         from supervisor.core.models import Feature
-        from supervisor.core.workflow import WorkflowCoordinator
-
-        # FIX (PR review): Pass through all configuration parameters
-        coordinator = WorkflowCoordinator(
-            engine=self,
-            db=self.db,
-            repo_path=self.repo_path,
+        # FIX (Gemini review): Use factory method instead of duplicating instantiation
+        coordinator = self.create_workflow_coordinator(
             max_parallel_workers=max_parallel_workers,
             prefer_speed=prefer_speed,
             prefer_cost=prefer_cost,
