@@ -74,6 +74,15 @@ class CircuitOpenError(Exception):
     pass
 
 
+class CancellationError(Exception):
+    """Operation was cancelled (e.g., due to timeout).
+
+    FIX (Codex review): Used to prevent applying changes after component timeout.
+    """
+
+    pass
+
+
 @dataclass
 class RetryPolicy:
     """Configuration for retry behavior."""
@@ -598,6 +607,8 @@ class ExecutionEngine:
         extra_context: dict[str, str] | None = None,
         retry_policy: RetryPolicy | None = None,
         gates: list[str] | None = None,
+        cli_override: str | None = None,
+        cancellation_check: "Callable[[], bool] | None" = None,
     ) -> BaseModel:
         """Run a role with full context packing, isolation, and error handling.
 
@@ -613,6 +624,9 @@ class ExecutionEngine:
             extra_context: Additional context (git diff, test output, etc.)
             retry_policy: Retry configuration
             gates: Optional gates to run (e.g., ["test", "lint"])
+            cli_override: Override CLI to use instead of role's default (from ModelRouter)
+            cancellation_check: Optional callback that returns True if operation should be
+                cancelled (e.g., due to timeout). Checked before applying changes.
 
         Returns:
             Parsed output from the worker
@@ -621,6 +635,7 @@ class ExecutionEngine:
             RetryExhaustedError: All retry attempts failed
             CircuitOpenError: Too many failures, circuit breaker open
             GateFailedError: Gate verification failed
+            CancellationError: Operation was cancelled before applying changes
         """
         # Generate unique step_id with UUID for worktree isolation
         step_id = step_id or f"{workflow_id}-{role_name}-{uuid.uuid4().hex[:8]}"
@@ -685,7 +700,7 @@ class ExecutionEngine:
 
                 # Execute CLI in ISOLATED worktree
                 with self.workspace.isolated_execution(step_id) as ctx:
-                    result = self._execute_cli(role, effective_prompt, ctx.worktree_path)
+                    result = self._execute_cli(role, effective_prompt, ctx.worktree_path, cli_override)
 
                     if result.returncode != 0 and not result.timed_out:
                         raise EngineError(
@@ -696,7 +711,10 @@ class ExecutionEngine:
                         raise EngineError(f"CLI timed out: {result.stderr}")
 
                     # PHASE 2: Use CLI adapter for parsing
-                    adapter = get_adapter(role.cli)
+                    # FIX (PR review): Use the actual CLI that executed, not role.cli
+                    # When cli_override is used, output format matches the override CLI
+                    effective_cli = cli_override or role.cli
+                    adapter = get_adapter(effective_cli)
                     # NOTE: Use _get_schema_for_role to resolve overlay extends chain
                     schema = self._get_schema_for_role(role)
                     output = adapter.parse_output(result.stdout, schema)
@@ -787,6 +805,19 @@ class ExecutionEngine:
                     # Use file lock to prevent race conditions with parallel execution
                     # Pass original_head for conflict detection
 
+                    # FIX (Codex review): Check cancellation before applying changes
+                    # This prevents timed-out components from mutating the repo after
+                    # the workflow has already marked them as FAILED
+                    if cancellation_check and cancellation_check():
+                        logger.warning(
+                            f"Step '{step_id}' cancelled before applying changes - "
+                            "discarding worktree changes"
+                        )
+                        raise CancellationError(
+                            f"Step '{step_id}' was cancelled (likely timeout). "
+                            "Changes were not applied to avoid out-of-policy mutations."
+                        )
+
                     # CRASH RECOVERY: Record applying event BEFORE modifying repo
                     self.db.append_event(
                         Event(
@@ -801,9 +832,18 @@ class ExecutionEngine:
                     # CRITICAL: Wrap apply errors - they are FATAL, not retriable
                     try:
                         with self.workspace._apply_lock:
+                            # FIX (Codex review): Re-check cancellation after acquiring lock
+                            # This closes the race window between check and apply
+                            if cancellation_check and cancellation_check():
+                                raise CancellationError(
+                                    f"Step '{step_id}' cancelled after acquiring apply lock. "
+                                    "Changes not applied."
+                                )
                             changed_files = self.workspace._apply_changes(
                                 ctx.worktree_path, ctx.original_head
                             )
+                    except CancellationError:
+                        raise  # Re-raise cancellation without wrapping
                     except Exception as apply_err:
                         raise ApplyError(
                             f"Apply failed (repository may be in inconsistent state): {apply_err}"
@@ -929,6 +969,21 @@ class ExecutionEngine:
                 if attempt < retry_policy.max_attempts - 1:
                     time.sleep(retry_policy.get_delay(attempt))
 
+            except CancellationError:
+                # FIX (Codex review): Don't retry cancelled operations
+                # CancellationError means component was timed out - no point retrying
+                logger.info(f"Step '{step_id}' cancelled, aborting without retry")
+                self.db.append_event(
+                    Event(
+                        workflow_id=workflow_id,
+                        event_type=EventType.STEP_FAILED,
+                        step_id=step_id,
+                        role=role_name,
+                        payload={"error": "Cancelled (timeout)", "cancelled": True},
+                    )
+                )
+                raise  # Re-raise without retry
+
             except Exception as e:
                 last_error = e
                 self.circuit_breaker.record_failure(circuit_key)
@@ -956,6 +1011,7 @@ class ExecutionEngine:
         role: RoleConfig,
         prompt: str,
         workdir: Path,
+        cli_override: str | None = None,
     ) -> ExecutionResult:
         """Execute CLI for a role in sandbox.
 
@@ -963,12 +1019,14 @@ class ExecutionEngine:
             role: Role configuration
             prompt: The prompt to send
             workdir: Working directory (must be a worktree for isolation)
+            cli_override: Optional CLI to use instead of role's default
 
         Note: workdir is required and must be under allowed_workdir_roots
               (typically repo/.worktrees). The repo root is intentionally
               NOT allowed to enforce worktree isolation.
         """
-        client = self._get_cli_client(role.cli)
+        cli_name = cli_override or role.cli
+        client = self._get_cli_client(cli_name)
         return client.execute(prompt, workdir)
 
     def _get_template_for_role(self, role: RoleConfig) -> str | None:
@@ -1069,4 +1127,138 @@ class ExecutionEngine:
             extra_context={
                 "file_tree": self.context_packer.get_file_tree(),
             },
+        )
+
+    # --- Phase 4: Feature->Phase->Component Workflow Integration ---
+
+    def create_workflow_coordinator(
+        self,
+        max_parallel_workers: int = 3,
+        prefer_speed: bool = False,
+        prefer_cost: bool = False,
+        max_stall_seconds: float = 600.0,
+        component_timeout: float = 300.0,
+    ) -> "WorkflowCoordinator":
+        """Create a WorkflowCoordinator for multi-model hierarchical workflows.
+
+        Phase 4 integration point for Feature->Phase->Component execution.
+
+        Args:
+            max_parallel_workers: Maximum parallel component executions
+            prefer_speed: Prioritize faster models when possible
+            prefer_cost: Prioritize cheaper models when possible
+            max_stall_seconds: Max time to wait for any progress before stalling
+            component_timeout: Max time for a single component to run
+
+        Returns:
+            Configured WorkflowCoordinator instance
+        """
+        from supervisor.core.workflow import WorkflowCoordinator
+
+        # FIX (PR review): Pass through all configuration parameters
+        return WorkflowCoordinator(
+            engine=self,
+            db=self.db,
+            repo_path=self.repo_path,
+            max_parallel_workers=max_parallel_workers,
+            prefer_speed=prefer_speed,
+            prefer_cost=prefer_cost,
+            max_stall_seconds=max_stall_seconds,
+            component_timeout=component_timeout,
+        )
+
+    def execute_feature(
+        self,
+        feature_id: str,
+        parallel: bool = True,
+        max_parallel_workers: int = 3,
+        prefer_speed: bool = False,
+        prefer_cost: bool = False,
+        max_stall_seconds: float = 600.0,
+        component_timeout: float = 300.0,
+    ) -> "Feature":
+        """Execute all components of a feature in dependency order.
+
+        Phase 4 convenience method that creates a WorkflowCoordinator
+        and runs the implementation phase.
+
+        ALGORITHM:
+        1. Build DAG from feature's phases and components
+        2. While not complete:
+           a. Get ready components (dependencies satisfied)
+           b. If parallel: execute batch in ThreadPoolExecutor
+           c. If sequential: execute one by one
+           d. Update component statuses
+        3. Update phase/feature completion status
+
+        Args:
+            feature_id: Feature to execute
+            parallel: Enable parallel execution (default True)
+            max_parallel_workers: Maximum parallel workers
+            prefer_speed: Prioritize faster models when possible
+            prefer_cost: Prioritize cheaper models when possible
+            max_stall_seconds: Max time to wait for any progress before stalling
+            component_timeout: Max time for a single component to run
+
+        Returns:
+            Completed Feature object
+
+        Raises:
+            WorkflowBlockedError: If no progress can be made
+        """
+        from supervisor.core.models import Feature
+        # FIX (Gemini review): Use factory method instead of duplicating instantiation
+        coordinator = self.create_workflow_coordinator(
+            max_parallel_workers=max_parallel_workers,
+            prefer_speed=prefer_speed,
+            prefer_cost=prefer_cost,
+            max_stall_seconds=max_stall_seconds,
+            component_timeout=component_timeout,
+        )
+
+        return coordinator.run_implementation(feature_id, parallel=parallel)
+
+    def run_parallel_review(
+        self,
+        roles: list[str],
+        task_description: str,
+        workflow_id: str,
+        target_files: list[str] | None = None,
+        extra_context: dict[str, str] | None = None,
+        approval_policy: str = "ALL_APPROVED",
+        timeout: float = 300.0,
+        max_workers: int = 3,
+    ) -> "AggregatedReviewResult":
+        """Run multiple reviewers in parallel and aggregate results.
+
+        Phase 4 convenience method for parallel multi-model review.
+
+        Args:
+            roles: List of reviewer role names (e.g., ["reviewer_gemini", "reviewer_codex"])
+            task_description: What to review
+            workflow_id: Workflow context
+            target_files: Files to review
+            extra_context: Additional context (git_diff, etc.)
+            approval_policy: How to determine overall approval
+            timeout: Maximum time to wait for all reviewers
+            max_workers: Maximum parallel reviewers (default 3)
+
+        Returns:
+            AggregatedReviewResult with individual results and approval decision
+        """
+        from supervisor.core.parallel import AggregatedReviewResult, ParallelReviewer
+
+        reviewer = ParallelReviewer(
+            engine=self,
+            max_workers=max_workers,
+            timeout=timeout,
+        )
+
+        return reviewer.run_parallel_review(
+            roles=roles,
+            task_description=task_description,
+            workflow_id=workflow_id,
+            target_files=target_files,
+            extra_context=extra_context,
+            approval_policy=approval_policy,
         )

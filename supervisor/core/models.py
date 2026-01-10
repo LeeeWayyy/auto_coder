@@ -89,6 +89,8 @@ class Component(BaseModel):
     id: str  # e.g., "P1T5-PH1-C1"
     phase_id: str
     title: str
+    # FIX (PR review): Add description field (was causing AttributeError)
+    description: str = ""
     files: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     status: ComponentStatus = ComponentStatus.PENDING

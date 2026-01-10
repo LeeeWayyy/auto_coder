@@ -177,10 +177,12 @@ class Database:
     );
 
     -- Components (hierarchical - projection)
+    -- FIX (PR review): Added description column
     CREATE TABLE IF NOT EXISTS components (
         id TEXT PRIMARY KEY,
         phase_id TEXT NOT NULL,
         title TEXT NOT NULL,
+        description TEXT DEFAULT '',
         files JSON,
         depends_on JSON,
         status TEXT NOT NULL,
@@ -579,16 +581,18 @@ class Database:
 
             case EventType.COMPONENT_CREATED:
                 # Insert if not exists
+                # FIX (PR review): Include description column
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO components (id, phase_id, title, files, depends_on,
-                                           status, assigned_role, updated_by_event_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO components (id, phase_id, title, description, files,
+                                           depends_on, status, assigned_role, updated_by_event_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.payload["id"],
                         event.payload["phase_id"],
                         event.payload["title"],
+                        event.payload.get("description", ""),
                         _safe_json_dumps(event.payload.get("files", [])),
                         _safe_json_dumps(event.payload.get("depends_on", [])),
                         ComponentStatus.PENDING.value,
@@ -599,13 +603,14 @@ class Database:
                 # Conditional update for plan corrections/retries
                 conn.execute(
                     """
-                    UPDATE components SET phase_id = ?, title = ?, files = ?,
+                    UPDATE components SET phase_id = ?, title = ?, description = ?, files = ?,
                         depends_on = ?, assigned_role = ?, updated_by_event_id = ?
                     WHERE id = ? AND updated_by_event_id < ?
                     """,
                     (
                         event.payload["phase_id"],
                         event.payload["title"],
+                        event.payload.get("description", ""),
                         _safe_json_dumps(event.payload.get("files", [])),
                         _safe_json_dumps(event.payload.get("depends_on", [])),
                         event.payload.get("assigned_role"),
@@ -663,6 +668,10 @@ class Database:
                 )
                 # Check if phase is complete (pass event_id for ordering guard)
                 self._check_phase_completion(conn, event.component_id, event_id)
+                # FIX (Codex review): Also check for phase failure rollup
+                # If a component failed earlier while others were pending, and now
+                # all remaining components are complete, we need to mark phase as FAILED
+                self._check_phase_failure(conn, event.component_id, event_id)
 
             case EventType.COMPONENT_FAILED:
                 # Conditional update for race condition safety
@@ -679,6 +688,8 @@ class Database:
                         event_id,
                     ),
                 )
+                # FIX (PR review): Roll up failure to phase/feature status
+                self._check_phase_failure(conn, event.component_id, event_id)
 
             case EventType.WORKFLOW_COMPLETED:
                 # Conditional update for race condition safety
@@ -770,6 +781,101 @@ class Database:
                     feature_id,
                     event_id,
                 ),
+            )
+
+    def _check_phase_failure(
+        self, conn: sqlite3.Connection, component_id: str, event_id: int
+    ) -> None:
+        """Check if a phase should be marked as FAILED after a component failure.
+
+        FIX (PR review): Roll up component failures to phase/feature status.
+        A phase is marked FAILED when all components are terminal (COMPLETED/FAILED)
+        and at least one is FAILED.
+        """
+        # Get the phase for this component
+        row = conn.execute(
+            "SELECT phase_id FROM components WHERE id = ?", (component_id,)
+        ).fetchone()
+        if not row:
+            return
+
+        phase_id = row["phase_id"]
+
+        # Check if any components are still pending or in progress
+        non_terminal = conn.execute(
+            """
+            SELECT COUNT(*) FROM components
+            WHERE phase_id = ? AND status NOT IN (?, ?)
+            """,
+            (phase_id, ComponentStatus.COMPLETED.value, ComponentStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if non_terminal > 0:
+            # Some components still running - don't mark phase as failed yet
+            return
+
+        # All components are terminal - check if any failed
+        failed_count = conn.execute(
+            "SELECT COUNT(*) FROM components WHERE phase_id = ? AND status = ?",
+            (phase_id, ComponentStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if failed_count > 0:
+            # Mark phase as FAILED
+            conn.execute(
+                """
+                UPDATE phases SET status = ?, updated_by_event_id = ?
+                WHERE id = ? AND updated_by_event_id < ?
+                """,
+                (PhaseStatus.FAILED.value, event_id, phase_id, event_id),
+            )
+            # Check if feature should also be marked as failed
+            self._check_feature_failure(conn, phase_id, event_id)
+
+    def _check_feature_failure(
+        self, conn: sqlite3.Connection, phase_id: str, event_id: int
+    ) -> None:
+        """Check if a feature should be marked as FAILED after a phase failure.
+
+        FIX (PR review): Roll up phase failures to feature status.
+        A feature is marked FAILED when all phases are terminal (COMPLETED/FAILED)
+        and at least one is FAILED.
+        """
+        row = conn.execute(
+            "SELECT feature_id FROM phases WHERE id = ?", (phase_id,)
+        ).fetchone()
+        if not row:
+            return
+
+        feature_id = row["feature_id"]
+
+        # Check if any phases are still pending or in progress
+        non_terminal = conn.execute(
+            """
+            SELECT COUNT(*) FROM phases
+            WHERE feature_id = ? AND status NOT IN (?, ?)
+            """,
+            (feature_id, PhaseStatus.COMPLETED.value, PhaseStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if non_terminal > 0:
+            # Some phases still running - don't mark feature as failed yet
+            return
+
+        # All phases are terminal - check if any failed
+        failed_count = conn.execute(
+            "SELECT COUNT(*) FROM phases WHERE feature_id = ? AND status = ?",
+            (feature_id, PhaseStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if failed_count > 0:
+            # Mark feature as FAILED
+            conn.execute(
+                """
+                UPDATE features SET status = ?, updated_by_event_id = ?
+                WHERE id = ? AND updated_by_event_id < ?
+                """,
+                (FeatureStatus.FAILED.value, event_id, feature_id, event_id),
             )
 
     # --- Query Methods ---
@@ -940,10 +1046,12 @@ class Database:
 
     def _row_to_component(self, row: sqlite3.Row) -> Component:
         """Convert database row to Component."""
+        # FIX (PR review): Include description field
         return Component(
             id=row["id"],
             phase_id=row["phase_id"],
             title=row["title"],
+            description=row["description"] or "",
             files=json.loads(row["files"]) if row["files"] else [],
             depends_on=json.loads(row["depends_on"]) if row["depends_on"] else [],
             status=ComponentStatus(row["status"]),
@@ -984,6 +1092,200 @@ class Database:
                     error,
                     component_id,
                 ),
+            )
+
+    # --- Phase 4: Helper Methods for Feature/Phase/Component Creation ---
+
+    def create_feature(
+        self,
+        feature_id: str,
+        title: str,
+        description: str = "",
+    ) -> None:
+        """Create a new feature via event sourcing.
+
+        Args:
+            feature_id: Unique feature identifier (e.g., "F-ABC12345")
+            title: Feature title
+            description: Detailed description
+        """
+        self.append_event(
+            Event(
+                workflow_id=feature_id,
+                event_type=EventType.FEATURE_CREATED,
+                payload={
+                    "id": feature_id,
+                    "title": title,
+                    "description": description,
+                },
+            )
+        )
+
+    def create_phase(
+        self,
+        phase_id: str,
+        feature_id: str,
+        title: str,
+        sequence: int,
+        interfaces: dict | list | None = None,
+    ) -> None:
+        """Create a new phase via event sourcing.
+
+        Args:
+            phase_id: Unique phase identifier (e.g., "F-ABC12345-PH1")
+            feature_id: Parent feature ID
+            title: Phase title
+            sequence: Execution order (1-based)
+            interfaces: Interface definitions for this phase
+        """
+        self.append_event(
+            Event(
+                workflow_id=feature_id,
+                event_type=EventType.PHASE_CREATED,
+                payload={
+                    "id": phase_id,
+                    "feature_id": feature_id,
+                    "title": title,
+                    "sequence": sequence,
+                    "interfaces": interfaces or [],
+                },
+            )
+        )
+
+    def create_component(
+        self,
+        component_id: str,
+        phase_id: str,
+        title: str,
+        files: list[str] | None = None,
+        depends_on: list[str] | None = None,
+        assigned_role: str = "implementer",
+        description: str = "",
+        feature_id: str | None = None,
+    ) -> None:
+        """Create a new component via event sourcing.
+
+        Args:
+            component_id: Unique component identifier (e.g., "F-ABC12345-PH1-C1")
+            phase_id: Parent phase ID
+            title: Component title
+            files: List of files this component will create/modify
+            depends_on: List of component IDs this depends on
+            assigned_role: Role to execute this component (default: "implementer")
+            description: Component description
+            feature_id: Parent feature ID (optional, avoids DB lookup if provided)
+        """
+        # FIX (PR review): Accept feature_id directly to avoid unnecessary DB lookup
+        # Caller (workflow.py) already knows the feature_id, so pass it through
+        if feature_id is None:
+            # Fallback: Get feature_id from phase_id (for backwards compatibility)
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT feature_id FROM phases WHERE id = ?", (phase_id,)
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"Phase '{phase_id}' not found")
+                feature_id = row["feature_id"]
+
+        self.append_event(
+            Event(
+                workflow_id=feature_id,
+                event_type=EventType.COMPONENT_CREATED,
+                payload={
+                    "id": component_id,
+                    "phase_id": phase_id,
+                    "title": title,
+                    "files": files or [],
+                    "depends_on": depends_on or [],
+                    "assigned_role": assigned_role,
+                    "description": description,
+                },
+            )
+        )
+
+    def get_phase(self, phase_id: str) -> Phase | None:
+        """Get a phase by ID."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM phases WHERE id = ?", (phase_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return Phase(
+                id=row["id"],
+                feature_id=row["feature_id"],
+                title=row["title"],
+                sequence=row["sequence"],
+                status=PhaseStatus(row["status"]),
+                interfaces=json.loads(row["interfaces"]) if row["interfaces"] else [],
+            )
+
+    def update_feature_status(
+        self,
+        feature_id: str,
+        status: FeatureStatus,
+    ) -> None:
+        """Update feature status directly (for workflow state transitions).
+
+        Note: For completion, prefer relying on automatic rollup from
+        _check_feature_completion(). Use this for explicit state changes
+        like PLANNING -> IN_PROGRESS -> REVIEW.
+
+        FIX (Codex review): Use MAX(id) not MAX(id)+1 to avoid skipping next event.
+        Setting to MAX(id)+1 would equal the next event's ID, causing projections
+        to skip that event since they only update when updated_by_event_id < event_id.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE features SET status = ?, updated_by_event_id = (
+                    SELECT COALESCE(MAX(id), 0) FROM events
+                )
+                WHERE id = ?
+                """,
+                (status.value, feature_id),
+            )
+
+    def update_phase_status(
+        self,
+        phase_id: str,
+        status: PhaseStatus,
+    ) -> None:
+        """Update phase status directly (for workflow state transitions).
+
+        FIX (Codex review): Use MAX(id) not MAX(id)+1 to avoid skipping next event.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE phases SET status = ?, updated_by_event_id = (
+                    SELECT COALESCE(MAX(id), 0) FROM events
+                )
+                WHERE id = ?
+                """,
+                (status.value, phase_id),
+            )
+
+    def update_component_dependencies(
+        self,
+        component_id: str,
+        depends_on: list[str],
+    ) -> None:
+        """Update component dependencies (for dependency ID remapping).
+
+        Used during Phase 4 workflow to remap symbolic IDs to generated IDs.
+
+        FIX (Codex review): Use MAX(id) not MAX(id)+1 to avoid skipping next event.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE components SET depends_on = ?, updated_by_event_id = (
+                    SELECT COALESCE(MAX(id), 0) FROM events
+                )
+                WHERE id = ?
+                """,
+                (_safe_json_dumps(depends_on), component_id),
             )
 
     # --- Checkpoint Methods ---
