@@ -698,7 +698,10 @@ class ExecutionEngine:
                         raise EngineError(f"CLI timed out: {result.stderr}")
 
                     # PHASE 2: Use CLI adapter for parsing
-                    adapter = get_adapter(role.cli)
+                    # FIX (PR review): Use the actual CLI that executed, not role.cli
+                    # When cli_override is used, output format matches the override CLI
+                    effective_cli = cli_override or role.cli
+                    adapter = get_adapter(effective_cli)
                     # NOTE: Use _get_schema_for_role to resolve overlay extends chain
                     schema = self._get_schema_for_role(role)
                     output = adapter.parse_output(result.stdout, schema)
