@@ -423,7 +423,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         # Update feature status
         self.db.update_feature_status(feature_id, FeatureStatus.IN_PROGRESS)
 
-        num_components = len(self._scheduler._components)
+        # FIX (PR review): Use public method instead of accessing _components directly
+        num_components = self._scheduler.get_component_count()
 
         if not parallel:
             # Sequential execution - simple loop
@@ -501,11 +502,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         try:
             while not self._scheduler.is_feature_complete():
                 # Check for progress (any new completions)
-                # FIX (PR review): Use _components and check c.status, not _component_status
-                current_completed = len([
-                    c for c in self._scheduler._components.values()
-                    if c.status == ComponentStatus.COMPLETED
-                ])
+                # FIX (PR review): Use public method instead of accessing _components directly
+                current_completed = self._scheduler.get_completed_count()
                 if current_completed > last_completed_count:
                     # Progress made - reset wall-clock timer
                     last_progress_time = time.time()
@@ -691,8 +689,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
             # FIX (Codex review v3): Check current status before updating to COMPLETED
             # A timed-out component may still complete; ignore late results
-            # FIX (PR review): Use _components dict to get component status
-            comp = self._scheduler._components.get(component.id)
+            # FIX (PR review): Use public method instead of accessing _components directly
+            comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' completed after timeout - ignoring late result"
@@ -714,8 +712,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
             # FIX (Codex review v4): Don't overwrite timeout error with exception error
-            # FIX (PR review): Use _components dict to get component status
-            comp = self._scheduler._components.get(component.id)
+            # FIX (PR review): Use public method instead of accessing _components directly
+            comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' raised exception after timeout - ignoring"

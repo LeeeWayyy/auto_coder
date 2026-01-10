@@ -143,8 +143,9 @@ class DependencyNotFoundError(SchedulerError):
 @dataclass
 class DependencyEdge:
     """Represents a dependency relationship."""
-    from_id: str      # The component that depends on another
-    to_id: str        # The dependency (must complete first)
+    # FIX (PR review): Corrected comments to match implementation
+    from_id: str      # The dependency (must complete first)
+    to_id: str        # The component that depends on from_id
     edge_type: str    # "explicit" (declared) or "phase" (implicit)
 
 
@@ -911,7 +912,8 @@ class ExecutionEngine:
 """Parallel execution utilities for multi-model reviews."""
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+# FIX (PR review): Import TimeoutError with alias to avoid shadowing built-in
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import Callable, Generic, TypeVar
 from pydantic import BaseModel
@@ -1096,7 +1098,7 @@ class ParallelReviewer:
                             success=False,
                             error=str(e),
                         ))
-            except TimeoutError:
+            except FuturesTimeoutError:
                 # Some futures timed out - cancel and return immediately
                 logger.warning(f"Parallel review timed out after {self.timeout}s")
                 for future, role in futures.items():

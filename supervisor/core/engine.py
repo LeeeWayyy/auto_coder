@@ -1084,6 +1084,10 @@ class ExecutionEngine:
     def create_workflow_coordinator(
         self,
         max_parallel_workers: int = 3,
+        prefer_speed: bool = False,
+        prefer_cost: bool = False,
+        max_stall_seconds: float = 600.0,
+        component_timeout: float = 300.0,
     ) -> "WorkflowCoordinator":
         """Create a WorkflowCoordinator for multi-model hierarchical workflows.
 
@@ -1091,17 +1095,26 @@ class ExecutionEngine:
 
         Args:
             max_parallel_workers: Maximum parallel component executions
+            prefer_speed: Prioritize faster models when possible
+            prefer_cost: Prioritize cheaper models when possible
+            max_stall_seconds: Max time to wait for any progress before stalling
+            component_timeout: Max time for a single component to run
 
         Returns:
             Configured WorkflowCoordinator instance
         """
         from supervisor.core.workflow import WorkflowCoordinator
 
+        # FIX (PR review): Pass through all configuration parameters
         return WorkflowCoordinator(
             engine=self,
             db=self.db,
             repo_path=self.repo_path,
             max_parallel_workers=max_parallel_workers,
+            prefer_speed=prefer_speed,
+            prefer_cost=prefer_cost,
+            max_stall_seconds=max_stall_seconds,
+            component_timeout=component_timeout,
         )
 
     def execute_feature(
@@ -1109,6 +1122,10 @@ class ExecutionEngine:
         feature_id: str,
         parallel: bool = True,
         max_parallel_workers: int = 3,
+        prefer_speed: bool = False,
+        prefer_cost: bool = False,
+        max_stall_seconds: float = 600.0,
+        component_timeout: float = 300.0,
     ) -> "Feature":
         """Execute all components of a feature in dependency order.
 
@@ -1128,6 +1145,10 @@ class ExecutionEngine:
             feature_id: Feature to execute
             parallel: Enable parallel execution (default True)
             max_parallel_workers: Maximum parallel workers
+            prefer_speed: Prioritize faster models when possible
+            prefer_cost: Prioritize cheaper models when possible
+            max_stall_seconds: Max time to wait for any progress before stalling
+            component_timeout: Max time for a single component to run
 
         Returns:
             Completed Feature object
@@ -1138,11 +1159,16 @@ class ExecutionEngine:
         from supervisor.core.models import Feature
         from supervisor.core.workflow import WorkflowCoordinator
 
+        # FIX (PR review): Pass through all configuration parameters
         coordinator = WorkflowCoordinator(
             engine=self,
             db=self.db,
             repo_path=self.repo_path,
             max_parallel_workers=max_parallel_workers,
+            prefer_speed=prefer_speed,
+            prefer_cost=prefer_cost,
+            max_stall_seconds=max_stall_seconds,
+            component_timeout=component_timeout,
         )
 
         return coordinator.run_implementation(feature_id, parallel=parallel)

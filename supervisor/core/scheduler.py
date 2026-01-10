@@ -403,6 +403,50 @@ class DAGScheduler:
                 for comp in self._components.values()
             )
 
+    def get_component(self, component_id: str) -> "Component | None":
+        """Get a component by ID from the scheduler's cache.
+
+        FIX (PR review): Public method to avoid direct access to _components dict.
+        Thread-safe read using _status_lock.
+
+        Args:
+            component_id: Component ID to look up
+
+        Returns:
+            Component if found, None otherwise
+        """
+        with self._status_lock:
+            return self._components.get(component_id)
+
+    def get_component_count(self) -> int:
+        """Get total number of components in the scheduler.
+
+        FIX (PR review): Public method to avoid direct access to _components dict.
+        Thread-safe read using _status_lock.
+
+        Returns:
+            Total component count
+        """
+        with self._status_lock:
+            return len(self._components)
+
+    def get_completed_count(self) -> int:
+        """Get count of completed components.
+
+        FIX (PR review): Public method to avoid direct access to _components dict.
+        Thread-safe read using _status_lock.
+
+        Returns:
+            Number of components with COMPLETED status
+        """
+        from supervisor.core.models import ComponentStatus
+
+        with self._status_lock:
+            return sum(
+                1 for comp in self._components.values()
+                if comp.status == ComponentStatus.COMPLETED
+            )
+
     def is_feature_blocked(self) -> bool:
         """Check if feature is blocked (no ready components but not complete).
 

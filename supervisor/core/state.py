@@ -679,6 +679,8 @@ class Database:
                         event_id,
                     ),
                 )
+                # FIX (PR review): Roll up failure to phase/feature status
+                self._check_phase_failure(conn, event.component_id, event_id)
 
             case EventType.WORKFLOW_COMPLETED:
                 # Conditional update for race condition safety
@@ -770,6 +772,101 @@ class Database:
                     feature_id,
                     event_id,
                 ),
+            )
+
+    def _check_phase_failure(
+        self, conn: sqlite3.Connection, component_id: str, event_id: int
+    ) -> None:
+        """Check if a phase should be marked as FAILED after a component failure.
+
+        FIX (PR review): Roll up component failures to phase/feature status.
+        A phase is marked FAILED when all components are terminal (COMPLETED/FAILED)
+        and at least one is FAILED.
+        """
+        # Get the phase for this component
+        row = conn.execute(
+            "SELECT phase_id FROM components WHERE id = ?", (component_id,)
+        ).fetchone()
+        if not row:
+            return
+
+        phase_id = row["phase_id"]
+
+        # Check if any components are still pending or in progress
+        non_terminal = conn.execute(
+            """
+            SELECT COUNT(*) FROM components
+            WHERE phase_id = ? AND status NOT IN (?, ?)
+            """,
+            (phase_id, ComponentStatus.COMPLETED.value, ComponentStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if non_terminal > 0:
+            # Some components still running - don't mark phase as failed yet
+            return
+
+        # All components are terminal - check if any failed
+        failed_count = conn.execute(
+            "SELECT COUNT(*) FROM components WHERE phase_id = ? AND status = ?",
+            (phase_id, ComponentStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if failed_count > 0:
+            # Mark phase as FAILED
+            conn.execute(
+                """
+                UPDATE phases SET status = ?, updated_by_event_id = ?
+                WHERE id = ? AND updated_by_event_id < ?
+                """,
+                (PhaseStatus.FAILED.value, event_id, phase_id, event_id),
+            )
+            # Check if feature should also be marked as failed
+            self._check_feature_failure(conn, phase_id, event_id)
+
+    def _check_feature_failure(
+        self, conn: sqlite3.Connection, phase_id: str, event_id: int
+    ) -> None:
+        """Check if a feature should be marked as FAILED after a phase failure.
+
+        FIX (PR review): Roll up phase failures to feature status.
+        A feature is marked FAILED when all phases are terminal (COMPLETED/FAILED)
+        and at least one is FAILED.
+        """
+        row = conn.execute(
+            "SELECT feature_id FROM phases WHERE id = ?", (phase_id,)
+        ).fetchone()
+        if not row:
+            return
+
+        feature_id = row["feature_id"]
+
+        # Check if any phases are still pending or in progress
+        non_terminal = conn.execute(
+            """
+            SELECT COUNT(*) FROM phases
+            WHERE feature_id = ? AND status NOT IN (?, ?)
+            """,
+            (feature_id, PhaseStatus.COMPLETED.value, PhaseStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if non_terminal > 0:
+            # Some phases still running - don't mark feature as failed yet
+            return
+
+        # All phases are terminal - check if any failed
+        failed_count = conn.execute(
+            "SELECT COUNT(*) FROM phases WHERE feature_id = ? AND status = ?",
+            (feature_id, PhaseStatus.FAILED.value),
+        ).fetchone()[0]
+
+        if failed_count > 0:
+            # Mark feature as FAILED
+            conn.execute(
+                """
+                UPDATE features SET status = ?, updated_by_event_id = ?
+                WHERE id = ? AND updated_by_event_id < ?
+                """,
+                (FeatureStatus.FAILED.value, event_id, feature_id, event_id),
             )
 
     # --- Query Methods ---
