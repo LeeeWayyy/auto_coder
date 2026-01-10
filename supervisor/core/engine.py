@@ -1153,6 +1153,7 @@ class ExecutionEngine:
         extra_context: dict[str, str] | None = None,
         approval_policy: str = "ALL_APPROVED",
         timeout: float = 300.0,
+        max_workers: int = 3,
     ) -> "AggregatedReviewResult":
         """Run multiple reviewers in parallel and aggregate results.
 
@@ -1166,6 +1167,7 @@ class ExecutionEngine:
             extra_context: Additional context (git_diff, etc.)
             approval_policy: How to determine overall approval
             timeout: Maximum time to wait for all reviewers
+            max_workers: Maximum parallel reviewers (default 3)
 
         Returns:
             AggregatedReviewResult with individual results and approval decision
@@ -1174,7 +1176,7 @@ class ExecutionEngine:
 
         reviewer = ParallelReviewer(
             engine=self,
-            max_workers=3,
+            max_workers=max_workers,
             timeout=timeout,
         )
 

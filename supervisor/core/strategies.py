@@ -14,6 +14,39 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# FIX (PR review): Module-level helper to avoid code duplication
+def detect_language(filepath: str) -> str:
+    """Detect language from file extension for syntax highlighting.
+
+    Args:
+        filepath: Path to file
+
+    Returns:
+        Language identifier for syntax highlighting (e.g., "python", "javascript")
+    """
+    ext_map = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".jsx": "jsx",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".rb": "ruby",
+        ".sh": "bash",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".json": "json",
+        ".md": "markdown",
+        ".sql": "sql",
+        ".css": "css",
+        ".html": "html",
+    }
+    ext = Path(filepath).suffix.lower()
+    return ext_map.get(ext, "")
+
+
 class StrategyError(Exception):
     """Error in context strategy."""
 
@@ -269,7 +302,7 @@ class ImplementerTargetedStrategy(ContextStrategy):
                 path = repo_path / tf
                 if path.exists():
                     # Detect language from extension
-                    lang = self._detect_language(tf)
+                    lang = detect_language(tf)
                     target_content.append(
                         f"### {tf}\n\n```{lang}\n{path.read_text()}\n```"
                     )
@@ -287,7 +320,7 @@ class ImplementerTargetedStrategy(ContextStrategy):
                 for imp_file in imports[:10]:  # Limit to 10 imports
                     path = repo_path / imp_file
                     if path.exists():
-                        lang = self._detect_language(imp_file)
+                        lang = detect_language(imp_file)
                         import_content.append(
                             f"### {imp_file}\n\n```{lang}\n{path.read_text()}\n```"
                         )
@@ -338,30 +371,6 @@ class ImplementerTargetedStrategy(ContextStrategy):
             token_count=len(combined) // 4,
             files_included=files_included,
         )
-
-    def _detect_language(self, filepath: str) -> str:
-        """Detect language from file extension for syntax highlighting."""
-        ext_map = {
-            ".py": "python",
-            ".js": "javascript",
-            ".ts": "typescript",
-            ".tsx": "tsx",
-            ".jsx": "jsx",
-            ".go": "go",
-            ".rs": "rust",
-            ".java": "java",
-            ".rb": "ruby",
-            ".sh": "bash",
-            ".yaml": "yaml",
-            ".yml": "yaml",
-            ".json": "json",
-            ".md": "markdown",
-            ".sql": "sql",
-            ".css": "css",
-            ".html": "html",
-        }
-        ext = Path(filepath).suffix.lower()
-        return ext_map.get(ext, "")
 
     def _resolve_imports(self, repo_path: Path, target_files: list[str]) -> list[str]:
         """Resolve Python imports from target files.
@@ -481,7 +490,7 @@ class ReviewerDiffStrategy(ContextStrategy):
                 for nf in new_files[:5]:  # Limit to 5 new files
                     path = repo_path / nf
                     if path.exists():
-                        lang = self._detect_language(nf)
+                        lang = detect_language(nf)
                         new_content.append(
                             f"### {nf}\n\n```{lang}\n{path.read_text()}\n```"
                         )
@@ -515,30 +524,6 @@ class ReviewerDiffStrategy(ContextStrategy):
             token_count=len(combined) // 4,
             files_included=files_included,
         )
-
-    def _detect_language(self, filepath: str) -> str:
-        """Detect language from file extension for syntax highlighting."""
-        ext_map = {
-            ".py": "python",
-            ".js": "javascript",
-            ".ts": "typescript",
-            ".tsx": "tsx",
-            ".jsx": "jsx",
-            ".go": "go",
-            ".rs": "rust",
-            ".java": "java",
-            ".rb": "ruby",
-            ".sh": "bash",
-            ".yaml": "yaml",
-            ".yml": "yaml",
-            ".json": "json",
-            ".md": "markdown",
-            ".sql": "sql",
-            ".css": "css",
-            ".html": "html",
-        }
-        ext = Path(filepath).suffix.lower()
-        return ext_map.get(ext, "")
 
     def _combine_with_budget(self, parts: dict[str, str], budget: int) -> str:
         char_budget = budget * 4

@@ -109,11 +109,16 @@ class WorkflowCoordinator:
         max_parallel_workers: int = 3,
         prefer_speed: bool = False,
         prefer_cost: bool = False,
+        max_stall_seconds: float = 600.0,
+        component_timeout: float = 300.0,
     ):
         self.engine = engine
         self.db = db
         self.repo_path = Path(repo_path) if repo_path else Path.cwd()
         self.max_parallel_workers = max_parallel_workers
+        # FIX (PR review): Make timeout values configurable
+        self.max_stall_seconds = max_stall_seconds  # Max time without progress (default 10 min)
+        self.component_timeout = component_timeout  # Per-component timeout (default 5 min)
         self._scheduler: DAGScheduler | None = None
         # FIX (Gemini review): Integrate ModelRouter for intelligent model selection
         self._router = create_router(prefer_speed=prefer_speed, prefer_cost=prefer_cost)
@@ -469,12 +474,11 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         """
         # FIX (Codex review v2): Wall-clock stall detector for hanging components
         # Tracks last progress time to detect hangs even with active futures
-        max_stall_seconds = 600.0  # 10 minutes without progress = stall
+        # FIX (PR review): Use configurable timeout values from __init__
         last_progress_time = time.time()
         last_completed_count = 0
         active_futures: dict[Future, Component] = {}
         future_start_times: dict[Future, float] = {}  # Track when each future started
-        component_timeout = 300.0  # Per-component timeout (5 minutes)
         # FIX (Codex review v4): Track timed-out futures to release file locks ONLY when thread completes
         # Don't release locks immediately - the thread may still be writing files
         timed_out_futures: dict[Future, Component] = {}
@@ -507,12 +511,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
                 # FIX (Codex review): Wall-clock stall detection for hanging components
                 elapsed_since_progress = time.time() - last_progress_time
-                if elapsed_since_progress > max_stall_seconds:
+                if elapsed_since_progress > self.max_stall_seconds:
                     # Check for timed-out components
                     now = time.time()
                     timed_out = [
                         (f, c) for f, c in active_futures.items()
-                        if now - future_start_times.get(f, now) > component_timeout
+                        if now - future_start_times.get(f, now) > self.component_timeout
                     ]
                     if timed_out:
                         # FIX (Codex review v4): Mark components failed but DON'T release file locks
@@ -526,10 +530,10 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                             self._scheduler.update_component_status(
                                 comp.id,
                                 ComponentStatus.FAILED,
-                                error=f"Component timed out after {component_timeout}s",
+                                error=f"Component timed out after {self.component_timeout}s",
                                 workflow_id=feature_id,
                             )
-                            logger.error(f"Component '{comp.id}' timed out after {component_timeout}s")
+                            logger.error(f"Component '{comp.id}' timed out after {self.component_timeout}s")
                         last_progress_time = time.time()  # Reset after handling
 
                     elif not active_futures:
@@ -552,16 +556,20 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 submittable = []
 
                 with files_lock:
+                    # FIX (PR review): Track files from components being added to submittable
+                    # to prevent co-scheduling components that conflict with each other
+                    pending_files: set[str] = set()
                     for comp in ready:
                         # Normalize component file paths for comparison
                         comp_files = {normalize_path(f) for f in (comp.files or [])}
                         # Check if already submitted (in active_futures)
                         if any(c.id == comp.id for c in active_futures.values()):
                             continue
-                        # Check for file conflicts
-                        if comp_files & files_in_progress:
+                        # Check for file conflicts with in-progress AND pending-to-submit
+                        if comp_files & files_in_progress or comp_files & pending_files:
                             continue  # Skip - has file conflict
                         submittable.append(comp)
+                        pending_files.update(comp_files)  # Track for subsequent checks
 
                 # Submit new work (respect max_workers limit)
                 slots_available = self.max_parallel_workers - len(active_futures)

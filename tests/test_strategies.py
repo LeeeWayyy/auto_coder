@@ -15,6 +15,7 @@ from supervisor.core.strategies import (
     PlannerDocsetStrategy,
     ReviewerDiffStrategy,
     StrategyError,
+    detect_language,
     get_strategy,
     get_strategy_for_role,
     register_strategy,
@@ -177,13 +178,12 @@ class TestImplementerTargetedStrategy:
 
     def test_detects_language_from_extension(self, temp_repo):
         """Test language detection for syntax highlighting."""
-        strategy = ImplementerTargetedStrategy()
-
-        assert strategy._detect_language("test.py") == "python"
-        assert strategy._detect_language("test.js") == "javascript"
-        assert strategy._detect_language("test.ts") == "typescript"
-        assert strategy._detect_language("test.go") == "go"
-        assert strategy._detect_language("test.unknown") == ""
+        # FIX (PR review): Use module-level detect_language helper
+        assert detect_language("test.py") == "python"
+        assert detect_language("test.js") == "javascript"
+        assert detect_language("test.ts") == "typescript"
+        assert detect_language("test.go") == "go"
+        assert detect_language("test.unknown") == ""
 
 
 class TestReviewerDiffStrategy:
