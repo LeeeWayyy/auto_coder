@@ -177,10 +177,12 @@ class Database:
     );
 
     -- Components (hierarchical - projection)
+    -- FIX (PR review): Added description column
     CREATE TABLE IF NOT EXISTS components (
         id TEXT PRIMARY KEY,
         phase_id TEXT NOT NULL,
         title TEXT NOT NULL,
+        description TEXT DEFAULT '',
         files JSON,
         depends_on JSON,
         status TEXT NOT NULL,
@@ -579,16 +581,18 @@ class Database:
 
             case EventType.COMPONENT_CREATED:
                 # Insert if not exists
+                # FIX (PR review): Include description column
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO components (id, phase_id, title, files, depends_on,
-                                           status, assigned_role, updated_by_event_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO components (id, phase_id, title, description, files,
+                                           depends_on, status, assigned_role, updated_by_event_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.payload["id"],
                         event.payload["phase_id"],
                         event.payload["title"],
+                        event.payload.get("description", ""),
                         _safe_json_dumps(event.payload.get("files", [])),
                         _safe_json_dumps(event.payload.get("depends_on", [])),
                         ComponentStatus.PENDING.value,
@@ -599,13 +603,14 @@ class Database:
                 # Conditional update for plan corrections/retries
                 conn.execute(
                     """
-                    UPDATE components SET phase_id = ?, title = ?, files = ?,
+                    UPDATE components SET phase_id = ?, title = ?, description = ?, files = ?,
                         depends_on = ?, assigned_role = ?, updated_by_event_id = ?
                     WHERE id = ? AND updated_by_event_id < ?
                     """,
                     (
                         event.payload["phase_id"],
                         event.payload["title"],
+                        event.payload.get("description", ""),
                         _safe_json_dumps(event.payload.get("files", [])),
                         _safe_json_dumps(event.payload.get("depends_on", [])),
                         event.payload.get("assigned_role"),
@@ -1037,10 +1042,12 @@ class Database:
 
     def _row_to_component(self, row: sqlite3.Row) -> Component:
         """Convert database row to Component."""
+        # FIX (PR review): Include description field
         return Component(
             id=row["id"],
             phase_id=row["phase_id"],
             title=row["title"],
+            description=row["description"] or "",
             files=json.loads(row["files"]) if row["files"] else [],
             depends_on=json.loads(row["depends_on"]) if row["depends_on"] else [],
             status=ComponentStatus(row["status"]),
