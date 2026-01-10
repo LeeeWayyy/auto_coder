@@ -832,9 +832,18 @@ class ExecutionEngine:
                     # CRITICAL: Wrap apply errors - they are FATAL, not retriable
                     try:
                         with self.workspace._apply_lock:
+                            # FIX (Codex review): Re-check cancellation after acquiring lock
+                            # This closes the race window between check and apply
+                            if cancellation_check and cancellation_check():
+                                raise CancellationError(
+                                    f"Step '{step_id}' cancelled after acquiring apply lock. "
+                                    "Changes not applied."
+                                )
                             changed_files = self.workspace._apply_changes(
                                 ctx.worktree_path, ctx.original_head
                             )
+                    except CancellationError:
+                        raise  # Re-raise cancellation without wrapping
                     except Exception as apply_err:
                         raise ApplyError(
                             f"Apply failed (repository may be in inconsistent state): {apply_err}"
@@ -959,6 +968,21 @@ class ExecutionEngine:
 
                 if attempt < retry_policy.max_attempts - 1:
                     time.sleep(retry_policy.get_delay(attempt))
+
+            except CancellationError:
+                # FIX (Codex review): Don't retry cancelled operations
+                # CancellationError means component was timed out - no point retrying
+                logger.info(f"Step '{step_id}' cancelled, aborting without retry")
+                self.db.append_event(
+                    Event(
+                        workflow_id=workflow_id,
+                        event_type=EventType.STEP_FAILED,
+                        step_id=step_id,
+                        role=role_name,
+                        payload={"error": "Cancelled (timeout)", "cancelled": True},
+                    )
+                )
+                raise  # Re-raise without retry
 
             except Exception as e:
                 last_error = e

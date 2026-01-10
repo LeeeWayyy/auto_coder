@@ -510,6 +510,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         last_completed_count = 0
         active_futures: dict[Future, Component] = {}
         future_start_times: dict[Future, float] = {}  # Track when each future started
+        # FIX (Codex review): Track active component IDs for O(1) lookup instead of O(n) scan
+        active_component_ids: set[str] = set()
         # FIX (Codex review v4): Track timed-out futures to release file locks ONLY when thread completes
         # Don't release locks immediately - the thread may still be writing files
         timed_out_futures: dict[Future, Component] = {}
@@ -551,6 +553,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         # Move to timed_out_futures - DON'T release file locks yet
                         del active_futures[future]
                         future_start_times.pop(future, None)
+                        active_component_ids.discard(comp.id)  # FIX (Codex review): O(1) tracking
                         timed_out_futures[future] = comp  # Track for later cleanup
                         self._scheduler.update_component_status(
                             comp.id,
@@ -589,8 +592,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     for comp in ready:
                         # Normalize component file paths for comparison
                         comp_files = {normalize_path(f) for f in (comp.files or [])}
-                        # Check if already submitted (in active_futures)
-                        if any(c.id == comp.id for c in active_futures.values()):
+                        # FIX (Codex review): O(1) check instead of O(n) scan
+                        if comp.id in active_component_ids:
                             continue
                         # Check for file conflicts with in-progress AND pending-to-submit
                         if comp_files & files_in_progress or comp_files & pending_files:
@@ -606,6 +609,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         files_in_progress.update(normalize_path(f) for f in (comp.files or []))
                     future = executor.submit(self._execute_component, comp, feature_id)
                     active_futures[future] = comp
+                    active_component_ids.add(comp.id)  # FIX (Codex review): O(1) tracking
                     future_start_times[future] = time.time()  # Track start time for timeout
 
                 # If no active work and nothing ready, check if blocked
@@ -636,6 +640,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 # Process completed futures
                 for future in completed:
                     comp = active_futures.pop(future)
+                    active_component_ids.discard(comp.id)  # FIX (Codex review): O(1) tracking
                     future_start_times.pop(future, None)  # Clean up start time tracking
                     with files_lock:
                         for f in comp.files or []:
