@@ -598,6 +598,7 @@ class ExecutionEngine:
         extra_context: dict[str, str] | None = None,
         retry_policy: RetryPolicy | None = None,
         gates: list[str] | None = None,
+        cli_override: str | None = None,
     ) -> BaseModel:
         """Run a role with full context packing, isolation, and error handling.
 
@@ -613,6 +614,7 @@ class ExecutionEngine:
             extra_context: Additional context (git diff, test output, etc.)
             retry_policy: Retry configuration
             gates: Optional gates to run (e.g., ["test", "lint"])
+            cli_override: Override CLI to use instead of role's default (from ModelRouter)
 
         Returns:
             Parsed output from the worker
@@ -685,7 +687,7 @@ class ExecutionEngine:
 
                 # Execute CLI in ISOLATED worktree
                 with self.workspace.isolated_execution(step_id) as ctx:
-                    result = self._execute_cli(role, effective_prompt, ctx.worktree_path)
+                    result = self._execute_cli(role, effective_prompt, ctx.worktree_path, cli_override)
 
                     if result.returncode != 0 and not result.timed_out:
                         raise EngineError(
@@ -956,6 +958,7 @@ class ExecutionEngine:
         role: RoleConfig,
         prompt: str,
         workdir: Path,
+        cli_override: str | None = None,
     ) -> ExecutionResult:
         """Execute CLI for a role in sandbox.
 
@@ -963,12 +966,14 @@ class ExecutionEngine:
             role: Role configuration
             prompt: The prompt to send
             workdir: Working directory (must be a worktree for isolation)
+            cli_override: Optional CLI to use instead of role's default
 
         Note: workdir is required and must be under allowed_workdir_roots
               (typically repo/.worktrees). The repo root is intentionally
               NOT allowed to enforce worktree isolation.
         """
-        client = self._get_cli_client(role.cli)
+        cli_name = cli_override or role.cli
+        client = self._get_cli_client(cli_name)
         return client.execute(prompt, workdir)
 
     def _get_template_for_role(self, role: RoleConfig) -> str | None:
@@ -1069,4 +1074,115 @@ class ExecutionEngine:
             extra_context={
                 "file_tree": self.context_packer.get_file_tree(),
             },
+        )
+
+    # --- Phase 4: Feature->Phase->Component Workflow Integration ---
+
+    def create_workflow_coordinator(
+        self,
+        max_parallel_workers: int = 3,
+    ) -> "WorkflowCoordinator":
+        """Create a WorkflowCoordinator for multi-model hierarchical workflows.
+
+        Phase 4 integration point for Feature->Phase->Component execution.
+
+        Args:
+            max_parallel_workers: Maximum parallel component executions
+
+        Returns:
+            Configured WorkflowCoordinator instance
+        """
+        from supervisor.core.workflow import WorkflowCoordinator
+
+        return WorkflowCoordinator(
+            engine=self,
+            db=self.db,
+            repo_path=self.repo_path,
+            max_parallel_workers=max_parallel_workers,
+        )
+
+    def execute_feature(
+        self,
+        feature_id: str,
+        parallel: bool = True,
+        max_parallel_workers: int = 3,
+    ) -> "Feature":
+        """Execute all components of a feature in dependency order.
+
+        Phase 4 convenience method that creates a WorkflowCoordinator
+        and runs the implementation phase.
+
+        ALGORITHM:
+        1. Build DAG from feature's phases and components
+        2. While not complete:
+           a. Get ready components (dependencies satisfied)
+           b. If parallel: execute batch in ThreadPoolExecutor
+           c. If sequential: execute one by one
+           d. Update component statuses
+        3. Update phase/feature completion status
+
+        Args:
+            feature_id: Feature to execute
+            parallel: Enable parallel execution (default True)
+            max_parallel_workers: Maximum parallel workers
+
+        Returns:
+            Completed Feature object
+
+        Raises:
+            WorkflowBlockedError: If no progress can be made
+        """
+        from supervisor.core.models import Feature
+        from supervisor.core.workflow import WorkflowCoordinator
+
+        coordinator = WorkflowCoordinator(
+            engine=self,
+            db=self.db,
+            repo_path=self.repo_path,
+            max_parallel_workers=max_parallel_workers,
+        )
+
+        return coordinator.run_implementation(feature_id, parallel=parallel)
+
+    def run_parallel_review(
+        self,
+        roles: list[str],
+        task_description: str,
+        workflow_id: str,
+        target_files: list[str] | None = None,
+        extra_context: dict[str, str] | None = None,
+        approval_policy: str = "ALL_APPROVED",
+        timeout: float = 300.0,
+    ) -> "AggregatedReviewResult":
+        """Run multiple reviewers in parallel and aggregate results.
+
+        Phase 4 convenience method for parallel multi-model review.
+
+        Args:
+            roles: List of reviewer role names (e.g., ["reviewer_gemini", "reviewer_codex"])
+            task_description: What to review
+            workflow_id: Workflow context
+            target_files: Files to review
+            extra_context: Additional context (git_diff, etc.)
+            approval_policy: How to determine overall approval
+            timeout: Maximum time to wait for all reviewers
+
+        Returns:
+            AggregatedReviewResult with individual results and approval decision
+        """
+        from supervisor.core.parallel import AggregatedReviewResult, ParallelReviewer
+
+        reviewer = ParallelReviewer(
+            engine=self,
+            max_workers=3,
+            timeout=timeout,
+        )
+
+        return reviewer.run_parallel_review(
+            roles=roles,
+            task_description=task_description,
+            workflow_id=workflow_id,
+            target_files=target_files,
+            extra_context=extra_context,
+            approval_policy=approval_policy,
         )
