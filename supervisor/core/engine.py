@@ -74,6 +74,15 @@ class CircuitOpenError(Exception):
     pass
 
 
+class CancellationError(Exception):
+    """Operation was cancelled (e.g., due to timeout).
+
+    FIX (Codex review): Used to prevent applying changes after component timeout.
+    """
+
+    pass
+
+
 @dataclass
 class RetryPolicy:
     """Configuration for retry behavior."""
@@ -599,6 +608,7 @@ class ExecutionEngine:
         retry_policy: RetryPolicy | None = None,
         gates: list[str] | None = None,
         cli_override: str | None = None,
+        cancellation_check: "Callable[[], bool] | None" = None,
     ) -> BaseModel:
         """Run a role with full context packing, isolation, and error handling.
 
@@ -615,6 +625,8 @@ class ExecutionEngine:
             retry_policy: Retry configuration
             gates: Optional gates to run (e.g., ["test", "lint"])
             cli_override: Override CLI to use instead of role's default (from ModelRouter)
+            cancellation_check: Optional callback that returns True if operation should be
+                cancelled (e.g., due to timeout). Checked before applying changes.
 
         Returns:
             Parsed output from the worker
@@ -623,6 +635,7 @@ class ExecutionEngine:
             RetryExhaustedError: All retry attempts failed
             CircuitOpenError: Too many failures, circuit breaker open
             GateFailedError: Gate verification failed
+            CancellationError: Operation was cancelled before applying changes
         """
         # Generate unique step_id with UUID for worktree isolation
         step_id = step_id or f"{workflow_id}-{role_name}-{uuid.uuid4().hex[:8]}"
@@ -791,6 +804,19 @@ class ExecutionEngine:
                     # ONLY after gates pass: apply changes to main tree
                     # Use file lock to prevent race conditions with parallel execution
                     # Pass original_head for conflict detection
+
+                    # FIX (Codex review): Check cancellation before applying changes
+                    # This prevents timed-out components from mutating the repo after
+                    # the workflow has already marked them as FAILED
+                    if cancellation_check and cancellation_check():
+                        logger.warning(
+                            f"Step '{step_id}' cancelled before applying changes - "
+                            "discarding worktree changes"
+                        )
+                        raise CancellationError(
+                            f"Step '{step_id}' was cancelled (likely timeout). "
+                            "Changes were not applied to avoid out-of-policy mutations."
+                        )
 
                     # CRASH RECOVERY: Record applying event BEFORE modifying repo
                     self.db.append_event(

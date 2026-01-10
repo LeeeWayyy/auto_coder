@@ -257,14 +257,27 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         # FIX (PR review): Convert interfaces dict to list format for Phase model
         # Planner may return {"name": {type, definition}} but Phase expects list[Interface]
+        # FIX (Codex review): Ensure 'type' field is present (required by Interface model)
         raw_interfaces = phase_data.get("interfaces", {})
         if isinstance(raw_interfaces, dict):
-            interfaces_list = [
-                {"name": name, **props} if isinstance(props, dict) else {"name": name, "definition": str(props)}
-                for name, props in raw_interfaces.items()
-            ]
+            interfaces_list = []
+            for name, props in raw_interfaces.items():
+                if isinstance(props, dict):
+                    # Ensure type field exists with default
+                    interface = {"name": name, "type": props.get("type", "unknown"), **props}
+                else:
+                    # String value - use as definition, default type
+                    interface = {"name": name, "type": "unknown", "definition": str(props)}
+                interfaces_list.append(interface)
         else:
-            interfaces_list = raw_interfaces if isinstance(raw_interfaces, list) else []
+            # Already a list - ensure each item has type field
+            interfaces_list = []
+            for item in (raw_interfaces if isinstance(raw_interfaces, list) else []):
+                if isinstance(item, dict):
+                    if "type" not in item:
+                        item = {**item, "type": "unknown"}
+                    interfaces_list.append(item)
+                # Skip non-dict items
 
         self.db.create_phase(
             phase_id=phase_id,
@@ -692,6 +705,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 f"Component '{component.id}': Router selected '{selected_model}' for role '{role_name}'"
             )
 
+            # FIX (Codex review): Pass cancellation check to prevent applying changes
+            # after timeout. Returns True if component was marked FAILED (e.g., timed out).
+            def is_cancelled() -> bool:
+                comp = self._scheduler.get_component(component.id)
+                return comp is not None and comp.status == ComponentStatus.FAILED
+
             # Run the role with ModelRouter-selected CLI
             result = self.engine.run_role(
                 role_name=role_name,
@@ -699,6 +718,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 workflow_id=feature_id,
                 target_files=component.files,
                 cli_override=selected_model,
+                cancellation_check=is_cancelled,
             )
 
             # FIX (Codex review v3): Check current status before updating to COMPLETED
