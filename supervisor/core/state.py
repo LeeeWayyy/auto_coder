@@ -1226,12 +1226,16 @@ class Database:
         Note: For completion, prefer relying on automatic rollup from
         _check_feature_completion(). Use this for explicit state changes
         like PLANNING -> IN_PROGRESS -> REVIEW.
+
+        FIX (Codex review): Use MAX(id) not MAX(id)+1 to avoid skipping next event.
+        Setting to MAX(id)+1 would equal the next event's ID, causing projections
+        to skip that event since they only update when updated_by_event_id < event_id.
         """
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE features SET status = ?, updated_by_event_id = (
-                    SELECT COALESCE(MAX(id), 0) + 1 FROM events
+                    SELECT COALESCE(MAX(id), 0) FROM events
                 )
                 WHERE id = ?
                 """,
@@ -1243,12 +1247,15 @@ class Database:
         phase_id: str,
         status: PhaseStatus,
     ) -> None:
-        """Update phase status directly (for workflow state transitions)."""
+        """Update phase status directly (for workflow state transitions).
+
+        FIX (Codex review): Use MAX(id) not MAX(id)+1 to avoid skipping next event.
+        """
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE phases SET status = ?, updated_by_event_id = (
-                    SELECT COALESCE(MAX(id), 0) + 1 FROM events
+                    SELECT COALESCE(MAX(id), 0) FROM events
                 )
                 WHERE id = ?
                 """,
@@ -1263,12 +1270,14 @@ class Database:
         """Update component dependencies (for dependency ID remapping).
 
         Used during Phase 4 workflow to remap symbolic IDs to generated IDs.
+
+        FIX (Codex review): Use MAX(id) not MAX(id)+1 to avoid skipping next event.
         """
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE components SET depends_on = ?, updated_by_event_id = (
-                    SELECT COALESCE(MAX(id), 0) + 1 FROM events
+                    SELECT COALESCE(MAX(id), 0) FROM events
                 )
                 WHERE id = ?
                 """,

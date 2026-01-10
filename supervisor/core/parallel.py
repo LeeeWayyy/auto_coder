@@ -253,11 +253,26 @@ class ParallelReviewer:
                                     )
                                 )
         finally:
-            # Signal cancellation and shutdown without waiting
+            # Signal cancellation and shutdown with grace period
             cancelled.set()
-            # Shutdown without waiting - allows immediate return on timeout
-            # Late-returning tasks will be ignored due to processed_roles check
+            # FIX (Codex review): Add brief grace period for in-progress work to settle
+            # Reviewer threads may still be executing external CLI processes with side
+            # effects (file writes, DB events, logs). Give them a short window to complete
+            # gracefully before proceeding.
+            #
+            # Note: Python threads cannot be forcefully killed, and external CLI processes
+            # spawned by run_role() will run to completion. The cancelled event signals
+            # to workers that their results will be ignored, but cannot interrupt them.
+            # We use a bounded wait to let in-progress work settle.
+            GRACE_PERIOD_SECONDS = 5.0
             executor.shutdown(wait=False, cancel_futures=True)
+            # Brief grace period - wait for any futures that might complete soon
+            for future in futures:
+                if not future.done():
+                    try:
+                        future.result(timeout=GRACE_PERIOD_SECONDS / len(futures))
+                    except Exception:
+                        pass  # Ignore - we've already recorded timeout results
 
         # FIX (Codex fresh review): Handle empty results as rejection
         # This can happen if all futures fail before any complete

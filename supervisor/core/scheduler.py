@@ -154,9 +154,16 @@ class DAGScheduler:
         }
 
         # Build component-to-phase mapping
+        # FIX (Codex review): Validate phase_id exists before mapping
         component_to_phase: dict[str, str] = {}
         phase_components: dict[str, list[str]] = {p.id: [] for p in phases}
+        phase_ids = set(phase_components.keys())
         for comp in all_components:
+            if comp.phase_id not in phase_ids:
+                raise DependencyNotFoundError(
+                    f"Component '{comp.id}' references phase '{comp.phase_id}' which doesn't exist. "
+                    f"Available phases: {sorted(phase_ids)}"
+                )
             component_to_phase[comp.id] = comp.phase_id
             phase_components[comp.phase_id].append(comp.id)
 

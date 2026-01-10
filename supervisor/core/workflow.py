@@ -522,10 +522,13 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
                 # FIX (PR review): Check per-component timeouts independently of stall detection
                 # This ensures hung components are caught even when other work progresses
+                # FIX (Codex review): Only mark as timed out if future is NOT done
+                # A future that completed just before timeout should be processed normally
                 now = time.time()
                 timed_out = [
                     (f, c) for f, c in active_futures.items()
                     if now - future_start_times.get(f, now) > self.component_timeout
+                    and not f.done()  # Don't timeout completed futures
                 ]
                 if timed_out:
                     # FIX (Codex review v4): Mark components failed but DON'T release file locks
