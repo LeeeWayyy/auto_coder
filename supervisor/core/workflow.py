@@ -846,7 +846,11 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         all_component_changes = component_changed + component_untracked
 
         # FIX (v27 - Codex PR review P2): Show diff for all detected changes, not just component.files
-        diff_lines = self._get_worktree_diff(all_component_changes if all_component_changes else None)
+        # FIX (v27 - Codex PR review): Pass untracked files separately to show their content
+        diff_lines = self._get_worktree_diff(
+            component_changed if component_changed else None,
+            component_untracked if component_untracked else None,
+        )
 
         if self.approval_gate:
             if not self._check_approval_gate(
@@ -1171,23 +1175,32 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             logger.warning(f"Failed to get changed files: {e}")
         return list(changed), untracked
 
-    def _get_worktree_diff(self, target_files: list[str] | None) -> list[str]:
+    def _get_worktree_diff(
+        self,
+        target_files: list[str] | None,
+        untracked_files: list[str] | None = None,
+    ) -> list[str]:
         """Capture actual git diff from worktree after role execution.
 
         FIX (v26 - Codex): Include both staged and unstaged changes in diff.
+        FIX (v27 - Codex PR review): Include content for untracked (new) files.
+
+        Args:
+            target_files: Tracked files to show diff for
+            untracked_files: Untracked (new) files to show content for
 
         Returns a list of diff lines that can be shown to the user in the
         approval gate UI. This enables reviewing REAL changes, not just
         file names from the component spec.
         """
+        import os
         import subprocess
         all_diff_lines: list[str] = []
         try:
-            # Get unstaged changes
+            # Get unstaged changes for tracked files
             cmd = ["git", "diff", "--no-color"]
             if target_files:
                 cmd.extend(["--", *target_files])
-            # FIX (v27 - Codex PR review): Use self.git_timeout instead of hardcoded 30
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -1202,7 +1215,6 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cmd_cached = ["git", "diff", "--no-color", "--cached"]
             if target_files:
                 cmd_cached.extend(["--", *target_files])
-            # FIX (v27 - Codex PR review): Use self.git_timeout instead of hardcoded 30
             result = subprocess.run(
                 cmd_cached,
                 capture_output=True,
@@ -1215,6 +1227,30 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     all_diff_lines.append("")  # Separator
                     all_diff_lines.append("# Staged changes:")
                 all_diff_lines.extend(result.stdout.strip().split("\n"))
+
+            # FIX (v27 - Codex PR review): Show content for untracked (new) files
+            if untracked_files:
+                for filepath in untracked_files:
+                    full_path = os.path.join(self.repo_path or ".", filepath)
+                    if os.path.isfile(full_path):
+                        # Use git diff --no-index to show new file content
+                        cmd_untracked = [
+                            "git", "diff", "--no-index", "--no-color",
+                            "/dev/null", full_path
+                        ]
+                        result = subprocess.run(
+                            cmd_untracked,
+                            capture_output=True,
+                            text=True,
+                            timeout=self.git_timeout,
+                            cwd=self.repo_path,
+                        )
+                        # git diff --no-index returns 1 when files differ, which is expected
+                        if result.stdout.strip():
+                            if all_diff_lines:
+                                all_diff_lines.append("")  # Separator
+                            all_diff_lines.append(f"# New file: {filepath}")
+                            all_diff_lines.extend(result.stdout.strip().split("\n"))
 
             return all_diff_lines
         except Exception as e:
@@ -1249,13 +1285,18 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         # Restore from saved baseline content
                         full_path = os.path.join(self.repo_path or ".", filepath)
                         try:
+                            # FIX (v27 - Codex PR review): Ensure parent dirs exist
+                            # Component may have deleted directories during execution
+                            parent_dir = os.path.dirname(full_path)
+                            if parent_dir:
+                                os.makedirs(parent_dir, exist_ok=True)
                             with open(full_path, "wb") as f:
                                 f.write(baseline_contents[filepath])
                             logger.debug(f"Restored {filepath} from baseline content")
                         except Exception as restore_err:
-                            logger.warning(f"Failed to restore {filepath} from baseline: {restore_err}")
-                            # Fall back to git checkout for this file
-                            files_to_checkout.append(filepath)
+                            # FIX (v27 - Codex PR review): Don't fall back to git checkout
+                            # for files we have baseline content for - that defeats P1 fix
+                            logger.error(f"Failed to restore {filepath} from baseline: {restore_err}")
                     else:
                         # File wasn't in baseline - use git checkout to discard
                         files_to_checkout.append(filepath)

@@ -290,8 +290,8 @@ def _load_limits_config(repo_path: Path) -> tuple[dict[str, float], float, float
 @click.argument("feature_id")
 @click.option("--tui", is_flag=True, help="Run with interactive TUI")
 @click.option("--parallel/--sequential", default=True, help="Parallel or sequential execution")
-@click.option("--timeout", type=int, default=3600, help="Workflow timeout in seconds")
-def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
+@click.option("--timeout", type=int, default=None, help="Workflow timeout in seconds (default: from limits.yaml or 3600)")
+def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int | None) -> None:
     """Execute a feature workflow (Phase 5).
 
     FEATURE_ID is the ID of the feature to execute.
@@ -328,8 +328,8 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
         role_timeouts, component_timeout, config_workflow_timeout = _load_limits_config(repo_path)
 
         # FIX (v27 - Codex PR review): Use config value unless --timeout was explicitly provided
-        # (Click defaults --timeout to 3600, so we check if it matches the default)
-        effective_timeout = float(timeout) if timeout != 3600 else config_workflow_timeout
+        # FIX (v27 - Codex PR review): Use None default to allow explicit override to 3600
+        effective_timeout = config_workflow_timeout if timeout is None else float(timeout)
 
         bridge = InteractionBridge() if tui else None
         approval_gate = ApprovalGate(db, policy=policy)
