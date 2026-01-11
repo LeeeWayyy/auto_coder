@@ -76,13 +76,9 @@ class CircuitOpenError(Exception):
     pass
 
 
-class CancellationError(Exception):
-    """Operation was cancelled (e.g., due to timeout).
-
-    FIX (Codex review): Used to prevent applying changes after component timeout.
-    """
-
-    pass
+# FIX (v27 - Gemini PR review): Import from models to avoid circular imports
+# Re-export for backwards compatibility
+from supervisor.core.models import CancellationError  # noqa: F401
 
 
 @dataclass

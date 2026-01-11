@@ -94,7 +94,8 @@ class ApprovalGate:
                     return "critical"
 
         # Check high risk conditions
-        high_risk_patterns = [r"\bauth", r"\bpayment", r"api/", r"\bsecurity"]
+        # FIX (v27 - Gemini PR review): Anchor api/ to start to avoid matching docs/api/
+        high_risk_patterns = [r"\bauth", r"\bpayment", r"^api/", r"\bsecurity"]
         for change in changes:
             change_lower = change.lower()
             for pattern in high_risk_patterns:
@@ -225,9 +226,10 @@ class ApprovalGate:
         """Fallback CLI-based approval. SYNCHRONOUS.
 
         FIX (Gemini review): Changed from async to sync.
+        FIX (v27 - Gemini PR review): Add Skip option for consistency with TUI.
         """
         from rich.console import Console
-        from rich.prompt import Confirm
+        from rich.prompt import Prompt
 
         console = Console()
         console.print(f"\n[bold red]Approval Required[/bold red]: {request.title}")
@@ -239,5 +241,12 @@ class ApprovalGate:
         if len(request.changes) > 5:
             console.print(f"  ... and {len(request.changes) - 5} more")
 
-        approved = Confirm.ask("Approve?", default=True)
-        return ApprovalDecision.APPROVE if approved else ApprovalDecision.REJECT
+        console.print("\n[dim][a]pprove, [r]eject, [s]kip[/dim]")
+        choice = Prompt.ask("Decision?", choices=["a", "r", "s"], default="a")
+
+        if choice == "a":
+            return ApprovalDecision.APPROVE
+        elif choice == "s":
+            return ApprovalDecision.SKIP
+        else:
+            return ApprovalDecision.REJECT

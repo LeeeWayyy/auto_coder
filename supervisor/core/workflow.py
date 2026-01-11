@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, ValidationError
 
 from supervisor.core.models import (
+    CancellationError,
     Component,
     ComponentStatus,
     Feature,
@@ -504,8 +505,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 )
 
         except Exception as e:
-            # Check for CancellationError which might be raised by timeouts
-            if type(e).__name__ == "CancellationError":
+            # FIX (v27 - Gemini PR review): Use proper isinstance check
+            if isinstance(e, CancellationError):
                 # Checkpoint already saved in _handle_workflow_timeout
                 raise
             raise e
@@ -823,20 +824,62 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         Files that were already modified but changed again by this component are
         now detected and included in rollback.
         FIX (v27 - Codex PR review): Pass baseline_contents to rollback for restoration.
+        FIX (v27 - Codex PR review P1): Scope change detection to component's files/dirs
+        to avoid including concurrent components' changes in parallel execution.
 
         Returns:
             Tuple of (approved, component_changed, component_untracked)
         """
-        current_changed, current_untracked = self._get_changed_files(None)
-        current_hashes = self._get_file_hashes(current_changed)
+        # FIX (v27 - Codex PR review P1): Build set of directories this component owns
+        # to scope change detection and avoid affecting concurrent components' changes
+        import os
+        component_dirs: set[str] = set()
+        component_file_set: set[str] = set()
+        for f in (component.files or []):
+            component_file_set.add(f)
+            # Add the file's directory and parent dirs up to 2 levels
+            dirname = os.path.dirname(f)
+            if dirname:
+                component_dirs.add(dirname)
+                parent = os.path.dirname(dirname)
+                if parent:
+                    component_dirs.add(parent)
+            else:
+                component_dirs.add(".")  # Root level files
 
-        # New files (not in baseline)
-        new_changed = [f for f in current_changed if f not in baseline_set]
-        new_untracked = [f for f in current_untracked if f not in baseline_set]
+        # Get all worktree changes, then filter to this component's scope
+        current_changed, current_untracked = self._get_changed_files(None)
+
+        # FIX (v27 - Codex PR review P1): Filter changes to component's files/directories
+        def is_in_component_scope(filepath: str) -> bool:
+            """Check if filepath is in this component's scope."""
+            # Direct match to declared files
+            if filepath in component_file_set:
+                return True
+            # Check if file is in one of component's directories
+            dirname = os.path.dirname(filepath)
+            while dirname:
+                if dirname in component_dirs:
+                    return True
+                dirname = os.path.dirname(dirname)
+            # Root-level file when component works on root
+            if "." in component_dirs and not os.path.dirname(filepath):
+                return True
+            return False
+
+        # Scope changes to this component
+        scoped_changed = [f for f in current_changed if is_in_component_scope(f)]
+        scoped_untracked = [f for f in current_untracked if is_in_component_scope(f)]
+
+        current_hashes = self._get_file_hashes(scoped_changed)
+
+        # New files (not in baseline) within component's scope
+        new_changed = [f for f in scoped_changed if f not in baseline_set]
+        new_untracked = [f for f in scoped_untracked if f not in baseline_set]
 
         # Files that were in baseline but have different hash now (re-modified)
         re_modified = [
-            f for f in current_changed
+            f for f in scoped_changed
             if f in baseline_hashes and current_hashes.get(f) != baseline_hashes[f]
         ]
 
@@ -968,7 +1011,36 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
             # Rollback only THIS component's changes using hash-based detection
+            # FIX (v27 - Codex PR review P1): Scope to component's files/dirs
+            import os as _os
+            component_dirs_exc: set[str] = set()
+            component_file_set_exc: set[str] = set()
+            for f in (component.files or []):
+                component_file_set_exc.add(f)
+                dirname = _os.path.dirname(f)
+                if dirname:
+                    component_dirs_exc.add(dirname)
+                    parent = _os.path.dirname(dirname)
+                    if parent:
+                        component_dirs_exc.add(parent)
+                else:
+                    component_dirs_exc.add(".")
+
             exc_changed, exc_untracked = self._get_changed_files(None)
+
+            # Filter to component's scope
+            def in_scope(fp: str) -> bool:
+                if fp in component_file_set_exc:
+                    return True
+                dn = _os.path.dirname(fp)
+                while dn:
+                    if dn in component_dirs_exc:
+                        return True
+                    dn = _os.path.dirname(dn)
+                return "." in component_dirs_exc and not _os.path.dirname(fp)
+
+            exc_changed = [f for f in exc_changed if in_scope(f)]
+            exc_untracked = [f for f in exc_untracked if in_scope(f)]
             exc_hashes = self._get_file_hashes(exc_changed)
 
             new_changed = [f for f in exc_changed if f not in baseline_set]
@@ -1011,7 +1083,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         if self.checkpoint_on_timeout:
             self._save_timeout_checkpoint(feature_id, f"Workflow timeout after {elapsed:.1f}s")
 
-        from supervisor.core.engine import CancellationError
+        # FIX (v27 - Gemini PR review): Use imported CancellationError from models
         raise CancellationError(f"Workflow timeout after {elapsed:.1f}s")
 
     def _save_timeout_checkpoint(self, feature_id: str, reason: str) -> str:
