@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 import click
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -22,6 +23,8 @@ from rich.table import Table
 from supervisor.core.engine import ExecutionEngine
 from supervisor.core.roles import RoleLoader
 from supervisor.core.state import Database
+from supervisor.metrics.aggregator import MetricsAggregator
+from supervisor.metrics.dashboard import MetricsDashboard
 
 console = Console()
 
@@ -283,7 +286,6 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
         approval_config_path = repo_path / ".supervisor/approval.yaml"
         policy = None
         if approval_config_path.exists():
-            import yaml
             with open(approval_config_path) as f:
                 config = yaml.safe_load(f)
                 approval_cfg = config.get("approval", {})
@@ -302,7 +304,6 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
         role_timeouts = {}
         component_timeout = 300.0
         if limits_path.exists():
-            import yaml
             with open(limits_path) as f:
                 limits = yaml.safe_load(f)
                 role_timeouts = limits.get("role_timeouts", {})
@@ -355,9 +356,6 @@ def metrics(days: int, live: bool) -> None:
         return
 
     try:
-        from supervisor.metrics.aggregator import MetricsAggregator
-        from supervisor.metrics.dashboard import MetricsDashboard
-
         db = Database(db_path)
         aggregator = MetricsAggregator(db)
         dashboard = MetricsDashboard(aggregator)

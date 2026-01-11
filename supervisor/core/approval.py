@@ -96,10 +96,9 @@ class ApprovalGate:
                     return "high"
 
         # Check file count
+        # FIX (v27 - Gemini PR review): Simplified redundant conditions
         if file_count > 20:
             return "high"
-        elif file_count > 10:
-            return "medium"
         elif file_count > 3:
             return "medium"
 

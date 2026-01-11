@@ -254,16 +254,16 @@ class SupervisorTUI:
         self.console.print(f"\n[bold]Review Summary:[/bold]\n{request.review_summary}")
 
         # Get decision (Rich Prompt is blocking, which is fine in main thread)
+        # FIX (v27 - Gemini PR review): Removed 'd' for unimplemented EDIT feature
         choice = Prompt.ask(
             "\n[bold]Decision[/bold]",
-            choices=["a", "r", "d", "s"],
+            choices=["a", "r", "s"],
             default="a",
         )
 
         decision_map = {
             "a": ApprovalDecision.APPROVE,
             "r": ApprovalDecision.REJECT,
-            "d": ApprovalDecision.EDIT,
             "s": ApprovalDecision.SKIP,
         }
 

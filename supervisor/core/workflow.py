@@ -780,6 +780,11 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         # Track untracked files for potential rollback
         untracked_files: list[str] = []
 
+        # FIX (v27 - Codex PR review): Capture baseline BEFORE running role
+        # This allows us to identify only changes made by THIS component
+        baseline_changed, baseline_untracked = self._get_changed_files(None)
+        baseline_set = set(baseline_changed + baseline_untracked)
+
         try:
             # Update status to implementing
             self._scheduler.update_component_status(
@@ -839,21 +844,29 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 )
                 return  # Don't overwrite FAILED status
 
-            # FIX (v26 - Codex): Capture ALL changed files, not just component.files
-            # This ensures out-of-scope changes are visible and rolled back on rejection
-            changed_files, untracked_files = self._get_changed_files(None)  # Full worktree
-            diff_lines = self._get_worktree_diff(None)  # Full diff
-            all_changed = changed_files + untracked_files
+            # FIX (v27 - Codex PR review): Capture current state and compute delta
+            # Only changes made by THIS component should be shown and rolled back
+            current_changed, current_untracked = self._get_changed_files(None)
+            current_set = set(current_changed + current_untracked)
+
+            # Compute delta: files changed by THIS component only
+            component_changed = [f for f in current_changed if f not in baseline_set]
+            component_untracked = [f for f in current_untracked if f not in baseline_set]
+            all_component_changes = component_changed + component_untracked
+
+            # Get diff for component's changes (for display)
+            # Use component.files as hint, but also show any out-of-scope changes
+            diff_lines = self._get_worktree_diff(component.files if component.files else None)
 
             # FIX (v25 - Codex): APPROVAL GATE CHECK - AFTER execution, BEFORE commit
             # This enables human approval of REAL changes, not just file names
             if self.approval_gate:
                 if not self._check_approval_gate(
-                    feature_id, component, all_changed, diff_lines, untracked_files
+                    feature_id, component, all_component_changes, diff_lines, component_untracked
                 ):
-                    # FIX (v26 - Codex): Rollback ALL detected changes, not just component.files
-                    # This ensures out-of-scope changes are also reverted on rejection
-                    self._rollback_worktree_changes(changed_files, untracked_files)
+                    # FIX (v27 - Codex PR review): Only rollback THIS component's changes
+                    # Prior components' changes are preserved
+                    self._rollback_worktree_changes(component_changed, component_untracked)
                     self._scheduler.update_component_status(
                         component.id,
                         ComponentStatus.FAILED,
@@ -877,10 +890,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
-            # FIX (v26 - Codex): Rollback full worktree changes, not just component.files
-            # Re-detect all changes since we may not have captured them before exception
+            # FIX (v27 - Codex PR review): Only rollback THIS component's changes
+            # Re-detect and compute delta from baseline
             exc_changed, exc_untracked = self._get_changed_files(None)
-            self._rollback_worktree_changes(exc_changed, exc_untracked)
+            component_exc_changed = [f for f in exc_changed if f not in baseline_set]
+            component_exc_untracked = [f for f in exc_untracked if f not in baseline_set]
+            self._rollback_worktree_changes(component_exc_changed, component_exc_untracked)
             # FIX (Codex review v4): Don't overwrite timeout error with exception error
             comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:

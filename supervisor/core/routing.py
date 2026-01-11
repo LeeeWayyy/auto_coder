@@ -9,11 +9,33 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from supervisor.metrics.aggregator import MetricsAggregator
+
 if TYPE_CHECKING:
     from supervisor.core.state import Database
-    from supervisor.metrics.aggregator import MetricsAggregator
 
 logger = logging.getLogger(__name__)
+
+
+# FIX (v27 - Gemini PR review): Shared task type inference
+# Dictionary-based lookup for consistent categorization across modules
+_ROLE_TO_TASK_TYPE: dict[str, str] = {
+    "planner": "plan",
+    "implementer": "implement",
+    "reviewer": "review",
+    "investigator": "investigate",
+    "doc_generator": "document",
+    "tester": "test",
+}
+
+
+def _infer_task_type(role_name: str) -> str:
+    """Infer task type from role name for metrics categorization.
+
+    Uses dictionary lookup for exact matching, avoiding false positives
+    from substring matching (e.g., 'reimplementer' won't match 'implement').
+    """
+    return _ROLE_TO_TASK_TYPE.get(role_name, "other")
 
 
 @dataclass
@@ -196,11 +218,9 @@ class ModelRouter:
             return random.choice(list(MODEL_PROFILES.keys()))
 
         # Exploitation: Select best performing model
-        # Infer task type from role name (simple heuristic)
-        task_type = "other"
-        if "plan" in role_name: task_type = "plan"
-        elif "implement" in role_name: task_type = "implement"
-        elif "review" in role_name: task_type = "review"
+        # FIX (v27 - Gemini PR review): Use consistent task_type inference
+        # Dictionary-based lookup instead of 'in' checks to avoid false matches
+        task_type = _infer_task_type(role_name)
 
         best_cli = self.aggregator.get_best_cli_for_task(
             task_type=task_type,
@@ -319,7 +339,6 @@ def create_router(
     """
     aggregator = None
     if db:
-        from supervisor.metrics.aggregator import MetricsAggregator
         aggregator = MetricsAggregator(db)
 
     return ModelRouter(
