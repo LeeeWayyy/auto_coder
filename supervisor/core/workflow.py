@@ -856,9 +856,15 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             if not self._check_approval_gate(
                 feature_id, component, all_component_changes, diff_lines, component_untracked
             ):
-                self._rollback_worktree_changes(
+                # FIX (v27 - Codex PR review): Surface rollback failures
+                rollback_ok = self._rollback_worktree_changes(
                     component_changed, component_untracked, baseline_contents
                 )
+                if not rollback_ok:
+                    logger.warning(
+                        f"Rollback for component '{component.id}' had partial failures. "
+                        "Some files may not be fully restored."
+                    )
                 return False, component_changed, component_untracked
 
         return True, component_changed, component_untracked
@@ -972,9 +978,15 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             ]
             component_exc_changed = list(set(new_changed + re_modified))
             component_exc_untracked = [f for f in exc_untracked if f not in baseline_set]
-            self._rollback_worktree_changes(
+            # FIX (v27 - Codex PR review): Surface rollback failures
+            rollback_ok = self._rollback_worktree_changes(
                 component_exc_changed, component_exc_untracked, baseline_contents
             )
+            if not rollback_ok:
+                logger.warning(
+                    f"Rollback for component '{component.id}' had partial failures. "
+                    "Some files may not be fully restored."
+                )
 
             comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
@@ -1229,14 +1241,16 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 all_diff_lines.extend(result.stdout.strip().split("\n"))
 
             # FIX (v27 - Codex PR review): Show content for untracked (new) files
+            # FIX (v27 - Codex PR review): Use repo-relative paths to avoid leaking absolute paths
             if untracked_files:
                 for filepath in untracked_files:
                     full_path = os.path.join(self.repo_path or ".", filepath)
                     if os.path.isfile(full_path):
-                        # Use git diff --no-index to show new file content
+                        # Use git diff --no-index with repo-relative path
+                        # The -- separator ensures paths are treated as paths, not options
                         cmd_untracked = [
                             "git", "diff", "--no-index", "--no-color",
-                            "/dev/null", full_path
+                            "--", "/dev/null", filepath
                         ]
                         result = subprocess.run(
                             cmd_untracked,
@@ -1262,19 +1276,24 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         target_files: list[str] | None,
         untracked_files: list[str] | None = None,
         baseline_contents: dict[str, bytes] | None = None,
-    ) -> None:
+    ) -> bool:
         """Rollback uncommitted worktree changes after rejection.
 
         FIX (v25 - Codex): Now handles both tracked and untracked files.
         FIX (v26 - Codex): Handle directories with shutil.rmtree.
         FIX (v27 - Codex PR review P1): Restore from baseline contents, not git checkout.
+        FIX (v27 - Codex PR review): Return bool to surface rollback failures.
         - Tracked files with baseline: Restore from saved baseline contents
         - Tracked files without baseline (new to tracking): git checkout to discard
         - Untracked files/directories: Removes newly created files and directories
+
+        Returns:
+            True if rollback succeeded, False if any files failed to restore.
         """
         import os
         import shutil
         import subprocess
+        restore_failed = False
         try:
             # FIX (v27 - Codex PR review P1): Restore files from baseline contents
             # This preserves prior component changes instead of resetting to HEAD
@@ -1296,7 +1315,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         except Exception as restore_err:
                             # FIX (v27 - Codex PR review): Don't fall back to git checkout
                             # for files we have baseline content for - that defeats P1 fix
+                            # FIX (v27 - Codex PR review): Track failures to surface to caller
                             logger.error(f"Failed to restore {filepath} from baseline: {restore_err}")
+                            restore_failed = True
                     else:
                         # File wasn't in baseline - use git checkout to discard
                         files_to_checkout.append(filepath)
@@ -1326,8 +1347,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                             logger.debug(f"Removed untracked file: {filepath}")
                     except Exception as file_err:
                         logger.warning(f"Failed to remove untracked path {filepath}: {file_err}")
+                        restore_failed = True
+
+            return not restore_failed
         except Exception as e:
             logger.error(f"Failed to rollback worktree changes: {e}")
+            return False
 
     def run_review(
         self,
