@@ -1323,11 +1323,19 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         files_to_checkout.append(filepath)
 
                 # Git checkout for files not in baseline (new modifications)
+                # FIX (v27 - Codex PR review): Check return code to detect failures
                 if files_to_checkout:
                     cmd = ["git", "checkout", "--"]
                     cmd.extend(files_to_checkout)
-                    subprocess.run(cmd, capture_output=True, timeout=self.git_timeout, cwd=self.repo_path)
-                    logger.debug(f"Rolled back tracked changes via git checkout for: {files_to_checkout}")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
+                    if result.returncode != 0:
+                        logger.warning(
+                            f"git checkout failed for: {files_to_checkout}. "
+                            f"stderr: {result.stderr.strip() if result.stderr else 'none'}"
+                        )
+                        restore_failed = True
+                    else:
+                        logger.debug(f"Rolled back tracked changes via git checkout for: {files_to_checkout}")
             else:
                 # No tracked files to rollback - this is expected when component
                 # only created new files or edited files already in baseline
