@@ -8,6 +8,7 @@ FIX (v13 - Codex): Added class wrapper and proper imports.
 
 import logging
 import time
+from supervisor.core.routing import _infer_task_type
 from supervisor.core.state import Database
 
 logger = logging.getLogger(__name__)
@@ -25,26 +26,8 @@ class MetricsCollector:
         self.db = db
         self._step_start_times: dict[str, float] = {}
 
-    def _infer_task_type(self, role: str) -> str:
-        """Infer task type from role name.
-
-        FIX (v11): Standardized task_type values across schema, engine, router.
-        """
-        role_lower = role.lower()
-        if "plan" in role_lower:
-            return "plan"
-        elif "review" in role_lower:
-            return "review"
-        elif "implement" in role_lower:
-            return "implement"
-        elif "test" in role_lower:
-            return "test"
-        elif "investigat" in role_lower:
-            return "investigate"
-        elif "doc" in role_lower:
-            return "document"
-        else:
-            return "other"
+    # FIX (v27 - Gemini PR review): Removed duplicate _infer_task_type
+    # Now using shared function from supervisor.core.routing
 
     def start_step(self, step_id: str) -> None:
         """Record step start time for duration calculation."""

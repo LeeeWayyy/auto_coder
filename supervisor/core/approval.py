@@ -76,23 +76,29 @@ class ApprovalGate:
     def assess_risk_level(self, context: dict[str, Any]) -> str:
         """Assess risk level based on context.
 
+        FIX (v27 - Gemini PR review): Use regex word boundaries for precise matching.
+
         Returns: "low", "medium", "high", or "critical"
         """
+        import re
         changes = context.get("changes", [])
         file_count = len(changes)
 
-        # Check critical conditions
-        critical_patterns = ["encrypt", "key", "secret", "credential", "production"]
+        # Check critical conditions - use word boundaries to avoid false positives
+        # e.g., "production" shouldn't match "documentation/production_notes.md"
+        critical_patterns = [r"\bencrypt", r"\bkey\b", r"\bsecret", r"\bcredential", r"\bproduction\b"]
         for change in changes:
+            change_lower = change.lower()
             for pattern in critical_patterns:
-                if pattern in change.lower():
+                if re.search(pattern, change_lower):
                     return "critical"
 
         # Check high risk conditions
-        high_risk_patterns = ["auth", "payment", "api/", "security"]
+        high_risk_patterns = [r"\bauth", r"\bpayment", r"api/", r"\bsecurity"]
         for change in changes:
+            change_lower = change.lower()
             for pattern in high_risk_patterns:
-                if pattern in change.lower():
+                if re.search(pattern, change_lower):
                     return "high"
 
         # Check file count
@@ -122,9 +128,17 @@ class ApprovalGate:
             return False
 
         # Compare risk level against threshold
+        # FIX (v27 - Gemini PR review): Handle invalid threshold gracefully
         risk_levels = ["low", "medium", "high", "critical"]
         risk_idx = risk_levels.index(risk)
-        threshold_idx = risk_levels.index(self.policy.risk_threshold)
+        try:
+            threshold_idx = risk_levels.index(self.policy.risk_threshold)
+        except ValueError:
+            logger.warning(
+                f"Invalid risk threshold '{self.policy.risk_threshold}' in policy. "
+                "Defaulting to 'medium'."
+            )
+            threshold_idx = risk_levels.index("medium")
 
         return risk_idx >= threshold_idx
 

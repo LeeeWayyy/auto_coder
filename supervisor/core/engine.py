@@ -44,6 +44,7 @@ from supervisor.core.parser import (
     parse_role_output,
 )
 from supervisor.core.roles import RoleConfig, RoleLoader
+from supervisor.core.routing import _infer_task_type
 from supervisor.core.state import Database, Event, EventType
 from supervisor.core.workspace import ApplyError, GateFailedError, IsolatedWorkspace, _truncate_output
 from supervisor.sandbox.executor import (
@@ -1055,7 +1056,7 @@ class ExecutionEngine:
         finally:
             if hasattr(self, 'db') and self.db is not None:
                 duration = time.time() - start_time
-                task_type = self._infer_task_type(role_name)
+                task_type = _infer_task_type(role_name)
                 try:
                     self.db.record_metric(
                         role=role_name,
@@ -1340,14 +1341,5 @@ class ExecutionEngine:
             approval_policy=approval_policy,
         )
 
-    def _infer_task_type(self, role_name: str) -> str:
-        """Infer task type from role name for metrics categorization."""
-        role_to_task = {
-            "planner": "plan",
-            "implementer": "implement",
-            "reviewer": "review",
-            "investigator": "investigate",
-            "doc_generator": "document",
-            "tester": "test",
-        }
-        return role_to_task.get(role_name, "other")
+    # FIX (v27 - Gemini PR review): Removed duplicate _infer_task_type
+    # Now using shared function from supervisor.core.routing

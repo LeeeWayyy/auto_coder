@@ -811,16 +811,33 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         component: Component,
         feature_id: str,
         baseline_set: set[str],
+        baseline_hashes: dict[str, str],
     ) -> tuple[bool, list[str], list[str]]:
         """Handle post-execution approval flow.
+
+        FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
+        Files that were already modified but changed again by this component are
+        now detected and included in rollback.
 
         Returns:
             Tuple of (approved, component_changed, component_untracked)
         """
         current_changed, current_untracked = self._get_changed_files(None)
+        current_hashes = self._get_file_hashes(current_changed)
 
-        component_changed = [f for f in current_changed if f not in baseline_set]
-        component_untracked = [f for f in current_untracked if f not in baseline_set]
+        # New files (not in baseline)
+        new_changed = [f for f in current_changed if f not in baseline_set]
+        new_untracked = [f for f in current_untracked if f not in baseline_set]
+
+        # Files that were in baseline but have different hash now (re-modified)
+        re_modified = [
+            f for f in current_changed
+            if f in baseline_hashes and current_hashes.get(f) != baseline_hashes[f]
+        ]
+
+        # Combine: files this component touched
+        component_changed = list(set(new_changed + re_modified))
+        component_untracked = new_untracked
         all_component_changes = component_changed + component_untracked
 
         diff_lines = self._get_worktree_diff(component.files if component.files else None)
@@ -834,14 +851,34 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         return True, component_changed, component_untracked
 
+    def _get_file_hashes(self, files: list[str]) -> dict[str, str]:
+        """Get SHA1 hashes of file contents for change detection.
+
+        FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
+        """
+        import hashlib
+        import os
+        hashes = {}
+        for filepath in files:
+            full_path = os.path.join(self.repo_path or ".", filepath)
+            try:
+                if os.path.exists(full_path) and os.path.isfile(full_path):
+                    with open(full_path, "rb") as f:
+                        hashes[filepath] = hashlib.sha1(f.read()).hexdigest()
+            except Exception:
+                pass
+        return hashes
+
     def _execute_component(self, component: Component, feature_id: str) -> None:
         """Execute a single component.
 
         FIX (v27 - Gemini PR review): Refactored into smaller helper methods.
+        FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
         """
-        # Capture baseline BEFORE running role
+        # Capture baseline BEFORE running role - both filenames and content hashes
         baseline_changed, baseline_untracked = self._get_changed_files(None)
         baseline_set = set(baseline_changed + baseline_untracked)
+        baseline_hashes = self._get_file_hashes(baseline_changed)
 
         try:
             # Update status to implementing
@@ -864,7 +901,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
             # Handle approval flow
             approved, component_changed, component_untracked = self._handle_post_execution_approval(
-                component, feature_id, baseline_set
+                component, feature_id, baseline_set, baseline_hashes
             )
 
             if not approved:
@@ -891,9 +928,16 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
-            # Rollback only THIS component's changes
+            # Rollback only THIS component's changes using hash-based detection
             exc_changed, exc_untracked = self._get_changed_files(None)
-            component_exc_changed = [f for f in exc_changed if f not in baseline_set]
+            exc_hashes = self._get_file_hashes(exc_changed)
+
+            new_changed = [f for f in exc_changed if f not in baseline_set]
+            re_modified = [
+                f for f in exc_changed
+                if f in baseline_hashes and exc_hashes.get(f) != baseline_hashes[f]
+            ]
+            component_exc_changed = list(set(new_changed + re_modified))
             component_exc_untracked = [f for f in exc_untracked if f not in baseline_set]
             self._rollback_worktree_changes(component_exc_changed, component_exc_untracked)
 
@@ -1158,14 +1202,18 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         import shutil
         import subprocess
         try:
-            # Rollback tracked file changes
-            cmd = ["git", "checkout", "--"]
+            # FIX (v27 - Codex PR review): Only rollback specific files, never full repo
+            # Empty target_files should NOT trigger `git checkout -- .` as that
+            # would wipe prior components' changes
             if target_files:
+                cmd = ["git", "checkout", "--"]
                 cmd.extend(target_files)
+                subprocess.run(cmd, capture_output=True, timeout=30, cwd=self.repo_path)
+                logger.debug(f"Rolled back tracked changes for: {target_files}")
             else:
-                cmd.append(".")
-            subprocess.run(cmd, capture_output=True, timeout=30, cwd=self.repo_path)
-            logger.debug(f"Rolled back tracked changes for: {target_files or 'all files'}")
+                # No tracked files to rollback - this is expected when component
+                # only created new files or edited files already in baseline
+                logger.debug("No tracked files to rollback")
 
             # FIX (v25): Remove untracked files created by role
             # FIX (v26): Handle directories with shutil.rmtree

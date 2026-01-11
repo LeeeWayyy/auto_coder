@@ -360,6 +360,9 @@ def metrics(days: int, live: bool) -> None:
         aggregator = MetricsAggregator(db)
         dashboard = MetricsDashboard(aggregator)
 
+        # FIX (v27 - Gemini PR review): Handle --live option
+        if live:
+            console.print("[yellow]Live mode is not yet implemented.[/yellow]")
         dashboard.show(days=days)
 
     except Exception as e:
