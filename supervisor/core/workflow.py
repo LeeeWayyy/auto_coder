@@ -815,12 +815,14 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         feature_id: str,
         baseline_set: set[str],
         baseline_hashes: dict[str, str],
+        baseline_contents: dict[str, bytes] | None = None,
     ) -> tuple[bool, list[str], list[str]]:
         """Handle post-execution approval flow.
 
         FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
         Files that were already modified but changed again by this component are
         now detected and included in rollback.
+        FIX (v27 - Codex PR review): Pass baseline_contents to rollback for restoration.
 
         Returns:
             Tuple of (approved, component_changed, component_untracked)
@@ -843,13 +845,16 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         component_untracked = new_untracked
         all_component_changes = component_changed + component_untracked
 
-        diff_lines = self._get_worktree_diff(component.files if component.files else None)
+        # FIX (v27 - Codex PR review P2): Show diff for all detected changes, not just component.files
+        diff_lines = self._get_worktree_diff(all_component_changes if all_component_changes else None)
 
         if self.approval_gate:
             if not self._check_approval_gate(
                 feature_id, component, all_component_changes, diff_lines, component_untracked
             ):
-                self._rollback_worktree_changes(component_changed, component_untracked)
+                self._rollback_worktree_changes(
+                    component_changed, component_untracked, baseline_contents
+                )
                 return False, component_changed, component_untracked
 
         return True, component_changed, component_untracked
@@ -872,16 +877,37 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 pass
         return hashes
 
+    def _save_file_contents(self, files: list[str]) -> dict[str, bytes]:
+        """Save file contents for baseline restoration on rollback.
+
+        FIX (v27 - Codex PR review): Save actual content instead of relying on git checkout.
+        This allows restoring to baseline state, not HEAD, preserving prior component changes.
+        """
+        import os
+        contents = {}
+        for filepath in files:
+            full_path = os.path.join(self.repo_path or ".", filepath)
+            try:
+                if os.path.exists(full_path) and os.path.isfile(full_path):
+                    with open(full_path, "rb") as f:
+                        contents[filepath] = f.read()
+            except Exception as e:
+                logger.warning(f"Failed to save baseline content for {filepath}: {e}")
+        return contents
+
     def _execute_component(self, component: Component, feature_id: str) -> None:
         """Execute a single component.
 
         FIX (v27 - Gemini PR review): Refactored into smaller helper methods.
         FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
+        FIX (v27 - Codex PR review): Save baseline contents to restore on rollback.
         """
-        # Capture baseline BEFORE running role - both filenames and content hashes
+        # Capture baseline BEFORE running role - filenames, hashes, and contents
         baseline_changed, baseline_untracked = self._get_changed_files(None)
         baseline_set = set(baseline_changed + baseline_untracked)
         baseline_hashes = self._get_file_hashes(baseline_changed)
+        # Save actual content for restoring on rollback (not git checkout to HEAD)
+        baseline_contents = self._save_file_contents(baseline_changed)
 
         try:
             # Update status to implementing
@@ -904,7 +930,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
             # Handle approval flow
             approved, component_changed, component_untracked = self._handle_post_execution_approval(
-                component, feature_id, baseline_set, baseline_hashes
+                component, feature_id, baseline_set, baseline_hashes, baseline_contents
             )
 
             if not approved:
@@ -942,7 +968,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             ]
             component_exc_changed = list(set(new_changed + re_modified))
             component_exc_untracked = [f for f in exc_untracked if f not in baseline_set]
-            self._rollback_worktree_changes(component_exc_changed, component_exc_untracked)
+            self._rollback_worktree_changes(
+                component_exc_changed, component_exc_untracked, baseline_contents
+            )
 
             comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
@@ -1159,11 +1187,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cmd = ["git", "diff", "--no-color"]
             if target_files:
                 cmd.extend(["--", *target_files])
+            # FIX (v27 - Codex PR review): Use self.git_timeout instead of hardcoded 30
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=self.git_timeout,
                 cwd=self.repo_path,
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -1173,11 +1202,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cmd_cached = ["git", "diff", "--no-color", "--cached"]
             if target_files:
                 cmd_cached.extend(["--", *target_files])
+            # FIX (v27 - Codex PR review): Use self.git_timeout instead of hardcoded 30
             result = subprocess.run(
                 cmd_cached,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=self.git_timeout,
                 cwd=self.repo_path,
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -1192,27 +1222,50 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             return []
 
     def _rollback_worktree_changes(
-        self, target_files: list[str] | None, untracked_files: list[str] | None = None
+        self,
+        target_files: list[str] | None,
+        untracked_files: list[str] | None = None,
+        baseline_contents: dict[str, bytes] | None = None,
     ) -> None:
         """Rollback uncommitted worktree changes after rejection.
 
         FIX (v25 - Codex): Now handles both tracked and untracked files.
         FIX (v26 - Codex): Handle directories with shutil.rmtree.
-        - Tracked files: Uses git checkout to discard changes
+        FIX (v27 - Codex PR review P1): Restore from baseline contents, not git checkout.
+        - Tracked files with baseline: Restore from saved baseline contents
+        - Tracked files without baseline (new to tracking): git checkout to discard
         - Untracked files/directories: Removes newly created files and directories
         """
         import os
         import shutil
         import subprocess
         try:
-            # FIX (v27 - Codex PR review): Only rollback specific files, never full repo
-            # Empty target_files should NOT trigger `git checkout -- .` as that
-            # would wipe prior components' changes
+            # FIX (v27 - Codex PR review P1): Restore files from baseline contents
+            # This preserves prior component changes instead of resetting to HEAD
             if target_files:
-                cmd = ["git", "checkout", "--"]
-                cmd.extend(target_files)
-                subprocess.run(cmd, capture_output=True, timeout=self.git_timeout, cwd=self.repo_path)
-                logger.debug(f"Rolled back tracked changes for: {target_files}")
+                files_to_checkout: list[str] = []
+                for filepath in target_files:
+                    if baseline_contents and filepath in baseline_contents:
+                        # Restore from saved baseline content
+                        full_path = os.path.join(self.repo_path or ".", filepath)
+                        try:
+                            with open(full_path, "wb") as f:
+                                f.write(baseline_contents[filepath])
+                            logger.debug(f"Restored {filepath} from baseline content")
+                        except Exception as restore_err:
+                            logger.warning(f"Failed to restore {filepath} from baseline: {restore_err}")
+                            # Fall back to git checkout for this file
+                            files_to_checkout.append(filepath)
+                    else:
+                        # File wasn't in baseline - use git checkout to discard
+                        files_to_checkout.append(filepath)
+
+                # Git checkout for files not in baseline (new modifications)
+                if files_to_checkout:
+                    cmd = ["git", "checkout", "--"]
+                    cmd.extend(files_to_checkout)
+                    subprocess.run(cmd, capture_output=True, timeout=self.git_timeout, cwd=self.repo_path)
+                    logger.debug(f"Rolled back tracked changes via git checkout for: {files_to_checkout}")
             else:
                 # No tracked files to rollback - this is expected when component
                 # only created new files or edited files already in baseline

@@ -263,23 +263,27 @@ def _load_approval_config(repo_path: Path) -> "ApprovalPolicy | None":
         )
 
 
-def _load_limits_config(repo_path: Path) -> tuple[dict[str, float], float]:
+def _load_limits_config(repo_path: Path) -> tuple[dict[str, float], float, float]:
     """Load timeout limits from .supervisor/limits.yaml.
 
+    FIX (v27 - Codex PR review): Also load workflow_timeout from config.
+
     Returns:
-        Tuple of (role_timeouts dict, component_timeout)
+        Tuple of (role_timeouts dict, component_timeout, workflow_timeout)
     """
     config_path = repo_path / ".supervisor/limits.yaml"
     role_timeouts: dict[str, float] = {}
     component_timeout = 300.0
+    workflow_timeout = 3600.0
 
     if config_path.exists():
         with open(config_path) as f:
             limits = yaml.safe_load(f)
             role_timeouts = limits.get("role_timeouts", {})
             component_timeout = limits.get("component_timeout", 300.0)
+            workflow_timeout = limits.get("workflow_timeout", 3600.0)
 
-    return role_timeouts, component_timeout
+    return role_timeouts, component_timeout, workflow_timeout
 
 
 @main.command()
@@ -321,7 +325,11 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
 
         # FIX (v27 - Gemini PR review): Use helper functions for config loading
         policy = _load_approval_config(repo_path)
-        role_timeouts, component_timeout = _load_limits_config(repo_path)
+        role_timeouts, component_timeout, config_workflow_timeout = _load_limits_config(repo_path)
+
+        # FIX (v27 - Codex PR review): Use config value unless --timeout was explicitly provided
+        # (Click defaults --timeout to 3600, so we check if it matches the default)
+        effective_timeout = float(timeout) if timeout != 3600 else config_workflow_timeout
 
         bridge = InteractionBridge() if tui else None
         approval_gate = ApprovalGate(db, policy=policy)
@@ -330,7 +338,7 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
             engine=engine,
             db=db,
             repo_path=repo_path,
-            workflow_timeout=float(timeout),
+            workflow_timeout=effective_timeout,
             component_timeout=component_timeout,
             role_timeouts=role_timeouts,
             approval_gate=approval_gate,
