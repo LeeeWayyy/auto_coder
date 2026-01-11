@@ -51,6 +51,19 @@ class FeatureStatus(str, Enum):
     FAILED = "failed"
 
 
+# --- Shared Exceptions ---
+
+
+class CancellationError(Exception):
+    """Raised when a workflow or component is cancelled.
+
+    FIX (v27 - Gemini PR review): Moved to models.py to avoid circular imports
+    and enable proper exception type checking instead of string comparison.
+    """
+
+    pass
+
+
 # --- Workflow State Models ---
 
 

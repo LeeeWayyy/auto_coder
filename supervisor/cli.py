@@ -4,6 +4,8 @@ Commands:
 - supervisor init: Initialize project for supervisor
 - supervisor plan: Run planner on a task
 - supervisor run: Run a workflow
+- supervisor workflow: Execute a feature workflow (Phase 5)
+- supervisor metrics: View performance metrics (Phase 5)
 - supervisor status: Show current workflow status
 - supervisor roles: List available roles
 """
@@ -13,6 +15,7 @@ import uuid
 from pathlib import Path
 
 import click
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -20,6 +23,8 @@ from rich.table import Table
 from supervisor.core.engine import ExecutionEngine
 from supervisor.core.roles import RoleLoader
 from supervisor.core.state import Database
+from supervisor.metrics.aggregator import MetricsAggregator
+from supervisor.metrics.dashboard import MetricsDashboard
 
 console = Console()
 
@@ -79,6 +84,44 @@ git:
 """
     )
 
+    # Phase 5: Create timeout/limits config
+    limits_yaml = supervisor_dir / "limits.yaml"
+    if not limits_yaml.exists():
+        limits_yaml.write_text("""# Timeout and resource limits configuration
+workflow_timeout: 3600  # Total workflow timeout (seconds)
+component_timeout: 300  # Per-component timeout (seconds)
+role_timeouts:
+  planner: 600
+  implementer: 300
+  reviewer: 180
+""")
+
+    # Phase 5: Create adaptive config
+    adaptive_yaml = supervisor_dir / "adaptive.yaml"
+    if not adaptive_yaml.exists():
+        adaptive_yaml.write_text("""# Adaptive model selection configuration
+adaptive:
+  enabled: true
+  min_samples_before_adapt: 10
+  recalculation_interval: 10
+  exploration_rate: 0.1
+  score_weights:
+    success_rate: 0.6
+    avg_duration: 0.4
+""")
+
+    # Phase 5: Create approval policy config
+    approval_yaml = supervisor_dir / "approval.yaml"
+    if not approval_yaml.exists():
+        approval_yaml.write_text("""# Approval policy configuration
+approval:
+  auto_approve_low_risk: true
+  risk_threshold: medium  # low, medium, high, critical
+  require_approval_for:
+    - deploy
+    - commit
+""")
+
     # Initialize database
     db = Database(supervisor_dir / "state.db")
 
@@ -87,6 +130,9 @@ git:
             "[green]Project initialized![/green]\n\n"
             f"Created: {supervisor_dir}\n"
             "- config.yaml: Project configuration\n"
+            "- limits.yaml: Timeout configuration (Phase 5)\n"
+            "- adaptive.yaml: Adaptive routing configuration (Phase 5)\n"
+            "- approval.yaml: Approval policy configuration (Phase 5)\n"
             "- roles/: Custom role definitions\n"
             "- state.db: Workflow state database",
             title="Supervisor Initialized",
@@ -192,6 +238,157 @@ def run(role: str, task: str, workflow_id: str | None, target: tuple[str, ...]) 
             console.print("\n[bold]Files created:[/bold]")
             for f in result.files_created:
                 console.print(f"  - {f}")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+# FIX (v27 - Gemini PR review): Helper functions for config loading
+def _load_approval_config(repo_path: Path) -> "ApprovalPolicy | None":
+    """Load approval policy from .supervisor/approval.yaml."""
+    from supervisor.core.approval import ApprovalPolicy
+
+    config_path = repo_path / ".supervisor/approval.yaml"
+    if not config_path.exists():
+        return None
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+        approval_cfg = config.get("approval", {})
+        return ApprovalPolicy(
+            auto_approve_low_risk=approval_cfg.get("auto_approve_low_risk", True),
+            risk_threshold=approval_cfg.get("risk_threshold", "medium"),
+            require_approval_for=approval_cfg.get("require_approval_for", ["deploy", "commit"]),
+        )
+
+
+def _load_limits_config(repo_path: Path) -> tuple[dict[str, float], float, float]:
+    """Load timeout limits from .supervisor/limits.yaml.
+
+    FIX (v27 - Codex PR review): Also load workflow_timeout from config.
+
+    Returns:
+        Tuple of (role_timeouts dict, component_timeout, workflow_timeout)
+    """
+    config_path = repo_path / ".supervisor/limits.yaml"
+    role_timeouts: dict[str, float] = {}
+    component_timeout = 300.0
+    workflow_timeout = 3600.0
+
+    if config_path.exists():
+        with open(config_path) as f:
+            limits = yaml.safe_load(f)
+            role_timeouts = limits.get("role_timeouts", {})
+            component_timeout = limits.get("component_timeout", 300.0)
+            workflow_timeout = limits.get("workflow_timeout", 3600.0)
+
+    return role_timeouts, component_timeout, workflow_timeout
+
+
+@main.command()
+@click.argument("feature_id")
+@click.option("--tui", is_flag=True, help="Run with interactive TUI")
+@click.option("--parallel/--sequential", default=True, help="Parallel or sequential execution")
+@click.option("--timeout", type=int, default=None, help="Workflow timeout in seconds (default: from limits.yaml or 3600)")
+def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int | None) -> None:
+    """Execute a feature workflow (Phase 5).
+
+    FEATURE_ID is the ID of the feature to execute.
+
+    Example:
+        supervisor workflow feat-12345678 --tui
+    """
+    repo_path = get_repo_path()
+    db_path = repo_path / ".supervisor/state.db"
+
+    if not db_path.exists():
+        console.print("[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]")
+        return
+
+    db = Database(db_path)
+
+    feature = db.get_feature(feature_id)
+    if not feature:
+        console.print(f"[red]Error:[/red] Feature '{feature_id}' not found")
+        sys.exit(1)
+
+    console.print(f"\n[bold]Executing workflow:[/bold] {feature_id}")
+    console.print(f"[dim]Mode: {'TUI' if tui else 'CLI'}, Parallel: {parallel}[/dim]\n")
+
+    try:
+        from supervisor.core.workflow import WorkflowCoordinator
+        from supervisor.core.interaction import InteractionBridge
+        from supervisor.core.approval import ApprovalGate
+
+        engine = ExecutionEngine(repo_path)
+
+        # FIX (v27 - Gemini PR review): Use helper functions for config loading
+        policy = _load_approval_config(repo_path)
+        role_timeouts, component_timeout, config_workflow_timeout = _load_limits_config(repo_path)
+
+        # FIX (v27 - Codex PR review): Use config value unless --timeout was explicitly provided
+        # FIX (v27 - Codex PR review): Use None default to allow explicit override to 3600
+        effective_timeout = config_workflow_timeout if timeout is None else float(timeout)
+
+        bridge = InteractionBridge() if tui else None
+        approval_gate = ApprovalGate(db, policy=policy)
+
+        coordinator = WorkflowCoordinator(
+            engine=engine,
+            db=db,
+            repo_path=repo_path,
+            workflow_timeout=effective_timeout,
+            component_timeout=component_timeout,
+            role_timeouts=role_timeouts,
+            approval_gate=approval_gate,
+            interaction_bridge=bridge,
+        )
+
+        if tui:
+            from supervisor.tui.app import SupervisorTUI
+            tui_app = SupervisorTUI(db, bridge=bridge)
+            tui_app.run_with_workflow(
+                workflow_fn=lambda: coordinator.run_implementation(feature_id, parallel=parallel),
+                feature_id=feature_id,
+            )
+        else:
+            # Run without TUI
+            coordinator.run_implementation(feature_id, parallel=parallel)
+
+        console.print(Panel("[green]Workflow complete![/green]", title="Status"))
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--days", type=int, default=30, help="Number of days to analyze")
+@click.option("--live", is_flag=True, help="Live updating display")
+def metrics(days: int, live: bool) -> None:
+    """View performance metrics (Phase 5).
+
+    Example:
+        supervisor metrics --days 7
+        supervisor metrics --live
+    """
+    repo_path = get_repo_path()
+    db_path = repo_path / ".supervisor/state.db"
+
+    if not db_path.exists():
+        console.print("[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]")
+        return
+
+    try:
+        db = Database(db_path)
+        aggregator = MetricsAggregator(db)
+        dashboard = MetricsDashboard(aggregator)
+
+        # FIX (v27 - Gemini PR review): Handle --live option
+        if live:
+            console.print("[yellow]Live mode is not yet implemented.[/yellow]")
+        dashboard.show(days=days)
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")

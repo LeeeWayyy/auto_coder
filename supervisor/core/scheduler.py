@@ -8,7 +8,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from supervisor.core.state import Database, Event, EventType
 from supervisor.core.utils import normalize_repo_path
@@ -398,6 +398,36 @@ class DAGScheduler:
                     )
                 )
             # Other statuses not explicitly handled by events
+
+    def set_component_metadata(
+        self,
+        component_id: str,
+        key: str,
+        value: Any,
+        workflow_id: str,
+    ) -> None:
+        """Store arbitrary metadata on a component.
+
+        FIX (v24 - Codex): Added for SKIP persistence in approval flow.
+        Used by ApprovalGate to persist SKIP flags for later audit.
+        Metadata is stored as JSON in the component's metadata field via event.
+        """
+        import json
+
+        with self._status_lock:
+            # Store via event for audit trail
+            self.db.append_event(
+                Event(
+                    workflow_id=workflow_id,
+                    event_type=EventType.METADATA_SET,  # FIX (v24): Use METADATA_SET
+                    component_id=component_id,
+                    payload={
+                        "action": "set_metadata",
+                        "key": key,
+                        "value": value,
+                    },
+                )
+            )
 
     def is_feature_complete(self) -> bool:
         """Check if all components are complete.

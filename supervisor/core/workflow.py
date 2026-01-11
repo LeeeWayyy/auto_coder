@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, ValidationError
 
 from supervisor.core.models import (
+    CancellationError,
     Component,
     ComponentStatus,
     Feature,
@@ -22,7 +23,7 @@ from supervisor.core.models import (
     Phase,
     PhaseStatus,
 )
-from supervisor.core.routing import ModelRouter, create_router
+from supervisor.core.routing import ModelRouter, create_router, AdaptiveConfig
 from supervisor.core.scheduler import (
     DAGScheduler,
     WorkflowBlockedError,
@@ -32,6 +33,8 @@ from supervisor.core.utils import normalize_repo_path
 
 if TYPE_CHECKING:
     from supervisor.core.engine import ExecutionEngine
+    from supervisor.core.interaction import InteractionBridge
+    from supervisor.core.approval import ApprovalGate
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +115,15 @@ class WorkflowCoordinator:
         prefer_cost: bool = False,
         max_stall_seconds: float = 600.0,
         component_timeout: float = 300.0,
+        # NEW Phase 5 params
+        workflow_timeout: float = 3600.0,
+        checkpoint_on_timeout: bool = True,
+        role_timeouts: dict[str, float] | None = None,
+        approval_gate: "ApprovalGate | None" = None,
+        interaction_bridge: "InteractionBridge | None" = None,
+        adaptive_config: dict[str, Any] | None = None,
+        # FIX (v27 - Gemini PR review): Configurable git subprocess timeout
+        git_timeout: float = 60.0,
     ):
         self.engine = engine
         self.db = db
@@ -120,9 +132,30 @@ class WorkflowCoordinator:
         # FIX (PR review): Make timeout values configurable
         self.max_stall_seconds = max_stall_seconds  # Max time without progress (default 10 min)
         self.component_timeout = component_timeout  # Per-component timeout (default 5 min)
+        self.git_timeout = git_timeout  # Git subprocess timeout (default 60s)
         self._scheduler: DAGScheduler | None = None
-        # FIX (Gemini review): Integrate ModelRouter for intelligent model selection
-        self._router = create_router(prefer_speed=prefer_speed, prefer_cost=prefer_cost)
+        
+        # Parse adaptive config
+        self.adaptive_config = None
+        if adaptive_config:
+            self.adaptive_config = AdaptiveConfig(**adaptive_config)
+
+        # FIX (Gemini review): Integrate ModelRouter with adaptive support
+        self._router = create_router(
+            prefer_speed=prefer_speed, 
+            prefer_cost=prefer_cost,
+            db=self.db,
+            adaptive_config=self.adaptive_config,
+        )
+
+        # NEW Phase 5 initialization
+        self.workflow_timeout = workflow_timeout or 3600.0
+        self.checkpoint_on_timeout = checkpoint_on_timeout
+        self.role_timeouts = role_timeouts or {}
+        self._workflow_start_time: float | None = None
+
+        self.approval_gate = approval_gate
+        self.interaction_bridge = interaction_bridge
 
     def create_feature(
         self,
@@ -440,6 +473,14 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         Returns:
             Updated Feature object
         """
+        # FIX (v15 - Codex): ALWAYS reset timer per run_implementation call
+        self._workflow_start_time = time.time()
+
+        # Check workflow timeout (elapsed will be ~0 at start, this is for resume)
+        elapsed = time.time() - self._workflow_start_time
+        if elapsed > self.workflow_timeout:
+            self._handle_workflow_timeout(feature_id, elapsed)
+
         # Build DAG - FIX (Codex v5): Pass repo_path for consistent path normalization
         self._scheduler = DAGScheduler(self.db, repo_path=self.repo_path)
         self._scheduler.build_graph(feature_id)
@@ -450,25 +491,46 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         # FIX (PR review): Use public method instead of accessing _components directly
         num_components = self._scheduler.get_component_count()
 
-        if not parallel:
-            # Sequential execution - simple loop
-            self._run_sequential(feature_id, num_components)
-        else:
-            # FIX (Gemini review): Continuous parallel scheduling
-            # Instead of batch-wait, continuously submit newly ready components
-            self._run_continuous_parallel(feature_id, num_components)
+        try:
+            workflow_deadline = self._workflow_start_time + self.workflow_timeout
+            if not parallel:
+                # Sequential execution - simple loop with timeout
+                self._run_sequential_with_timeout(feature_id, workflow_deadline=workflow_deadline)
+            else:
+                # FIX (Gemini review): Continuous parallel scheduling
+                self._run_continuous_parallel(
+                    feature_id,
+                    num_components,
+                    workflow_deadline=workflow_deadline
+                )
+
+        except Exception as e:
+            # FIX (v27 - Gemini PR review): Use proper isinstance check
+            if isinstance(e, CancellationError):
+                # Checkpoint already saved in _handle_workflow_timeout
+                raise
+            raise e
 
         # Feature complete
         self.db.update_feature_status(feature_id, FeatureStatus.REVIEW)
         logger.info(f"Implementation complete for '{feature_id}'")
         return self.db.get_feature(feature_id)  # type: ignore
 
-    def _run_sequential(self, feature_id: str, num_components: int) -> None:
-        """Run components sequentially (no parallelism)."""
+    def _run_sequential_with_timeout(
+        self,
+        feature_id: str,
+        workflow_deadline: float | None = None,
+    ) -> None:
+        """Run components sequentially with workflow and role timeout checks."""
         iteration = 0
-        max_iterations = max(num_components * 10, 100)
+        max_iterations = max(self._scheduler.get_component_count() * 10, 100)
 
         while not self._scheduler.is_feature_complete():
+            # NEW (v9): Check workflow-level timeout before each component
+            if workflow_deadline and time.time() > workflow_deadline:
+                elapsed = time.time() - (self._workflow_start_time or 0)
+                self._handle_workflow_timeout(feature_id, elapsed)
+
             iteration += 1
             if iteration > max_iterations:
                 raise WorkflowBlockedError(
@@ -487,10 +549,32 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 time.sleep(0.1)
                 continue
 
-            # Execute one component at a time
-            self._execute_component(ready[0], feature_id)
+            # Execute one component at a time with per-role timeout
+            comp = ready[0]
+            role_name = comp.assigned_role or "implementer"
+            role_timeout = self.role_timeouts.get(role_name, self.component_timeout)
 
-    def _run_continuous_parallel(self, feature_id: str, num_components: int) -> None:
+            # Use single-threaded executor for timeout enforcement
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self._execute_component, comp, feature_id)
+                try:
+                    future.result(timeout=role_timeout)
+                except TimeoutError:
+                    future.cancel()
+                    self._scheduler.update_component_status(
+                        comp.id,
+                        ComponentStatus.FAILED,
+                        error=f"Component timed out after {role_timeout}s",
+                        workflow_id=feature_id,
+                    )
+                    logger.error(f"Component '{comp.id}' timed out after {role_timeout}s (sequential mode)")
+
+    def _run_continuous_parallel(
+        self,
+        feature_id: str,
+        num_components: int,
+        workflow_deadline: float | None = None,
+    ) -> None:
         """Run components with continuous parallel scheduling.
 
         FIX (Gemini review): Instead of waiting for entire batches to complete,
@@ -510,6 +594,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         last_completed_count = 0
         active_futures: dict[Future, Component] = {}
         future_start_times: dict[Future, float] = {}  # Track when each future started
+        future_timeouts: dict[Future, float] = {}  # NEW (v9): Track per-component deadlines
         # FIX (Codex review): Track active component IDs for O(1) lookup instead of O(n) scan
         active_component_ids: set[str] = set()
         # FIX (Codex review v4): Track timed-out futures to release file locks ONLY when thread completes
@@ -527,6 +612,13 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         executor = ThreadPoolExecutor(max_workers=self.max_parallel_workers)
         try:
             while not self._scheduler.is_feature_complete():
+                now = time.time()
+
+                # NEW: Check workflow-level timeout
+                if workflow_deadline and now > workflow_deadline:
+                    elapsed = now - (self._workflow_start_time or 0)
+                    self._handle_workflow_timeout(feature_id, elapsed)
+
                 # Check for progress (any new completions)
                 # FIX (PR review): Use public method instead of accessing _components directly
                 current_completed = self._scheduler.get_completed_count()
@@ -539,10 +631,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 # This ensures hung components are caught even when other work progresses
                 # FIX (Codex review): Only mark as timed out if future is NOT done
                 # A future that completed just before timeout should be processed normally
-                now = time.time()
                 timed_out = [
                     (f, c) for f, c in active_futures.items()
-                    if now - future_start_times.get(f, now) > self.component_timeout
+                    if now > future_timeouts.get(f, now + 9999) # Use stored deadline
                     and not f.done()  # Don't timeout completed futures
                 ]
                 if timed_out:
@@ -553,15 +644,16 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         # Move to timed_out_futures - DON'T release file locks yet
                         del active_futures[future]
                         future_start_times.pop(future, None)
+                        future_timeouts.pop(future, None)
                         active_component_ids.discard(comp.id)  # FIX (Codex review): O(1) tracking
                         timed_out_futures[future] = comp  # Track for later cleanup
                         self._scheduler.update_component_status(
                             comp.id,
                             ComponentStatus.FAILED,
-                            error=f"Component timed out after {self.component_timeout}s",
+                            error=f"Component timed out",
                             workflow_id=feature_id,
                         )
-                        logger.error(f"Component '{comp.id}' timed out after {self.component_timeout}s")
+                        logger.error(f"Component '{comp.id}' timed out")
                     last_progress_time = time.time()  # Reset after handling timeouts
 
                 # FIX (Codex review): Wall-clock stall detection for deadlocks
@@ -607,10 +699,16 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     with files_lock:
                         # Normalize paths when adding to files_in_progress
                         files_in_progress.update(normalize_path(f) for f in (comp.files or []))
+                    
+                    # NEW (v9): Look up role-specific timeout
+                    role_name = comp.assigned_role or "implementer"
+                    timeout = self.role_timeouts.get(role_name, self.component_timeout)
+                    
                     future = executor.submit(self._execute_component, comp, feature_id)
                     active_futures[future] = comp
                     active_component_ids.add(comp.id)  # FIX (Codex review): O(1) tracking
                     future_start_times[future] = time.time()  # Track start time for timeout
+                    future_timeouts[future] = time.time() + timeout # NEW (v9): Store deadline
 
                 # If no active work and nothing ready, check if blocked
                 if not active_futures:
@@ -642,6 +740,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     comp = active_futures.pop(future)
                     active_component_ids.discard(comp.id)  # FIX (Codex review): O(1) tracking
                     future_start_times.pop(future, None)  # Clean up start time tracking
+                    future_timeouts.pop(future, None)
                     with files_lock:
                         for f in comp.files or []:
                             files_in_progress.discard(normalize_path(f))
@@ -667,16 +766,232 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     pass
             executor.shutdown(wait=True)
 
+    # FIX (v27 - Gemini PR review): Helper methods for _execute_component
+
+    def _run_component_role(
+        self,
+        component: Component,
+        feature_id: str,
+    ) -> Any:
+        """Run the role for a component.
+
+        Returns the role execution result.
+        """
+        role_name = component.assigned_role or "implementer"
+        task_description = (
+            f"Implement component: {component.title}\n\n"
+            f"Description: {component.description or 'No description provided.'}\n\n"
+            f"Files to create/modify: {', '.join(component.files) if component.files else 'As needed'}"
+        )
+
+        role_config = self.engine.role_loader.load_role(role_name)
+        role_cli = role_config.cli if role_config else None
+
+        estimated_context = len(component.files) * 5000 if component.files else 10000
+        selected_model = self._router.select_model(
+            role_name=role_name,
+            role_cli=role_cli,
+            context_size=estimated_context,
+        )
+        logger.debug(
+            f"Component '{component.id}': Router selected '{selected_model}' for role '{role_name}'"
+        )
+
+        def is_cancelled() -> bool:
+            comp = self._scheduler.get_component(component.id)
+            return comp is not None and comp.status == ComponentStatus.FAILED
+
+        return self.engine.run_role(
+            role_name=role_name,
+            task_description=task_description,
+            workflow_id=feature_id,
+            target_files=component.files,
+            cli_override=selected_model,
+            cancellation_check=is_cancelled,
+        )
+
+    def _build_component_scope(
+        self, component: Component
+    ) -> tuple[set[str], set[str], bool]:
+        """Build scope for component change detection.
+
+        FIX (v27 - Codex PR review): Extract helper to avoid duplication.
+        FIX (v27 - Codex PR review HIGH): Handle empty component.files.
+        FIX (v27 - Codex PR review MEDIUM): Only include file's directory, not parents.
+
+        Returns:
+            (component_file_set, component_dirs, has_scope) where has_scope=False
+            means no scoping (all changes should be included).
+        """
+        import os
+        component_dirs: set[str] = set()
+        component_file_set: set[str] = set()
+
+        # FIX (v27 - Codex PR review HIGH): Empty component.files means no scoping
+        if not component.files:
+            return component_file_set, component_dirs, False
+
+        for f in component.files:
+            component_file_set.add(f)
+            # FIX (v27 - Codex PR review MEDIUM): Only add the file's direct directory
+            # Not parent dirs to avoid sibling directory bleed-through
+            dirname = os.path.dirname(f)
+            if dirname:
+                component_dirs.add(dirname)
+            else:
+                component_dirs.add(".")  # Root level files
+
+        return component_file_set, component_dirs, True
+
+    def _is_in_component_scope(
+        self,
+        filepath: str,
+        component_file_set: set[str],
+        component_dirs: set[str],
+    ) -> bool:
+        """Check if filepath is in component's scope.
+
+        FIX (v27 - Codex PR review): Extract helper to avoid duplication.
+        """
+        import os
+        # Direct match to declared files
+        if filepath in component_file_set:
+            return True
+        # Check if file is in one of component's directories (or subdirectory)
+        file_dir = os.path.dirname(filepath) or "."
+        # Check if file_dir starts with any component dir
+        for comp_dir in component_dirs:
+            if file_dir == comp_dir or file_dir.startswith(comp_dir + os.sep):
+                return True
+        return False
+
+    def _handle_post_execution_approval(
+        self,
+        component: Component,
+        feature_id: str,
+        baseline_set: set[str],
+        baseline_hashes: dict[str, str],
+        baseline_contents: dict[str, bytes] | None = None,
+    ) -> tuple[bool, list[str], list[str]]:
+        """Handle post-execution approval flow.
+
+        FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
+        FIX (v27 - Codex PR review): Pass baseline_contents to rollback for restoration.
+        FIX (v27 - Codex PR review P1): Scope change detection to component's files/dirs.
+
+        Returns:
+            Tuple of (approved, component_changed, component_untracked)
+        """
+        # Build component scope
+        component_file_set, component_dirs, has_scope = self._build_component_scope(component)
+
+        # Get all worktree changes
+        current_changed, current_untracked = self._get_changed_files(None)
+
+        # FIX (v27 - Codex PR review HIGH): If no scope, include all changes
+        if has_scope:
+            scoped_changed = [
+                f for f in current_changed
+                if self._is_in_component_scope(f, component_file_set, component_dirs)
+            ]
+            scoped_untracked = [
+                f for f in current_untracked
+                if self._is_in_component_scope(f, component_file_set, component_dirs)
+            ]
+        else:
+            # No scoping - component can touch any file
+            scoped_changed = current_changed
+            scoped_untracked = current_untracked
+
+        current_hashes = self._get_file_hashes(scoped_changed)
+
+        # New files (not in baseline) within component's scope
+        new_changed = [f for f in scoped_changed if f not in baseline_set]
+        new_untracked = [f for f in scoped_untracked if f not in baseline_set]
+
+        # Files that were in baseline but have different hash now (re-modified)
+        re_modified = [
+            f for f in scoped_changed
+            if f in baseline_hashes and current_hashes.get(f) != baseline_hashes[f]
+        ]
+
+        # Combine: files this component touched
+        component_changed = list(set(new_changed + re_modified))
+        component_untracked = new_untracked
+        all_component_changes = component_changed + component_untracked
+
+        # FIX (v27 - Gemini PR review LOW): Only call diff when approval gate exists
+        if self.approval_gate:
+            diff_lines = self._get_worktree_diff(
+                component_changed if component_changed else None,
+                component_untracked if component_untracked else None,
+            )
+            if not self._check_approval_gate(
+                feature_id, component, all_component_changes, diff_lines, component_untracked
+            ):
+                # FIX (v27 - Codex PR review): Surface rollback failures
+                rollback_ok = self._rollback_worktree_changes(
+                    component_changed, component_untracked, baseline_contents
+                )
+                if not rollback_ok:
+                    logger.warning(
+                        f"Rollback for component '{component.id}' had partial failures. "
+                        "Some files may not be fully restored."
+                    )
+                return False, component_changed, component_untracked
+
+        return True, component_changed, component_untracked
+
+    def _get_file_hashes(self, files: list[str]) -> dict[str, str]:
+        """Get SHA1 hashes of file contents for change detection.
+
+        FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
+        """
+        import hashlib
+        import os
+        hashes = {}
+        for filepath in files:
+            full_path = os.path.join(self.repo_path or ".", filepath)
+            try:
+                if os.path.exists(full_path) and os.path.isfile(full_path):
+                    with open(full_path, "rb") as f:
+                        hashes[filepath] = hashlib.sha1(f.read()).hexdigest()
+            except Exception:
+                pass
+        return hashes
+
+    def _save_file_contents(self, files: list[str]) -> dict[str, bytes]:
+        """Save file contents for baseline restoration on rollback.
+
+        FIX (v27 - Codex PR review): Save actual content instead of relying on git checkout.
+        This allows restoring to baseline state, not HEAD, preserving prior component changes.
+        """
+        import os
+        contents = {}
+        for filepath in files:
+            full_path = os.path.join(self.repo_path or ".", filepath)
+            try:
+                if os.path.exists(full_path) and os.path.isfile(full_path):
+                    with open(full_path, "rb") as f:
+                        contents[filepath] = f.read()
+            except Exception as e:
+                logger.warning(f"Failed to save baseline content for {filepath}: {e}")
+        return contents
+
     def _execute_component(self, component: Component, feature_id: str) -> None:
         """Execute a single component.
 
-        Maps component to role execution:
-        1. Determine role from component.assigned_role
-        2. Use ModelRouter for intelligent model selection (FIX: Gemini review)
-        3. Build context with component's target files
-        4. Run role with component-specific task
-        5. Update component status based on result
+        FIX (v27 - Gemini PR review): Refactored into smaller helper methods.
+        FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
+        FIX (v27 - Codex PR review): Save baseline contents to restore on rollback.
         """
+        # Capture baseline BEFORE running role - filenames, hashes, and contents
+        baseline_changed, baseline_untracked = self._get_changed_files(None)
+        baseline_set = set(baseline_changed + baseline_untracked)
+        baseline_hashes = self._get_file_hashes(baseline_changed)
+        # Save actual content for restoring on rollback (not git checkout to HEAD)
+        baseline_contents = self._save_file_contents(baseline_changed)
+
         try:
             # Update status to implementing
             self._scheduler.update_component_status(
@@ -685,58 +1000,33 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 workflow_id=feature_id,
             )
 
-            # Determine role and task
-            role_name = component.assigned_role or "implementer"
-            task_description = (
-                f"Implement component: {component.title}\n\n"
-                f"Description: {component.description or 'No description provided.'}\n\n"
-                f"Files to create/modify: {', '.join(component.files) if component.files else 'As needed'}"
-            )
+            # Run the role
+            result = self._run_component_role(component, feature_id)
 
-            # FIX (PR review): Load role config to get its configured CLI
-            # This ensures custom/overlay roles with explicit CLI settings are respected
-            role_config = self.engine.role_loader.load_role(role_name)
-            role_cli = role_config.cli if role_config else None
-
-            # FIX (Gemini review): Use ModelRouter for intelligent model selection
-            # Estimate context size based on number of files
-            estimated_context = len(component.files) * 5000 if component.files else 10000
-            selected_model = self._router.select_model(
-                role_name=role_name,
-                role_cli=role_cli,  # Pass role's configured CLI to respect explicit config
-                context_size=estimated_context,
-            )
-            logger.debug(
-                f"Component '{component.id}': Router selected '{selected_model}' for role '{role_name}'"
-            )
-
-            # FIX (Codex review): Pass cancellation check to prevent applying changes
-            # after timeout. Returns True if component was marked FAILED (e.g., timed out).
-            def is_cancelled() -> bool:
-                comp = self._scheduler.get_component(component.id)
-                return comp is not None and comp.status == ComponentStatus.FAILED
-
-            # Run the role with ModelRouter-selected CLI
-            result = self.engine.run_role(
-                role_name=role_name,
-                task_description=task_description,
-                workflow_id=feature_id,
-                target_files=component.files,
-                cli_override=selected_model,
-                cancellation_check=is_cancelled,
-            )
-
-            # FIX (Codex review v3): Check current status before updating to COMPLETED
-            # A timed-out component may still complete; ignore late results
-            # FIX (PR review): Use public method instead of accessing _components directly
+            # Check if timed out while running
             comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' completed after timeout - ignoring late result"
                 )
-                return  # Don't overwrite FAILED status
+                return
 
-            # Success - update status
+            # Handle approval flow
+            approved, component_changed, component_untracked = self._handle_post_execution_approval(
+                component, feature_id, baseline_set, baseline_hashes, baseline_contents
+            )
+
+            if not approved:
+                self._scheduler.update_component_status(
+                    component.id,
+                    ComponentStatus.FAILED,
+                    error="Approval rejected by user",
+                    workflow_id=feature_id,
+                )
+                logger.info(f"Component '{component.id}' rejected by approval gate, changes rolled back")
+                return
+
+            # Approval granted - mark as completed
             self._scheduler.update_component_status(
                 component.id,
                 ComponentStatus.COMPLETED,
@@ -750,20 +1040,416 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
-            # FIX (Codex review v4): Don't overwrite timeout error with exception error
-            # FIX (PR review): Use public method instead of accessing _components directly
+            # Rollback only THIS component's changes using hash-based detection
+            # FIX (v27 - Codex PR review): Use helper methods for scoping
+            component_file_set_exc, component_dirs_exc, has_scope = self._build_component_scope(component)
+
+            exc_changed, exc_untracked = self._get_changed_files(None)
+
+            # FIX (v27 - Codex PR review HIGH): If no scope, include all changes
+            if has_scope:
+                exc_changed = [
+                    f for f in exc_changed
+                    if self._is_in_component_scope(f, component_file_set_exc, component_dirs_exc)
+                ]
+                exc_untracked = [
+                    f for f in exc_untracked
+                    if self._is_in_component_scope(f, component_file_set_exc, component_dirs_exc)
+                ]
+
+            exc_hashes = self._get_file_hashes(exc_changed)
+
+            new_changed = [f for f in exc_changed if f not in baseline_set]
+            re_modified = [
+                f for f in exc_changed
+                if f in baseline_hashes and exc_hashes.get(f) != baseline_hashes[f]
+            ]
+            component_exc_changed = list(set(new_changed + re_modified))
+            component_exc_untracked = [f for f in exc_untracked if f not in baseline_set]
+            # FIX (v27 - Codex PR review): Surface rollback failures
+            rollback_ok = self._rollback_worktree_changes(
+                component_exc_changed, component_exc_untracked, baseline_contents
+            )
+            if not rollback_ok:
+                logger.warning(
+                    f"Rollback for component '{component.id}' had partial failures. "
+                    "Some files may not be fully restored."
+                )
+
             comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' raised exception after timeout - ignoring"
                 )
-                return  # Don't overwrite timeout error
+                return
             self._scheduler.update_component_status(
                 component.id,
                 ComponentStatus.FAILED,
                 error=str(e),
                 workflow_id=feature_id,
             )
+
+    def _handle_workflow_timeout(self, feature_id: str, elapsed: float) -> None:
+        """Handle workflow-level timeout.
+
+        NEW method - saves checkpoint and raises CancellationError.
+        """
+        logger.error(f"Workflow timeout: {elapsed:.1f}s > {self.workflow_timeout:.1f}s")
+
+        if self.checkpoint_on_timeout:
+            self._save_timeout_checkpoint(feature_id, f"Workflow timeout after {elapsed:.1f}s")
+
+        # FIX (v27 - Gemini PR review): Use imported CancellationError from models
+        raise CancellationError(f"Workflow timeout after {elapsed:.1f}s")
+
+    def _save_timeout_checkpoint(self, feature_id: str, reason: str) -> str:
+        """Save checkpoint on timeout using existing create_checkpoint method."""
+        # Get current state for checkpoint
+        feature = self.db.get_feature(feature_id)
+        phases = self.db.get_phases(feature_id)
+        components = self.db.get_components(feature_id)
+
+        # FIX (Codex v3): context must be dict, not JSON string
+        context = {
+            "reason": reason,
+            "feature_status": feature.status.value if feature else "unknown",
+            "phases_completed": sum(1 for p in phases if p.status == PhaseStatus.COMPLETED),
+            "components_completed": sum(1 for c in components if c.status == ComponentStatus.COMPLETED),
+            "resumable": True,
+        }
+
+        # FIX (Codex v3): Use correct create_checkpoint signature
+        checkpoint_id = self.db.create_checkpoint(
+            workflow_id=feature_id,
+            step_id=None,  # FIX: step_id is required param (can be None)
+            git_sha=f"timeout-{uuid.uuid4().hex[:8]}",
+            context=context,  # FIX: dict not JSON string
+            status="timeout",
+        )
+
+        logger.info(f"Saved timeout checkpoint: {checkpoint_id}")
+        return str(checkpoint_id)
+
+    def reset_workflow_timer(self) -> None:
+        """Reset workflow timer for new feature execution."""
+        self._workflow_start_time = None
+
+    def _check_approval_gate(
+        self,
+        feature_id: str,
+        component: Component,
+        changed_files: list[str],
+        diff_lines: list[str] | None = None,
+        untracked_files: list[str] | None = None,
+    ) -> bool:
+        """Check if approval gate should be invoked and get decision.
+
+        FIX (v25 - Codex): Updated signature and docstring to reflect new flow.
+        CALL SITE: This method is called from _execute_component() AFTER
+        running the component's role, BEFORE committing. This allows showing
+        the actual diff to the user for review.
+
+        Args:
+            feature_id: Workflow/feature ID
+            component: Component being executed
+            changed_files: List of changed file paths (for risk assessment and counts)
+            diff_lines: Full git diff output (for display in TUI/CLI)
+            untracked_files: Newly created files (shown separately in approval UI)
+
+        Returns True if workflow should proceed (APPROVE or SKIP).
+        Returns False if workflow should halt (REJECT or EDIT).
+        """
+        from datetime import datetime
+        from supervisor.core.interaction import ApprovalDecision
+
+        if not self.approval_gate:
+            return True
+
+        # FIX (v23): Add operation to context for require_approval_for policy
+        operation = component.assigned_role or "implement"
+        if "commit" in operation.lower():
+            operation = "commit"
+        elif "deploy" in operation.lower():
+            operation = "deploy"
+
+        # FIX (v25): Pass file list for risk assessment, not diff lines
+        context = {
+            "changes": changed_files,
+            "component": component.id,
+            "operation": operation,
+        }
+        if not self.approval_gate.requires_approval(context):
+            return True  # Low risk / excluded operation, auto-approve
+
+        # FIX (v25): Build review summary with untracked file warning
+        review_summary = f"Review changes for component {component.id} ({component.title})"
+        if untracked_files:
+            review_summary += f"\n\nNote: {len(untracked_files)} new file(s) will be created: {', '.join(untracked_files)}"
+
+        # FIX (v25): Request approval with both file list (for risk) and diff (for display)
+        decision = self.approval_gate.request_approval(
+            feature_id=feature_id,
+            title=f"Approve {component.title}",
+            changes=changed_files,
+            diff_lines=diff_lines,
+            review_summary=review_summary,
+            component_id=component.id,
+            bridge=self.interaction_bridge,
+        )
+
+        # FIX (v22): Use is_proceed() semantic helper for clear decision handling
+        if decision.is_proceed():
+            if decision == ApprovalDecision.SKIP:
+                logger.warning(f"Component '{component.id}' skipped approval - flagged for review")
+                # FIX (v24): Persist SKIP flag in component metadata for later review
+                self._scheduler.set_component_metadata(
+                    component.id,
+                    key="approval_skipped",
+                    value=True,
+                    workflow_id=feature_id,
+                )
+                self._scheduler.set_component_metadata(
+                    component.id,
+                    key="approval_skipped_at",
+                    value=datetime.now().isoformat(),
+                    workflow_id=feature_id,
+                )
+            return True  # Proceed with APPROVE or SKIP
+
+        # REJECT or EDIT - block execution
+        if decision == ApprovalDecision.EDIT:
+            logger.info(f"Component '{component.id}' awaiting user edits (EDIT not implemented)")
+        else:  # REJECT
+            logger.info(f"Component '{component.id}' rejected by user")
+        return False
+
+    def _get_changed_files(
+        self, target_files: list[str] | None
+    ) -> tuple[list[str], list[str]]:
+        """Get lists of changed tracked files and new untracked files.
+
+        FIX (v26 - Codex): Include both staged (--cached) and unstaged changes.
+
+        Returns:
+            (changed_files, untracked_files) tuple where:
+            - changed_files: Modified/deleted tracked files (staged + unstaged)
+            - untracked_files: Newly created files from git status --porcelain
+        """
+        import subprocess
+        changed: set[str] = set()
+        untracked = []
+        try:
+            # Get unstaged modified tracked files
+            cmd = ["git", "diff", "--name-only"]
+            if target_files:
+                cmd.extend(["--", *target_files])
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
+            if result.returncode == 0 and result.stdout.strip():
+                changed.update(result.stdout.strip().split("\n"))
+
+            # FIX (v26 - Codex): Also get staged changes
+            cmd_cached = ["git", "diff", "--name-only", "--cached"]
+            if target_files:
+                cmd_cached.extend(["--", *target_files])
+            result = subprocess.run(cmd_cached, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
+            if result.returncode == 0 and result.stdout.strip():
+                changed.update(result.stdout.strip().split("\n"))
+
+            # Get untracked files (newly created)
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if line.startswith("??"):
+                        filepath = line[3:].strip()
+                        # If target_files specified, filter to those paths
+                        if target_files:
+                            if any(filepath.startswith(tf) or tf.startswith(filepath)
+                                   for tf in target_files):
+                                untracked.append(filepath)
+                        else:
+                            untracked.append(filepath)
+        except Exception as e:
+            logger.warning(f"Failed to get changed files: {e}")
+        return list(changed), untracked
+
+    def _get_worktree_diff(
+        self,
+        target_files: list[str] | None,
+        untracked_files: list[str] | None = None,
+    ) -> list[str]:
+        """Capture actual git diff from worktree after role execution.
+
+        FIX (v26 - Codex): Include both staged and unstaged changes in diff.
+        FIX (v27 - Codex PR review): Include content for untracked (new) files.
+        FIX (v27 - Codex PR review P2): Skip tracked diff when target_files is empty
+        to avoid showing all repo changes when component only adds new files.
+
+        Args:
+            target_files: Tracked files to show diff for (empty list = skip tracked diff)
+            untracked_files: Untracked (new) files to show content for
+
+        Returns a list of diff lines that can be shown to the user in the
+        approval gate UI. This enables reviewing REAL changes, not just
+        file names from the component spec.
+        """
+        import os
+        import subprocess
+        all_diff_lines: list[str] = []
+        try:
+            # FIX (v27 - Codex PR review P2): Only run tracked diff if we have files
+            # When target_files is None/empty, skip to avoid showing all repo changes
+            if target_files:
+                # Get unstaged changes for tracked files
+                cmd = ["git", "diff", "--no-color", "--", *target_files]
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.git_timeout,
+                    cwd=self.repo_path,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    all_diff_lines.extend(result.stdout.strip().split("\n"))
+
+                # FIX (v26 - Codex): Also get staged changes
+                cmd_cached = ["git", "diff", "--no-color", "--cached", "--", *target_files]
+                result = subprocess.run(
+                    cmd_cached,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.git_timeout,
+                    cwd=self.repo_path,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    if all_diff_lines:
+                        all_diff_lines.append("")  # Separator
+                        all_diff_lines.append("# Staged changes:")
+                    all_diff_lines.extend(result.stdout.strip().split("\n"))
+
+            # FIX (v27 - Codex PR review): Show content for untracked (new) files
+            # FIX (v27 - Codex PR review): Use repo-relative paths to avoid leaking absolute paths
+            if untracked_files:
+                for filepath in untracked_files:
+                    full_path = os.path.join(self.repo_path or ".", filepath)
+                    if os.path.isfile(full_path):
+                        # Use git diff --no-index with repo-relative path
+                        # The -- separator ensures paths are treated as paths, not options
+                        cmd_untracked = [
+                            "git", "diff", "--no-index", "--no-color",
+                            "--", "/dev/null", filepath
+                        ]
+                        result = subprocess.run(
+                            cmd_untracked,
+                            capture_output=True,
+                            text=True,
+                            timeout=self.git_timeout,
+                            cwd=self.repo_path,
+                        )
+                        # git diff --no-index returns 1 when files differ, which is expected
+                        if result.stdout.strip():
+                            if all_diff_lines:
+                                all_diff_lines.append("")  # Separator
+                            all_diff_lines.append(f"# New file: {filepath}")
+                            all_diff_lines.extend(result.stdout.strip().split("\n"))
+
+            return all_diff_lines
+        except Exception as e:
+            logger.warning(f"Failed to capture diff: {e}")
+            return []
+
+    def _rollback_worktree_changes(
+        self,
+        target_files: list[str] | None,
+        untracked_files: list[str] | None = None,
+        baseline_contents: dict[str, bytes] | None = None,
+    ) -> bool:
+        """Rollback uncommitted worktree changes after rejection.
+
+        FIX (v25 - Codex): Now handles both tracked and untracked files.
+        FIX (v26 - Codex): Handle directories with shutil.rmtree.
+        FIX (v27 - Codex PR review P1): Restore from baseline contents, not git checkout.
+        FIX (v27 - Codex PR review): Return bool to surface rollback failures.
+        - Tracked files with baseline: Restore from saved baseline contents
+        - Tracked files without baseline (new to tracking): git checkout to discard
+        - Untracked files/directories: Removes newly created files and directories
+
+        Returns:
+            True if rollback succeeded, False if any files failed to restore.
+        """
+        import os
+        import shutil
+        import subprocess
+        restore_failed = False
+        try:
+            # FIX (v27 - Codex PR review P1): Restore files from baseline contents
+            # This preserves prior component changes instead of resetting to HEAD
+            if target_files:
+                files_to_checkout: list[str] = []
+                for filepath in target_files:
+                    if baseline_contents and filepath in baseline_contents:
+                        # Restore from saved baseline content
+                        full_path = os.path.join(self.repo_path or ".", filepath)
+                        try:
+                            # FIX (v27 - Codex PR review): Ensure parent dirs exist
+                            # Component may have deleted directories during execution
+                            parent_dir = os.path.dirname(full_path)
+                            if parent_dir:
+                                os.makedirs(parent_dir, exist_ok=True)
+                            with open(full_path, "wb") as f:
+                                f.write(baseline_contents[filepath])
+                            logger.debug(f"Restored {filepath} from baseline content")
+                        except Exception as restore_err:
+                            # FIX (v27 - Codex PR review): Don't fall back to git checkout
+                            # for files we have baseline content for - that defeats P1 fix
+                            # FIX (v27 - Codex PR review): Track failures to surface to caller
+                            logger.error(f"Failed to restore {filepath} from baseline: {restore_err}")
+                            restore_failed = True
+                    else:
+                        # File wasn't in baseline - use git checkout to discard
+                        files_to_checkout.append(filepath)
+
+                # Git checkout for files not in baseline (new modifications)
+                # FIX (v27 - Codex PR review): Check return code to detect failures
+                if files_to_checkout:
+                    cmd = ["git", "checkout", "--"]
+                    cmd.extend(files_to_checkout)
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
+                    if result.returncode != 0:
+                        logger.warning(
+                            f"git checkout failed for: {files_to_checkout}. "
+                            f"stderr: {result.stderr.strip() if result.stderr else 'none'}"
+                        )
+                        restore_failed = True
+                    else:
+                        logger.debug(f"Rolled back tracked changes via git checkout for: {files_to_checkout}")
+            else:
+                # No tracked files to rollback - this is expected when component
+                # only created new files or edited files already in baseline
+                logger.debug("No tracked files to rollback")
+
+            # FIX (v25): Remove untracked files created by role
+            # FIX (v26): Handle directories with shutil.rmtree
+            if untracked_files:
+                for filepath in untracked_files:
+                    full_path = os.path.join(self.repo_path or ".", filepath)
+                    try:
+                        if os.path.isdir(full_path):
+                            shutil.rmtree(full_path)
+                            logger.debug(f"Removed untracked directory: {filepath}")
+                        elif os.path.exists(full_path):
+                            os.remove(full_path)
+                            logger.debug(f"Removed untracked file: {filepath}")
+                    except Exception as file_err:
+                        logger.warning(f"Failed to remove untracked path {filepath}: {file_err}")
+                        restore_failed = True
+
+            return not restore_failed
+        except Exception as e:
+            logger.error(f"Failed to rollback worktree changes: {e}")
+            return False
 
     def run_review(
         self,
