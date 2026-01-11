@@ -1,4 +1,5 @@
-"""Execution engine for the Supervisor orchestrator.
+"""
+Execution engine for the Supervisor orchestrator.
 
 Coordinates:
 - Context packing
@@ -637,243 +638,307 @@ class ExecutionEngine:
             GateFailedError: Gate verification failed
             CancellationError: Operation was cancelled before applying changes
         """
-        # Generate unique step_id with UUID for worktree isolation
-        step_id = step_id or f"{workflow_id}-{role_name}-{uuid.uuid4().hex[:8]}"
-        retry_policy = retry_policy or RetryPolicy()
-        gates = gates or []
+        import time
+        start_time = time.time()
+        success = False
+        error_category = None
+        attempt_count = 0
+        
+        # Load role configuration upfront for metrics
+        try:
+            role_config = self.role_loader.load_role(role_name)
+            cli_used = cli_override or role_config.cli
+        except Exception:
+            cli_used = "unknown"
 
-        # Circuit breaker uses deterministic key based on task identity
-        # This ensures failures aggregate across retries of the same logical task
-        circuit_key = _generate_circuit_key(workflow_id, role_name, task_description)
+        try:
+            # Generate unique step_id with UUID for worktree isolation
+            step_id = step_id or f"{workflow_id}-{role_name}-{uuid.uuid4().hex[:8]}"
+            retry_policy = retry_policy or RetryPolicy()
+            gates = gates or []
 
-        # Check circuit breaker
-        if self.circuit_breaker.is_open(circuit_key):
-            raise CircuitOpenError(
-                f"Circuit breaker open for {circuit_key}. "
-                f"Too many failures. Manual intervention required."
+            # Circuit breaker uses deterministic key based on task identity
+            # This ensures failures aggregate across retries of the same logical task
+            circuit_key = _generate_circuit_key(workflow_id, role_name, task_description)
+
+            # Check circuit breaker
+            if self.circuit_breaker.is_open(circuit_key):
+                raise CircuitOpenError(
+                    f"Circuit breaker open for {circuit_key}. "
+                    f"Too many failures. Manual intervention required."
+                )
+
+            # Load role configuration (now with schema validation)
+            role = self.role_loader.load_role(role_name)
+
+            # PHASE 2: Use template-based prompt building for known roles
+            # NOTE: Pass role object (not role_name) to resolve overlay extends chain
+            template_name = self._get_template_for_role(role)
+            if template_name:
+                # Template-based flow (planner, implementer, reviewer, AND overlays that extend them)
+                prompt = self.context_packer.build_full_prompt(
+                    template_name,
+                    role,
+                    task_description,
+                    target_files,
+                    extra_context,
+                )
+            else:
+                # Legacy fallback for truly unknown roles (no extends to known base)
+                prompt = self.context_packer.pack_context(
+                    role=role,
+                    task_description=task_description,
+                    target_files=target_files,
+                    extra_context=extra_context,
+                )
+
+            # Record step started
+            self.db.append_event(
+                Event(
+                    workflow_id=workflow_id,
+                    event_type=EventType.STEP_STARTED,
+                    step_id=step_id,
+                    role=role_name,
+                    payload={"task": task_description[:500], "gates": gates},
+                )
             )
 
-        # Load role configuration (now with schema validation)
-        role = self.role_loader.load_role(role_name)
+            last_error: Exception | None = None
+            feedback: str | None = None
 
-        # PHASE 2: Use template-based prompt building for known roles
-        # NOTE: Pass role object (not role_name) to resolve overlay extends chain
-        template_name = self._get_template_for_role(role)
-        if template_name:
-            # Template-based flow (planner, implementer, reviewer, AND overlays that extend them)
-            prompt = self.context_packer.build_full_prompt(
-                template_name,
-                role,
-                task_description,
-                target_files,
-                extra_context,
-            )
-        else:
-            # Legacy fallback for truly unknown roles (no extends to known base)
-            prompt = self.context_packer.pack_context(
-                role=role,
-                task_description=task_description,
-                target_files=target_files,
-                extra_context=extra_context,
-            )
+            for attempt in range(retry_policy.max_attempts):
+                attempt_count = attempt
+                try:
+                    # Add feedback from previous attempt if any
+                    effective_prompt = prompt
+                    if feedback:
+                        effective_prompt = f"{prompt}\n\n## Previous Attempt Feedback\n\n{feedback}"
 
-        # Record step started
-        self.db.append_event(
-            Event(
-                workflow_id=workflow_id,
-                event_type=EventType.STEP_STARTED,
-                step_id=step_id,
-                role=role_name,
-                payload={"task": task_description[:500], "gates": gates},
-            )
-        )
+                    # Execute CLI in ISOLATED worktree
+                    with self.workspace.isolated_execution(step_id) as ctx:
+                        result = self._execute_cli(role, effective_prompt, ctx.worktree_path, cli_override)
 
-        last_error: Exception | None = None
-        feedback: str | None = None
+                        if result.returncode != 0 and not result.timed_out:
+                            raise EngineError(
+                                f"CLI exited with code {result.returncode}: {result.stderr}"
+                            )
 
-        for attempt in range(retry_policy.max_attempts):
-            try:
-                # Add feedback from previous attempt if any
-                effective_prompt = prompt
-                if feedback:
-                    effective_prompt = f"{prompt}\n\n## Previous Attempt Feedback\n\n{feedback}"
+                        if result.timed_out:
+                            raise EngineError(f"CLI timed out: {result.stderr}")
 
-                # Execute CLI in ISOLATED worktree
-                with self.workspace.isolated_execution(step_id) as ctx:
-                    result = self._execute_cli(role, effective_prompt, ctx.worktree_path, cli_override)
+                        # PHASE 2: Use CLI adapter for parsing
+                        # FIX (PR review): Use the actual CLI that executed, not role.cli
+                        # When cli_override is used, output format matches the override CLI
+                        effective_cli = cli_override or role.cli
+                        adapter = get_adapter(effective_cli)
+                        # NOTE: Use _get_schema_for_role to resolve overlay extends chain
+                        schema = self._get_schema_for_role(role)
+                        output = adapter.parse_output(result.stdout, schema)
 
-                    if result.returncode != 0 and not result.timed_out:
-                        raise EngineError(
-                            f"CLI exited with code {result.returncode}: {result.stderr}"
+                        # Run gates IN THE WORKTREE using GateExecutor
+                        # GateExecutor handles: dependency order, caching, integrity, event logging
+                        # Enable project-specific gate configs from .supervisor/gates.yaml
+                        worktree_gate_loader = GateLoader(ctx.worktree_path, allow_project_gates=True)
+                        worktree_gate_executor = GateExecutor(
+                            executor=self.executor,
+                            gate_loader=worktree_gate_loader,
+                            db=self.db,
                         )
 
-                    if result.timed_out:
-                        raise EngineError(f"CLI timed out: {result.stderr}")
+                        # Resolve all gates (including dependencies) upfront for on_fail logic
+                        resolved_gates = worktree_gate_loader.resolve_execution_order(gates)
 
-                    # PHASE 2: Use CLI adapter for parsing
-                    # FIX (PR review): Use the actual CLI that executed, not role.cli
-                    # When cli_override is used, output format matches the override CLI
-                    effective_cli = cli_override or role.cli
-                    adapter = get_adapter(effective_cli)
-                    # NOTE: Use _get_schema_for_role to resolve overlay extends chain
-                    schema = self._get_schema_for_role(role)
-                    output = adapter.parse_output(result.stdout, schema)
+                        # Build on_fail_overrides for ALL gates (including dependencies)
+                        effective_overrides: dict[str, GateFailAction] = {}
+                        for gate_name in resolved_gates:
+                            if gate_name in role.on_fail_overrides:
+                                effective_overrides[gate_name] = role.on_fail_overrides[gate_name]
+                            else:
+                                # Use gate's severity as default action
+                                try:
+                                    gate_config = worktree_gate_loader.get_gate(gate_name)
+                                    if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
+                                        effective_overrides[gate_name] = GateFailAction.WARN
+                                    else:
+                                        effective_overrides[gate_name] = GateFailAction.BLOCK
+                                except GateNotFoundError:
+                                    # Gate not defined - default to BLOCK
+                                    effective_overrides[gate_name] = GateFailAction.BLOCK
 
-                    # Run gates IN THE WORKTREE using GateExecutor
-                    # GateExecutor handles: dependency order, caching, integrity, event logging
-                    # Enable project-specific gate configs from .supervisor/gates.yaml
-                    worktree_gate_loader = GateLoader(ctx.worktree_path, allow_project_gates=True)
-                    worktree_gate_executor = GateExecutor(
-                        executor=self.executor,
-                        gate_loader=worktree_gate_loader,
-                        db=self.db,
-                    )
+                        # Propagate optional (WARN) behavior from parent gates to dependencies.
+                        # If a gate is optional (required=false or on_fail=warn), its dependencies
+                        # should also be treated as optional so they don't block unexpectedly.
+                        deps_cache: dict[str, set[str]] = {}
 
-                    # Resolve all gates (including dependencies) upfront for on_fail logic
-                    resolved_gates = worktree_gate_loader.resolve_execution_order(gates)
+                        def collect_dependencies(gate_name: str) -> set[str]:
+                            """Recursively collect all dependencies of a gate (memoized)."""
+                            if gate_name in deps_cache:
+                                return deps_cache[gate_name]
 
-                    # Build on_fail_overrides for ALL gates (including dependencies)
-                    effective_overrides: dict[str, GateFailAction] = {}
-                    for gate_name in resolved_gates:
-                        if gate_name in role.on_fail_overrides:
-                            effective_overrides[gate_name] = role.on_fail_overrides[gate_name]
-                        else:
-                            # Use gate's severity as default action
+                            deps: set[str] = set()
                             try:
                                 gate_config = worktree_gate_loader.get_gate(gate_name)
-                                if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
-                                    effective_overrides[gate_name] = GateFailAction.WARN
-                                else:
-                                    effective_overrides[gate_name] = GateFailAction.BLOCK
+                                for dep in gate_config.depends_on:
+                                    if dep not in deps:
+                                        deps.add(dep)
+                                        deps.update(collect_dependencies(dep))
                             except GateNotFoundError:
-                                # Gate not defined - default to BLOCK
-                                effective_overrides[gate_name] = GateFailAction.BLOCK
+                                pass
 
-                    # Propagate optional (WARN) behavior from parent gates to dependencies.
-                    # If a gate is optional (required=false or on_fail=warn), its dependencies
-                    # should also be treated as optional so they don't block unexpectedly.
-                    deps_cache: dict[str, set[str]] = {}
+                            deps_cache[gate_name] = deps
+                            return deps
 
-                    def collect_dependencies(gate_name: str) -> set[str]:
-                        """Recursively collect all dependencies of a gate (memoized)."""
-                        if gate_name in deps_cache:
-                            return deps_cache[gate_name]
+                        for gate_name in gates:
+                            if effective_overrides.get(gate_name) == GateFailAction.WARN:
+                                # This gate is optional - propagate to all its dependencies
+                                for dep in collect_dependencies(gate_name):
+                                    if effective_overrides.get(dep) == GateFailAction.BLOCK:
+                                        effective_overrides[dep] = GateFailAction.WARN
 
-                        deps: set[str] = set()
-                        try:
-                            gate_config = worktree_gate_loader.get_gate(gate_name)
-                            for dep in gate_config.depends_on:
-                                if dep not in deps:
-                                    deps.add(dep)
-                                    deps.update(collect_dependencies(dep))
-                        except GateNotFoundError:
-                            pass
-
-                        deps_cache[gate_name] = deps
-                        return deps
-
-                    for gate_name in gates:
-                        if effective_overrides.get(gate_name) == GateFailAction.WARN:
-                            # This gate is optional - propagate to all its dependencies
-                            for dep in collect_dependencies(gate_name):
-                                if effective_overrides.get(dep) == GateFailAction.BLOCK:
-                                    effective_overrides[dep] = GateFailAction.WARN
-
-                    gate_results = worktree_gate_executor.run_gates(
-                        gate_names=gates,
-                        worktree_path=ctx.worktree_path,
-                        workflow_id=workflow_id,
-                        step_id=step_id,
-                        on_fail_overrides=effective_overrides,
-                    )
-
-                    # Check for blocking failures (GateExecutor already logged events)
-                    for gate_result in gate_results:
-                        if gate_result.status == GateStatus.FAILED:
-                            # All gates (including dependencies) resolved upfront
-                            on_fail = effective_overrides.get(
-                                gate_result.gate_name, GateFailAction.BLOCK
-                            )
-
-                            if on_fail == GateFailAction.WARN:
-                                # Already logged by GateExecutor, continue
-                                continue
-                            # BLOCK or RETRY_WITH_FEEDBACK: raise exception
-                            raise GateFailedError(gate_result.gate_name, gate_result.output)
-
-                    # ONLY after gates pass: apply changes to main tree
-                    # Use file lock to prevent race conditions with parallel execution
-                    # Pass original_head for conflict detection
-
-                    # FIX (Codex review): Check cancellation before applying changes
-                    # This prevents timed-out components from mutating the repo after
-                    # the workflow has already marked them as FAILED
-                    if cancellation_check and cancellation_check():
-                        logger.warning(
-                            f"Step '{step_id}' cancelled before applying changes - "
-                            "discarding worktree changes"
-                        )
-                        raise CancellationError(
-                            f"Step '{step_id}' was cancelled (likely timeout). "
-                            "Changes were not applied to avoid out-of-policy mutations."
-                        )
-
-                    # CRASH RECOVERY: Record applying event BEFORE modifying repo
-                    self.db.append_event(
-                        Event(
+                        gate_results = worktree_gate_executor.run_gates(
+                            gate_names=gates,
+                            worktree_path=ctx.worktree_path,
                             workflow_id=workflow_id,
-                            event_type=EventType.STEP_APPLYING,
                             step_id=step_id,
-                            role=role_name,
-                            payload={"original_head": ctx.original_head},
+                            on_fail_overrides=effective_overrides,
                         )
-                    )
 
-                    # CRITICAL: Wrap apply errors - they are FATAL, not retriable
-                    try:
-                        with self.workspace._apply_lock:
-                            # FIX (Codex review): Re-check cancellation after acquiring lock
-                            # This closes the race window between check and apply
-                            if cancellation_check and cancellation_check():
-                                raise CancellationError(
-                                    f"Step '{step_id}' cancelled after acquiring apply lock. "
-                                    "Changes not applied."
+                        # Check for blocking failures (GateExecutor already logged events)
+                        for gate_result in gate_results:
+                            if gate_result.status == GateStatus.FAILED:
+                                # All gates (including dependencies) resolved upfront
+                                on_fail = effective_overrides.get(
+                                    gate_result.gate_name, GateFailAction.BLOCK
                                 )
-                            changed_files = self.workspace._apply_changes(
-                                ctx.worktree_path, ctx.original_head
-                            )
-                    except CancellationError:
-                        raise  # Re-raise cancellation without wrapping
-                    except Exception as apply_err:
-                        raise ApplyError(
-                            f"Apply failed (repository may be in inconsistent state): {apply_err}"
-                        ) from apply_err
 
-                # Record success (outside of isolation context - worktree cleaned up)
-                # Wrap in try/except to handle DB failure after git apply
-                try:
-                    self.db.append_event(
-                        Event(
-                            workflow_id=workflow_id,
-                            event_type=EventType.STEP_COMPLETED,
-                            step_id=step_id,
-                            role=role_name,
-                            payload={
-                                "output": output.model_dump() if hasattr(output, "model_dump") else output,
-                                "files_changed": changed_files,
-                            },
+                                if on_fail == GateFailAction.WARN:
+                                    # Already logged by GateExecutor, continue
+                                    continue
+                                # BLOCK or RETRY_WITH_FEEDBACK: raise exception
+                                raise GateFailedError(gate_result.gate_name, gate_result.output)
+
+                        # ONLY after gates pass: apply changes to main tree
+                        # Use file lock to prevent race conditions with parallel execution
+                        # Pass original_head for conflict detection
+
+                        # FIX (Codex review): Check cancellation before applying changes
+                        # This prevents timed-out components from mutating the repo after
+                        # the workflow has already marked them as FAILED
+                        if cancellation_check and cancellation_check():
+                            logger.warning(
+                                f"Step '{step_id}' cancelled before applying changes - "
+                                "discarding worktree changes"
+                            )
+                            raise CancellationError(
+                                f"Step '{step_id}' was cancelled (likely timeout). "
+                                "Changes were not applied to avoid out-of-policy mutations."
+                            )
+
+                        # CRASH RECOVERY: Record applying event BEFORE modifying repo
+                        self.db.append_event(
+                            Event(
+                                workflow_id=workflow_id,
+                                event_type=EventType.STEP_APPLYING,
+                                step_id=step_id,
+                                role=role_name,
+                                payload={"original_head": ctx.original_head},
+                            )
                         )
-                    )
-                except Exception as db_error:
-                    # CRITICAL: Git repo was modified but DB update failed
-                    import sys
-                    print(
-                        f"CRITICAL: Step {step_id} applied changes but DB update failed: {db_error}. "
-                        f"Changed files: {changed_files}. Manual remediation may be required.",
-                        file=sys.stderr,
-                    )
-                    # Try to record failure (best effort)
+
+                        # CRITICAL: Wrap apply errors - they are FATAL, not retriable
+                        try:
+                            with self.workspace._apply_lock:
+                                # FIX (Codex review): Re-check cancellation after acquiring lock
+                                # This closes the race window between check and apply
+                                if cancellation_check and cancellation_check():
+                                    raise CancellationError(
+                                        f"Step '{step_id}' cancelled after acquiring apply lock. "
+                                        "Changes not applied."
+                                    )
+                                changed_files = self.workspace._apply_changes(
+                                    ctx.worktree_path, ctx.original_head
+                                )
+                        except CancellationError:
+                            raise  # Re-raise cancellation without wrapping
+                        except Exception as apply_err:
+                            raise ApplyError(
+                                f"Apply failed (repository may be in inconsistent state): {apply_err}"
+                            ) from apply_err
+
+                    # Record success (outside of isolation context - worktree cleaned up)
+                    # Wrap in try/except to handle DB failure after git apply
                     try:
+                        self.db.append_event(
+                            Event(
+                                workflow_id=workflow_id,
+                                event_type=EventType.STEP_COMPLETED,
+                                step_id=step_id,
+                                role=role_name,
+                                payload={
+                                    "output": output.model_dump() if hasattr(output, "model_dump") else output,
+                                    "files_changed": changed_files,
+                                },
+                            )
+                        )
+                    except Exception as db_error:
+                        # CRITICAL: Git repo was modified but DB update failed
+                        import sys
+                        print(
+                            f"CRITICAL: Step {step_id} applied changes but DB update failed: {db_error}. "
+                            f"Changed files: {changed_files}. Manual remediation may be required.",
+                            file=sys.stderr,
+                        )
+                        # Try to record failure (best effort)
+                        try:
+                            self.db.append_event(
+                                Event(
+                                    workflow_id=workflow_id,
+                                    event_type=EventType.STEP_FAILED,
+                                    step_id=step_id,
+                                    role=role_name,
+                                    payload={
+                                        "error": f"DB update failed after apply: {db_error}",
+                                        "files_changed": changed_files,
+                                        "inconsistent_state": True,
+                                    },
+                                )
+                            )
+                        except Exception:
+                            pass
+                        raise
+
+                    self.circuit_breaker.reset(circuit_key)
+                    success = True
+                    return output
+
+                except GateFailedError as e:
+                    # WARN gates are handled inline before raising GateFailedError.
+                    # This exception handler only handles BLOCK and RETRY_WITH_FEEDBACK actions.
+                    on_fail_action = role.on_fail_overrides.get(e.gate_name, GateFailAction.BLOCK)
+
+                    if on_fail_action == GateFailAction.RETRY_WITH_FEEDBACK:
+                        # Generate structured feedback and continue retry loop
+                        gate_result = GateResult(
+                            gate_name=e.gate_name,
+                            status=GateStatus.FAILED,
+                            output=e.output,
+                            duration_seconds=0.0,  # Not tracked at this level
+                        )
+                        feedback_gen = StructuredFeedbackGenerator()
+                        feedback = feedback_gen.generate(
+                            gate_result, context=task_description
+                        )
+                        last_error = e
+                        self.circuit_breaker.record_failure(circuit_key)
+
+                        if attempt < retry_policy.max_attempts - 1:
+                            time.sleep(retry_policy.get_delay(attempt))
+                            continue  # Explicitly continue to next attempt
+                        # On last attempt, fall through to retry exhausted logic
+
+                    else:
+                        # BLOCK (or unexpected WARN - which shouldn't reach here):
+                        # Gate failures block execution
                         self.db.append_event(
                             Event(
                                 workflow_id=workflow_id,
@@ -881,47 +946,16 @@ class ExecutionEngine:
                                 step_id=step_id,
                                 role=role_name,
                                 payload={
-                                    "error": f"DB update failed after apply: {db_error}",
-                                    "files_changed": changed_files,
-                                    "inconsistent_state": True,
+                                    "error": f"Gate '{e.gate_name}' failed (blocking)",
+                                    "gate": e.gate_name,
                                 },
                             )
                         )
-                    except Exception:
-                        pass
-                    raise
+                        raise
 
-                self.circuit_breaker.reset(circuit_key)
-                return output
-
-            except GateFailedError as e:
-                # WARN gates are handled inline before raising GateFailedError.
-                # This exception handler only handles BLOCK and RETRY_WITH_FEEDBACK actions.
-                on_fail_action = role.on_fail_overrides.get(e.gate_name, GateFailAction.BLOCK)
-
-                if on_fail_action == GateFailAction.RETRY_WITH_FEEDBACK:
-                    # Generate structured feedback and continue retry loop
-                    gate_result = GateResult(
-                        gate_name=e.gate_name,
-                        status=GateStatus.FAILED,
-                        output=e.output,
-                        duration_seconds=0.0,  # Not tracked at this level
-                    )
-                    feedback_gen = StructuredFeedbackGenerator()
-                    feedback = feedback_gen.generate(
-                        gate_result, context=task_description
-                    )
-                    last_error = e
-                    self.circuit_breaker.record_failure(circuit_key)
-
-                    if attempt < retry_policy.max_attempts - 1:
-                        time.sleep(retry_policy.get_delay(attempt))
-                        continue  # Explicitly continue to next attempt
-                    # On last attempt, fall through to retry exhausted logic
-
-                else:
-                    # BLOCK (or unexpected WARN - which shouldn't reach here):
-                    # Gate failures block execution
+                except ApplyError as e:
+                    # CRITICAL: Apply errors are FATAL - do NOT retry
+                    # Repository may be in inconsistent state; retrying would compound corruption
                     self.db.append_event(
                         Event(
                             workflow_id=workflow_id,
@@ -929,82 +963,88 @@ class ExecutionEngine:
                             step_id=step_id,
                             role=role_name,
                             payload={
-                                "error": f"Gate '{e.gate_name}' failed (blocking)",
-                                "gate": e.gate_name,
+                                "error": str(e),
+                                "fatal": True,
+                                "reason": "Apply failure - repository may be corrupted",
                             },
                         )
                     )
-                    raise
+                    raise  # Do not retry - immediate failure
 
-            except ApplyError as e:
-                # CRITICAL: Apply errors are FATAL - do NOT retry
-                # Repository may be in inconsistent state; retrying would compound corruption
-                self.db.append_event(
-                    Event(
-                        workflow_id=workflow_id,
-                        event_type=EventType.STEP_FAILED,
-                        step_id=step_id,
-                        role=role_name,
-                        payload={
-                            "error": str(e),
-                            "fatal": True,
-                            "reason": "Apply failure - repository may be corrupted",
-                        },
+                except (ParsingError, InvalidOutputError) as e:
+                    last_error = e
+                    category, action = self.error_classifier.classify(str(e))
+
+                    if action == ErrorAction.RETRY_WITH_FEEDBACK:
+                        feedback = self._build_feedback(e, role)
+                        self.circuit_breaker.record_failure(circuit_key)
+                    elif action == ErrorAction.ESCALATE:
+                        break  # Don't retry
+                    else:
+                        self.circuit_breaker.record_failure(circuit_key)
+
+                    if attempt < retry_policy.max_attempts - 1:
+                        time.sleep(retry_policy.get_delay(attempt))
+
+                except CancellationError:
+                    # FIX (Codex review): Don't retry cancelled operations
+                    # CancellationError means component was timed out - no point retrying
+                    logger.info(f"Step '{step_id}' cancelled, aborting without retry")
+                    self.db.append_event(
+                        Event(
+                            workflow_id=workflow_id,
+                            event_type=EventType.STEP_FAILED,
+                            step_id=step_id,
+                            role=role_name,
+                            payload={"error": "Cancelled (timeout)", "cancelled": True},
+                        )
                     )
-                )
-                raise  # Do not retry - immediate failure
+                    raise  # Re-raise without retry
 
-            except (ParsingError, InvalidOutputError) as e:
-                last_error = e
-                category, action = self.error_classifier.classify(str(e))
-
-                if action == ErrorAction.RETRY_WITH_FEEDBACK:
-                    feedback = self._build_feedback(e, role)
-                    self.circuit_breaker.record_failure(circuit_key)
-                elif action == ErrorAction.ESCALATE:
-                    break  # Don't retry
-                else:
+                except Exception as e:
+                    last_error = e
                     self.circuit_breaker.record_failure(circuit_key)
 
-                if attempt < retry_policy.max_attempts - 1:
-                    time.sleep(retry_policy.get_delay(attempt))
+                    if attempt < retry_policy.max_attempts - 1:
+                        time.sleep(retry_policy.get_delay(attempt))
 
-            except CancellationError:
-                # FIX (Codex review): Don't retry cancelled operations
-                # CancellationError means component was timed out - no point retrying
-                logger.info(f"Step '{step_id}' cancelled, aborting without retry")
-                self.db.append_event(
-                    Event(
-                        workflow_id=workflow_id,
-                        event_type=EventType.STEP_FAILED,
-                        step_id=step_id,
-                        role=role_name,
-                        payload={"error": "Cancelled (timeout)", "cancelled": True},
-                    )
+            # All retries exhausted
+            self.db.append_event(
+                Event(
+                    workflow_id=workflow_id,
+                    event_type=EventType.STEP_FAILED,
+                    step_id=step_id,
+                    role=role_name,
+                    payload={"error": str(last_error)},
                 )
-                raise  # Re-raise without retry
-
-            except Exception as e:
-                last_error = e
-                self.circuit_breaker.record_failure(circuit_key)
-
-                if attempt < retry_policy.max_attempts - 1:
-                    time.sleep(retry_policy.get_delay(attempt))
-
-        # All retries exhausted
-        self.db.append_event(
-            Event(
-                workflow_id=workflow_id,
-                event_type=EventType.STEP_FAILED,
-                step_id=step_id,
-                role=role_name,
-                payload={"error": str(last_error)},
             )
-        )
+            
+            error_category = type(last_error).__name__ if last_error else "RetryExhausted"
+            raise RetryExhaustedError(
+                f"Role '{role_name}' failed after {retry_policy.max_attempts} attempts: {last_error}"
+            )
 
-        raise RetryExhaustedError(
-            f"Role '{role_name}' failed after {retry_policy.max_attempts} attempts: {last_error}"
-        )
+        except Exception as e:
+            error_category = type(e).__name__
+            raise e
+
+        finally:
+            if hasattr(self, 'db') and self.db is not None:
+                duration = time.time() - start_time
+                task_type = self._infer_task_type(role_name)
+                try:
+                    self.db.record_metric(
+                        role=role_name,
+                        cli=cli_used,
+                        workflow_id=workflow_id,
+                        success=success,
+                        duration_seconds=duration,
+                        task_type=task_type,
+                        retry_count=attempt_count,
+                        error_category=error_category,
+                    )
+                except Exception as metric_err:
+                    logger.warning(f"Failed to record metric: {metric_err}")
 
     def _execute_cli(
         self,
@@ -1138,6 +1178,13 @@ class ExecutionEngine:
         prefer_cost: bool = False,
         max_stall_seconds: float = 600.0,
         component_timeout: float = 300.0,
+        # NEW Phase 5 params
+        workflow_timeout: float = 3600.0,
+        checkpoint_on_timeout: bool = True,
+        role_timeouts: dict[str, float] | None = None,
+        approval_gate: Any = None, # Type hint looser to avoid cyclic import
+        interaction_bridge: Any = None,
+        adaptive_config: dict[str, Any] | None = None,
     ) -> "WorkflowCoordinator":
         """Create a WorkflowCoordinator for multi-model hierarchical workflows.
 
@@ -1165,6 +1212,12 @@ class ExecutionEngine:
             prefer_cost=prefer_cost,
             max_stall_seconds=max_stall_seconds,
             component_timeout=component_timeout,
+            workflow_timeout=workflow_timeout,
+            checkpoint_on_timeout=checkpoint_on_timeout,
+            role_timeouts=role_timeouts,
+            approval_gate=approval_gate,
+            interaction_bridge=interaction_bridge,
+            adaptive_config=adaptive_config,
         )
 
     def execute_feature(
@@ -1262,3 +1315,15 @@ class ExecutionEngine:
             extra_context=extra_context,
             approval_policy=approval_policy,
         )
+
+    def _infer_task_type(self, role_name: str) -> str:
+        """Infer task type from role name for metrics categorization."""
+        role_to_task = {
+            "planner": "plan",
+            "implementer": "implement",
+            "reviewer": "review",
+            "investigator": "investigate",
+            "doc_generator": "document",
+            "tester": "test",
+        }
+        return role_to_task.get(role_name, "other")

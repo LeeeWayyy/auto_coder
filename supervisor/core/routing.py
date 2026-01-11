@@ -4,10 +4,25 @@ Phase 4 deliverable 4.5: Intelligent model selection for different task types.
 """
 
 import logging
+import random
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from supervisor.core.state import Database
+    from supervisor.metrics.aggregator import MetricsAggregator
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AdaptiveConfig:
+    """Configuration for adaptive model selection."""
+    enabled: bool = False
+    exploration_rate: float = 0.1  # Epsilon for epsilon-greedy
+    min_samples: int = 5
+    lookback_days: int = 30
 
 
 class ModelCapability(str, Enum):
@@ -97,9 +112,17 @@ class ModelRouter:
     4. Consider speed requirements (fast -> Codex)
     """
 
-    def __init__(self, prefer_speed: bool = False, prefer_cost: bool = False):
+    def __init__(
+        self,
+        prefer_speed: bool = False,
+        prefer_cost: bool = False,
+        aggregator: "MetricsAggregator | None" = None,
+        adaptive_config: AdaptiveConfig | None = None,
+    ):
         self.prefer_speed = prefer_speed
         self.prefer_cost = prefer_cost
+        self.aggregator = aggregator
+        self.adaptive_config = adaptive_config or AdaptiveConfig()
 
     def select_model(
         self,
@@ -122,6 +145,12 @@ class ModelRouter:
         # Role config takes precedence
         if role_cli:
             return role_cli
+
+        # Adaptive selection (if enabled and applicable)
+        if self.adaptive_config.enabled and self.aggregator:
+            adaptive_choice = self._select_adaptive(role_name, context_size)
+            if adaptive_choice:
+                return adaptive_choice
 
         # Default mapping
         if role_name in ROLE_MODEL_MAP:
@@ -154,6 +183,36 @@ class ModelRouter:
                 return capable_models[0][0]
 
         return default
+
+    def _select_adaptive(self, role_name: str, context_size: int) -> str | None:
+        """Select model based on historical performance (epsilon-greedy)."""
+        # Context constraint override
+        if context_size > 128000:
+            return "gemini"
+
+        # Exploration: Randomly select a valid model
+        if random.random() < self.adaptive_config.exploration_rate:
+            logger.debug(f"Adaptive routing: Exploring random model for {role_name}")
+            return random.choice(list(MODEL_PROFILES.keys()))
+
+        # Exploitation: Select best performing model
+        # Infer task type from role name (simple heuristic)
+        task_type = "other"
+        if "plan" in role_name: task_type = "plan"
+        elif "implement" in role_name: task_type = "implement"
+        elif "review" in role_name: task_type = "review"
+
+        best_cli = self.aggregator.get_best_cli_for_task(
+            task_type=task_type,
+            days=self.adaptive_config.lookback_days,
+            min_samples=self.adaptive_config.min_samples,
+        )
+        
+        if best_cli:
+            logger.debug(f"Adaptive routing: Selected {best_cli} for {role_name} (best historical)")
+            return best_cli
+        
+        return None
 
     def select_model_for_capability(
         self,
@@ -244,17 +303,31 @@ class ModelRouter:
 def create_router(
     prefer_speed: bool = False,
     prefer_cost: bool = False,
+    db: "Database | None" = None,
+    adaptive_config: AdaptiveConfig | None = None,
 ) -> ModelRouter:
     """Factory function to create a configured model router.
 
     Args:
         prefer_speed: Prioritize faster models when possible
         prefer_cost: Prioritize cheaper models when possible
+        db: Database instance for metrics aggregation (required for adaptive)
+        adaptive_config: Configuration for adaptive routing
 
     Returns:
         Configured ModelRouter instance
     """
-    return ModelRouter(prefer_speed=prefer_speed, prefer_cost=prefer_cost)
+    aggregator = None
+    if db:
+        from supervisor.metrics.aggregator import MetricsAggregator
+        aggregator = MetricsAggregator(db)
+
+    return ModelRouter(
+        prefer_speed=prefer_speed,
+        prefer_cost=prefer_cost,
+        aggregator=aggregator,
+        adaptive_config=adaptive_config,
+    )
 
 
 def register_model(cli: str, profile: ModelProfile) -> None:

@@ -63,6 +63,10 @@ class EventType(str, Enum):
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_GRANTED = "approval_granted"
     APPROVAL_DENIED = "approval_denied"
+    APPROVAL_SKIPPED = "approval_skipped"  # FIX (v26): Distinct event for SKIP decisions
+
+    # Metadata events (Phase 5)
+    METADATA_SET = "metadata_set"  # FIX (v24): For SKIP persistence
 
 
 def _utc_now() -> datetime:
@@ -212,6 +216,31 @@ class Database:
     CREATE INDEX IF NOT EXISTS idx_components_phase ON components(phase_id);
     CREATE INDEX IF NOT EXISTS idx_components_status ON components(status);
     CREATE INDEX IF NOT EXISTS idx_phases_feature ON phases(feature_id);
+
+    -- Metrics table for performance tracking
+    CREATE TABLE IF NOT EXISTS metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        -- Dimensions
+        role TEXT NOT NULL,
+        cli TEXT NOT NULL,
+        task_type TEXT,
+        workflow_id TEXT,
+
+        -- Measures
+        success BOOLEAN NOT NULL,
+        duration_seconds REAL NOT NULL,
+        retry_count INTEGER DEFAULT 0,
+        token_usage INTEGER,
+        error_category TEXT,
+
+        -- For adaptive routing
+        model_score REAL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_metrics_role_cli ON metrics(role, cli);
+    CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp);
     """
 
     def __init__(self, db_path: str | Path = ".supervisor/state.db"):
@@ -229,6 +258,69 @@ class Database:
 
         # Verify projection sync on startup
         self._verify_projection_sync()
+
+    def record_metric(
+        self,
+        role: str,
+        cli: str,
+        workflow_id: str,
+        success: bool,
+        duration_seconds: float,
+        task_type: str = "other",
+        retry_count: int = 0,
+        token_usage: int | None = None,
+        error_category: str | None = None,
+    ) -> None:
+        """Record a metric for role execution.
+
+        NEW method for Phase 5 - uses _connect() context manager like existing methods.
+        FIX (v15 - Gemini): MUST use `with self._connect() as conn:` pattern.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO metrics (
+                    role, cli, task_type, workflow_id,
+                    success, duration_seconds, retry_count,
+                    token_usage, error_category
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    role, cli, task_type, workflow_id,
+                    success, duration_seconds, retry_count,
+                    token_usage, error_category,
+                )
+            )
+            # commit handled by context manager
+
+    def get_metrics(
+        self,
+        days: int = 30,
+        role: str | None = None,
+        cli: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Query metrics with optional filters.
+
+        NEW method for Phase 5 - supports metrics aggregation.
+        FIX (v15 - Gemini): MUST use `with self._connect() as conn:` pattern.
+        FIX (v14 - Codex): Use SQLite datetime() for cross-format comparison.
+        """
+        with self._connect() as conn:
+            # FIX (v14): Use datetime() for format-agnostic timestamp comparison
+            query = f"SELECT * FROM metrics WHERE timestamp > datetime('now', '-{days} days')"
+            params: list[Any] = []
+
+            if role:
+                query += " AND role = ?"
+                params.append(role)
+            if cli:
+                query += " AND cli = ?"
+                params.append(cli)
+
+            query += " ORDER BY timestamp DESC"
+            cursor = conn.execute(query, params)
+            columns = [desc[0] for desc in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def _verify_projection_sync(self) -> None:
         """Verify projections are in sync with event log.
