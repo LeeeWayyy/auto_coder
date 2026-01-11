@@ -1284,9 +1284,11 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         FIX (v26 - Codex): Include both staged and unstaged changes in diff.
         FIX (v27 - Codex PR review): Include content for untracked (new) files.
+        FIX (v27 - Codex PR review P2): Skip tracked diff when target_files is empty
+        to avoid showing all repo changes when component only adds new files.
 
         Args:
-            target_files: Tracked files to show diff for
+            target_files: Tracked files to show diff for (empty list = skip tracked diff)
             untracked_files: Untracked (new) files to show content for
 
         Returns a list of diff lines that can be shown to the user in the
@@ -1297,36 +1299,35 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         import subprocess
         all_diff_lines: list[str] = []
         try:
-            # Get unstaged changes for tracked files
-            cmd = ["git", "diff", "--no-color"]
+            # FIX (v27 - Codex PR review P2): Only run tracked diff if we have files
+            # When target_files is None/empty, skip to avoid showing all repo changes
             if target_files:
-                cmd.extend(["--", *target_files])
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.git_timeout,
-                cwd=self.repo_path,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                all_diff_lines.extend(result.stdout.strip().split("\n"))
+                # Get unstaged changes for tracked files
+                cmd = ["git", "diff", "--no-color", "--", *target_files]
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.git_timeout,
+                    cwd=self.repo_path,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    all_diff_lines.extend(result.stdout.strip().split("\n"))
 
-            # FIX (v26 - Codex): Also get staged changes
-            cmd_cached = ["git", "diff", "--no-color", "--cached"]
-            if target_files:
-                cmd_cached.extend(["--", *target_files])
-            result = subprocess.run(
-                cmd_cached,
-                capture_output=True,
-                text=True,
-                timeout=self.git_timeout,
-                cwd=self.repo_path,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                if all_diff_lines:
-                    all_diff_lines.append("")  # Separator
-                    all_diff_lines.append("# Staged changes:")
-                all_diff_lines.extend(result.stdout.strip().split("\n"))
+                # FIX (v26 - Codex): Also get staged changes
+                cmd_cached = ["git", "diff", "--no-color", "--cached", "--", *target_files]
+                result = subprocess.run(
+                    cmd_cached,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.git_timeout,
+                    cwd=self.repo_path,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    if all_diff_lines:
+                        all_diff_lines.append("")  # Separator
+                        all_diff_lines.append("# Staged changes:")
+                    all_diff_lines.extend(result.stdout.strip().split("\n"))
 
             # FIX (v27 - Codex PR review): Show content for untracked (new) files
             # FIX (v27 - Codex PR review): Use repo-relative paths to avoid leaking absolute paths

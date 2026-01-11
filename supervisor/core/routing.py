@@ -34,8 +34,22 @@ def _infer_task_type(role_name: str) -> str:
 
     Uses dictionary lookup for exact matching, avoiding false positives
     from substring matching (e.g., 'reimplementer' won't match 'implement').
+
+    FIX (v27 - Codex PR review P2): Handle role variants like 'reviewer_gemini',
+    'reviewer_codex' by extracting base role before suffix (after underscore).
     """
-    return _ROLE_TO_TASK_TYPE.get(role_name, "other")
+    # First try exact match
+    if role_name in _ROLE_TO_TASK_TYPE:
+        return _ROLE_TO_TASK_TYPE[role_name]
+
+    # FIX (v27 - Codex PR review P2): Try base role (before underscore suffix)
+    # e.g., 'reviewer_gemini' -> 'reviewer', 'implementer_fast' -> 'implementer'
+    if "_" in role_name:
+        base_role = role_name.rsplit("_", 1)[0]
+        if base_role in _ROLE_TO_TASK_TYPE:
+            return _ROLE_TO_TASK_TYPE[base_role]
+
+    return "other"
 
 
 @dataclass
