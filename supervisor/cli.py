@@ -244,6 +244,44 @@ def run(role: str, task: str, workflow_id: str | None, target: tuple[str, ...]) 
         sys.exit(1)
 
 
+# FIX (v27 - Gemini PR review): Helper functions for config loading
+def _load_approval_config(repo_path: Path) -> "ApprovalPolicy | None":
+    """Load approval policy from .supervisor/approval.yaml."""
+    from supervisor.core.approval import ApprovalPolicy
+
+    config_path = repo_path / ".supervisor/approval.yaml"
+    if not config_path.exists():
+        return None
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+        approval_cfg = config.get("approval", {})
+        return ApprovalPolicy(
+            auto_approve_low_risk=approval_cfg.get("auto_approve_low_risk", True),
+            risk_threshold=approval_cfg.get("risk_threshold", "medium"),
+            require_approval_for=approval_cfg.get("require_approval_for", ["deploy", "commit"]),
+        )
+
+
+def _load_limits_config(repo_path: Path) -> tuple[dict[str, float], float]:
+    """Load timeout limits from .supervisor/limits.yaml.
+
+    Returns:
+        Tuple of (role_timeouts dict, component_timeout)
+    """
+    config_path = repo_path / ".supervisor/limits.yaml"
+    role_timeouts: dict[str, float] = {}
+    component_timeout = 300.0
+
+    if config_path.exists():
+        with open(config_path) as f:
+            limits = yaml.safe_load(f)
+            role_timeouts = limits.get("role_timeouts", {})
+            component_timeout = limits.get("component_timeout", 300.0)
+
+    return role_timeouts, component_timeout
+
+
 @main.command()
 @click.argument("feature_id")
 @click.option("--tui", is_flag=True, help="Run with interactive TUI")
@@ -266,7 +304,6 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
 
     db = Database(db_path)
 
-    # Check if feature exists
     feature = db.get_feature(feature_id)
     if not feature:
         console.print(f"[red]Error:[/red] Feature '{feature_id}' not found")
@@ -278,36 +315,16 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int) -> None:
     try:
         from supervisor.core.workflow import WorkflowCoordinator
         from supervisor.core.interaction import InteractionBridge
-        from supervisor.core.approval import ApprovalGate, ApprovalPolicy
+        from supervisor.core.approval import ApprovalGate
 
         engine = ExecutionEngine(repo_path)
 
-        # Load approval policy from config if exists
-        approval_config_path = repo_path / ".supervisor/approval.yaml"
-        policy = None
-        if approval_config_path.exists():
-            with open(approval_config_path) as f:
-                config = yaml.safe_load(f)
-                approval_cfg = config.get("approval", {})
-                policy = ApprovalPolicy(
-                    auto_approve_low_risk=approval_cfg.get("auto_approve_low_risk", True),
-                    risk_threshold=approval_cfg.get("risk_threshold", "medium"),
-                    require_approval_for=approval_cfg.get("require_approval_for", ["deploy", "commit"]),
-                )
+        # FIX (v27 - Gemini PR review): Use helper functions for config loading
+        policy = _load_approval_config(repo_path)
+        role_timeouts, component_timeout = _load_limits_config(repo_path)
 
-        # Create shared bridge for TUI-workflow communication
         bridge = InteractionBridge() if tui else None
         approval_gate = ApprovalGate(db, policy=policy)
-
-        # Load timeout config
-        limits_path = repo_path / ".supervisor/limits.yaml"
-        role_timeouts = {}
-        component_timeout = 300.0
-        if limits_path.exists():
-            with open(limits_path) as f:
-                limits = yaml.safe_load(f)
-                role_timeouts = limits.get("role_timeouts", {})
-                component_timeout = limits.get("component_timeout", 300.0)
 
         coordinator = WorkflowCoordinator(
             engine=engine,

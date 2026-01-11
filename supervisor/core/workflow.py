@@ -121,6 +121,8 @@ class WorkflowCoordinator:
         approval_gate: "ApprovalGate | None" = None,
         interaction_bridge: "InteractionBridge | None" = None,
         adaptive_config: dict[str, Any] | None = None,
+        # FIX (v27 - Gemini PR review): Configurable git subprocess timeout
+        git_timeout: float = 60.0,
     ):
         self.engine = engine
         self.db = db
@@ -129,6 +131,7 @@ class WorkflowCoordinator:
         # FIX (PR review): Make timeout values configurable
         self.max_stall_seconds = max_stall_seconds  # Max time without progress (default 10 min)
         self.component_timeout = component_timeout  # Per-component timeout (default 5 min)
+        self.git_timeout = git_timeout  # Git subprocess timeout (default 60s)
         self._scheduler: DAGScheduler | None = None
         
         # Parse adaptive config
@@ -1108,7 +1111,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cmd = ["git", "diff", "--name-only"]
             if target_files:
                 cmd.extend(["--", *target_files])
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=self.repo_path)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
             if result.returncode == 0 and result.stdout.strip():
                 changed.update(result.stdout.strip().split("\n"))
 
@@ -1116,14 +1119,14 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cmd_cached = ["git", "diff", "--name-only", "--cached"]
             if target_files:
                 cmd_cached.extend(["--", *target_files])
-            result = subprocess.run(cmd_cached, capture_output=True, text=True, timeout=30, cwd=self.repo_path)
+            result = subprocess.run(cmd_cached, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
             if result.returncode == 0 and result.stdout.strip():
                 changed.update(result.stdout.strip().split("\n"))
 
             # Get untracked files (newly created)
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
-                capture_output=True, text=True, timeout=30, cwd=self.repo_path,
+                capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path,
             )
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
@@ -1208,7 +1211,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             if target_files:
                 cmd = ["git", "checkout", "--"]
                 cmd.extend(target_files)
-                subprocess.run(cmd, capture_output=True, timeout=30, cwd=self.repo_path)
+                subprocess.run(cmd, capture_output=True, timeout=self.git_timeout, cwd=self.repo_path)
                 logger.debug(f"Rolled back tracked changes for: {target_files}")
             else:
                 # No tracked files to rollback - this is expected when component
