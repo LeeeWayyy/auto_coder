@@ -44,7 +44,7 @@ from supervisor.core.parser import (
     parse_role_output,
 )
 from supervisor.core.roles import RoleConfig, RoleLoader
-from supervisor.core.routing import _infer_task_type
+from supervisor.core.routing import _infer_task_type, get_cli_and_model_id
 from supervisor.core.state import Database, Event, EventType
 from supervisor.core.workspace import ApplyError, GateFailedError, IsolatedWorkspace, _truncate_output
 from supervisor.sandbox.executor import (
@@ -576,24 +576,34 @@ class ExecutionEngine:
         self._cli_clients: dict[str, SandboxedLLMClient] = {}
         self._cli_clients_lock = threading.Lock()  # Thread-safe client initialization
 
-    def _get_cli_client(self, cli_name: str) -> SandboxedLLMClient:
+    def _get_cli_client(self, model_key: str) -> SandboxedLLMClient:
         """Get or create sandboxed CLI client.
+
+        Updated (v28): Supports cli:model format for granular model selection.
+
+        Args:
+            model_key: Model key in "cli:model" format (e.g., "claude:opus")
+                       or legacy "cli" format (e.g., "claude")
 
         Thread-safe using double-checked locking pattern.
         """
         # Fast path: already initialized (no lock needed)
-        if cli_name in self._cli_clients:
-            return self._cli_clients[cli_name]
+        if model_key in self._cli_clients:
+            return self._cli_clients[model_key]
+
+        # Parse model key to get CLI binary and model ID
+        cli_name, model_id = get_cli_and_model_id(model_key)
 
         # Slow path: need to initialize (use lock to prevent race)
         with self._cli_clients_lock:
             # Re-check after acquiring lock (another thread may have initialized)
-            if cli_name not in self._cli_clients:
-                self._cli_clients[cli_name] = SandboxedLLMClient(
+            if model_key not in self._cli_clients:
+                self._cli_clients[model_key] = SandboxedLLMClient(
                     cli_name=cli_name,
                     config=self.sandbox_config,
+                    model_id=model_id,
                 )
-            return self._cli_clients[cli_name]
+            return self._cli_clients[model_key]
 
     # FIX (v27 - Gemini PR review): Helper methods to reduce run_role complexity
 
@@ -1195,7 +1205,6 @@ class ExecutionEngine:
     def create_workflow_coordinator(
         self,
         max_parallel_workers: int = 3,
-        prefer_speed: bool = False,
         prefer_cost: bool = False,
         max_stall_seconds: float = 600.0,
         component_timeout: float = 300.0,
@@ -1211,9 +1220,11 @@ class ExecutionEngine:
 
         Phase 4 integration point for Feature->Phase->Component execution.
 
+        FIX (v28): Removed prefer_speed - quality-first design prioritizes
+        thoroughness over speed.
+
         Args:
             max_parallel_workers: Maximum parallel component executions
-            prefer_speed: Prioritize faster models when possible
             prefer_cost: Prioritize cheaper models when possible
             max_stall_seconds: Max time to wait for any progress before stalling
             component_timeout: Max time for a single component to run
@@ -1223,13 +1234,11 @@ class ExecutionEngine:
         """
         from supervisor.core.workflow import WorkflowCoordinator
 
-        # FIX (PR review): Pass through all configuration parameters
         return WorkflowCoordinator(
             engine=self,
             db=self.db,
             repo_path=self.repo_path,
             max_parallel_workers=max_parallel_workers,
-            prefer_speed=prefer_speed,
             prefer_cost=prefer_cost,
             max_stall_seconds=max_stall_seconds,
             component_timeout=component_timeout,
@@ -1246,7 +1255,6 @@ class ExecutionEngine:
         feature_id: str,
         parallel: bool = True,
         max_parallel_workers: int = 3,
-        prefer_speed: bool = False,
         prefer_cost: bool = False,
         max_stall_seconds: float = 600.0,
         component_timeout: float = 300.0,
@@ -1255,6 +1263,8 @@ class ExecutionEngine:
 
         Phase 4 convenience method that creates a WorkflowCoordinator
         and runs the implementation phase.
+
+        FIX (v28): Removed prefer_speed - quality-first design.
 
         ALGORITHM:
         1. Build DAG from feature's phases and components
@@ -1269,7 +1279,6 @@ class ExecutionEngine:
             feature_id: Feature to execute
             parallel: Enable parallel execution (default True)
             max_parallel_workers: Maximum parallel workers
-            prefer_speed: Prioritize faster models when possible
             prefer_cost: Prioritize cheaper models when possible
             max_stall_seconds: Max time to wait for any progress before stalling
             component_timeout: Max time for a single component to run
@@ -1281,10 +1290,8 @@ class ExecutionEngine:
             WorkflowBlockedError: If no progress can be made
         """
         from supervisor.core.models import Feature
-        # FIX (Gemini review): Use factory method instead of duplicating instantiation
         coordinator = self.create_workflow_coordinator(
             max_parallel_workers=max_parallel_workers,
-            prefer_speed=prefer_speed,
             prefer_cost=prefer_cost,
             max_stall_seconds=max_stall_seconds,
             component_timeout=component_timeout,

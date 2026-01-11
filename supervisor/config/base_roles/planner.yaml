@@ -2,7 +2,7 @@
 name: planner
 description: "Architecture and task planning - breaks down features into phases and components"
 
-cli: claude
+cli: claude:opus
 flags:
   - "-p"
   - "--output-format"

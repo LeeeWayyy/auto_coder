@@ -24,7 +24,7 @@ class TestRoleConfig:
         role = RoleConfig(
             name="test",
             description="Test role",
-            cli="claude",
+            cli="claude:sonnet",
             flags=[],
             system_prompt="Test prompt",
             context={},
@@ -38,7 +38,7 @@ class TestRoleConfig:
         role = RoleConfig(
             name="test",
             description="Test role",
-            cli="claude",
+            cli="claude:sonnet",
             flags=[],
             system_prompt="Test prompt",
             context={"token_budget": 10000},
@@ -52,7 +52,7 @@ class TestRoleConfig:
         role = RoleConfig(
             name="planner",
             description="Planning role",
-            cli="claude",
+            cli="claude:sonnet",
             flags=[],
             system_prompt="Plan tasks",
             context={},
@@ -67,7 +67,7 @@ class TestRoleConfig:
         role = RoleConfig(
             name="python-planner",
             description="Python planning role",
-            cli="claude",
+            cli="claude:sonnet",
             flags=[],
             system_prompt="Plan Python tasks",
             context={},
@@ -99,14 +99,14 @@ class TestRoleLoader:
         role_config = {
             "name": "testrole",
             "description": "A test role",
-            "cli": "claude",
+            "cli": "claude:sonnet",
             "system_prompt": "You are a test assistant.",
         }
         (temp_roles_dir / "testrole.yaml").write_text(yaml.dump(role_config))
 
         role = loader_with_temp_roles.load_role("testrole")
         assert role.name == "testrole"
-        assert role.cli == "claude"
+        assert role.cli == "claude:sonnet"
         assert role.system_prompt == "You are a test assistant."
 
     def test_load_role_with_inheritance(self, temp_roles_dir, loader_with_temp_roles):
@@ -115,7 +115,7 @@ class TestRoleLoader:
         base_config = {
             "name": "base",
             "description": "Base role",
-            "cli": "claude",
+            "cli": "claude:sonnet",
             "system_prompt": "Base system prompt.",
             "flags": ["-p"],
         }
@@ -132,7 +132,7 @@ class TestRoleLoader:
 
         role = loader_with_temp_roles.load_role("child")
         assert role.name == "child"
-        assert role.cli == "claude"  # Inherited
+        assert role.cli == "claude:sonnet"  # Inherited
         assert "Base system prompt." in role.system_prompt
         assert "Additional instructions." in role.system_prompt
         assert role.flags == ["-p"]  # Inherited
@@ -146,7 +146,7 @@ class TestRoleLoader:
         grandparent = {
             "name": "grandparent",
             "description": "Grandparent role",
-            "cli": "claude",
+            "cli": "claude:sonnet",
             "system_prompt": "Grandparent prompt.",
         }
         (temp_roles_dir / "grandparent.yaml").write_text(yaml.dump(grandparent))
@@ -183,14 +183,14 @@ class TestRoleLoader:
             "name": "role_a",
             "description": "Role A",
             "extends": "role_b",
-            "cli": "claude",
+            "cli": "claude:sonnet",
             "system_prompt": "A",
         }
         role_b = {
             "name": "role_b",
             "description": "Role B",
             "extends": "role_a",
-            "cli": "claude",
+            "cli": "claude:sonnet",
             "system_prompt": "B",
         }
         (temp_roles_dir / "role_a.yaml").write_text(yaml.dump(role_a))
@@ -224,7 +224,7 @@ class TestRoleLoader:
         role_config = {
             "name": "badtype",
             "description": "Bad type role",
-            "cli": "claude",
+            "cli": "claude:sonnet",
             "system_prompt": "Test",
             "flags": "not-a-list",  # Should be list
         }

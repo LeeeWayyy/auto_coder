@@ -257,10 +257,22 @@ class GeminiAdapter(CLIAdapter):
 
 
 def get_adapter(cli: str) -> CLIAdapter:
-    """Get appropriate adapter for CLI type."""
+    """Get appropriate adapter for CLI type.
+
+    Updated (v28): Handles both legacy "cli" and new "cli:model" formats.
+
+    Args:
+        cli: CLI name or model key (e.g., "claude", "claude:opus", "codex:gpt52")
+
+    Returns:
+        Appropriate CLIAdapter for the CLI type
+    """
+    # Extract CLI name from cli:model format if present
+    cli_name = cli.split(":")[0] if ":" in cli else cli
+
     adapters: dict[str, CLIAdapter] = {
         "claude": ClaudeAdapter(),
         "codex": CodexAdapter(),
         "gemini": GeminiAdapter(),
     }
-    return adapters.get(cli, ClaudeAdapter())
+    return adapters.get(cli_name, ClaudeAdapter())
