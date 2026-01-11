@@ -762,26 +762,84 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     pass
             executor.shutdown(wait=True)
 
+    # FIX (v27 - Gemini PR review): Helper methods for _execute_component
+
+    def _run_component_role(
+        self,
+        component: Component,
+        feature_id: str,
+    ) -> Any:
+        """Run the role for a component.
+
+        Returns the role execution result.
+        """
+        role_name = component.assigned_role or "implementer"
+        task_description = (
+            f"Implement component: {component.title}\n\n"
+            f"Description: {component.description or 'No description provided.'}\n\n"
+            f"Files to create/modify: {', '.join(component.files) if component.files else 'As needed'}"
+        )
+
+        role_config = self.engine.role_loader.load_role(role_name)
+        role_cli = role_config.cli if role_config else None
+
+        estimated_context = len(component.files) * 5000 if component.files else 10000
+        selected_model = self._router.select_model(
+            role_name=role_name,
+            role_cli=role_cli,
+            context_size=estimated_context,
+        )
+        logger.debug(
+            f"Component '{component.id}': Router selected '{selected_model}' for role '{role_name}'"
+        )
+
+        def is_cancelled() -> bool:
+            comp = self._scheduler.get_component(component.id)
+            return comp is not None and comp.status == ComponentStatus.FAILED
+
+        return self.engine.run_role(
+            role_name=role_name,
+            task_description=task_description,
+            workflow_id=feature_id,
+            target_files=component.files,
+            cli_override=selected_model,
+            cancellation_check=is_cancelled,
+        )
+
+    def _handle_post_execution_approval(
+        self,
+        component: Component,
+        feature_id: str,
+        baseline_set: set[str],
+    ) -> tuple[bool, list[str], list[str]]:
+        """Handle post-execution approval flow.
+
+        Returns:
+            Tuple of (approved, component_changed, component_untracked)
+        """
+        current_changed, current_untracked = self._get_changed_files(None)
+
+        component_changed = [f for f in current_changed if f not in baseline_set]
+        component_untracked = [f for f in current_untracked if f not in baseline_set]
+        all_component_changes = component_changed + component_untracked
+
+        diff_lines = self._get_worktree_diff(component.files if component.files else None)
+
+        if self.approval_gate:
+            if not self._check_approval_gate(
+                feature_id, component, all_component_changes, diff_lines, component_untracked
+            ):
+                self._rollback_worktree_changes(component_changed, component_untracked)
+                return False, component_changed, component_untracked
+
+        return True, component_changed, component_untracked
+
     def _execute_component(self, component: Component, feature_id: str) -> None:
         """Execute a single component.
 
-        FIX (v25 - Codex): Approval gate now checks AFTER execution, BEFORE commit.
-        This allows showing actual git diff to the user for review.
-
-        Maps component to role execution:
-        1. Determine role from component.assigned_role
-        2. Use ModelRouter for intelligent model selection
-        3. Build context with component's target files
-        4. Run role with component-specific task
-        5. Capture actual diff after execution
-        6. Check approval gate with real changes
-        7. If approved: mark completed. If rejected: rollback changes.
+        FIX (v27 - Gemini PR review): Refactored into smaller helper methods.
         """
-        # Track untracked files for potential rollback
-        untracked_files: list[str] = []
-
-        # FIX (v27 - Codex PR review): Capture baseline BEFORE running role
-        # This allows us to identify only changes made by THIS component
+        # Capture baseline BEFORE running role
         baseline_changed, baseline_untracked = self._get_changed_files(None)
         baseline_set = set(baseline_changed + baseline_untracked)
 
@@ -793,90 +851,33 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 workflow_id=feature_id,
             )
 
-            # Determine role and task
-            role_name = component.assigned_role or "implementer"
-            task_description = (
-                f"Implement component: {component.title}\n\n"
-                f"Description: {component.description or 'No description provided.'}\n\n"
-                f"Files to create/modify: {', '.join(component.files) if component.files else 'As needed'}"
-            )
+            # Run the role
+            result = self._run_component_role(component, feature_id)
 
-            # FIX (PR review): Load role config to get its configured CLI
-            # This ensures custom/overlay roles with explicit CLI settings are respected
-            role_config = self.engine.role_loader.load_role(role_name)
-            role_cli = role_config.cli if role_config else None
-
-            # FIX (Gemini review): Use ModelRouter for intelligent model selection
-            # Estimate context size based on number of files
-            estimated_context = len(component.files) * 5000 if component.files else 10000
-            selected_model = self._router.select_model(
-                role_name=role_name,
-                role_cli=role_cli,  # Pass role's configured CLI to respect explicit config
-                context_size=estimated_context,
-            )
-            logger.debug(
-                f"Component '{component.id}': Router selected '{selected_model}' for role '{role_name}'"
-            )
-
-            # FIX (Codex review): Pass cancellation check to prevent applying changes
-            # after timeout. Returns True if component was marked FAILED (e.g., timed out).
-            def is_cancelled() -> bool:
-                comp = self._scheduler.get_component(component.id)
-                return comp is not None and comp.status == ComponentStatus.FAILED
-
-            # Run the role with ModelRouter-selected CLI
-            # Note: run_role generates changes but does NOT commit automatically
-            result = self.engine.run_role(
-                role_name=role_name,
-                task_description=task_description,
-                workflow_id=feature_id,
-                target_files=component.files,
-                cli_override=selected_model,
-                cancellation_check=is_cancelled,
-            )
-
-            # FIX (Codex review v3): Check current status before updating to COMPLETED
-            # A timed-out component may still complete; ignore late results
+            # Check if timed out while running
             comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' completed after timeout - ignoring late result"
                 )
-                return  # Don't overwrite FAILED status
+                return
 
-            # FIX (v27 - Codex PR review): Capture current state and compute delta
-            # Only changes made by THIS component should be shown and rolled back
-            current_changed, current_untracked = self._get_changed_files(None)
-            current_set = set(current_changed + current_untracked)
+            # Handle approval flow
+            approved, component_changed, component_untracked = self._handle_post_execution_approval(
+                component, feature_id, baseline_set
+            )
 
-            # Compute delta: files changed by THIS component only
-            component_changed = [f for f in current_changed if f not in baseline_set]
-            component_untracked = [f for f in current_untracked if f not in baseline_set]
-            all_component_changes = component_changed + component_untracked
+            if not approved:
+                self._scheduler.update_component_status(
+                    component.id,
+                    ComponentStatus.FAILED,
+                    error="Approval rejected by user",
+                    workflow_id=feature_id,
+                )
+                logger.info(f"Component '{component.id}' rejected by approval gate, changes rolled back")
+                return
 
-            # Get diff for component's changes (for display)
-            # Use component.files as hint, but also show any out-of-scope changes
-            diff_lines = self._get_worktree_diff(component.files if component.files else None)
-
-            # FIX (v25 - Codex): APPROVAL GATE CHECK - AFTER execution, BEFORE commit
-            # This enables human approval of REAL changes, not just file names
-            if self.approval_gate:
-                if not self._check_approval_gate(
-                    feature_id, component, all_component_changes, diff_lines, component_untracked
-                ):
-                    # FIX (v27 - Codex PR review): Only rollback THIS component's changes
-                    # Prior components' changes are preserved
-                    self._rollback_worktree_changes(component_changed, component_untracked)
-                    self._scheduler.update_component_status(
-                        component.id,
-                        ComponentStatus.FAILED,
-                        error="Approval rejected by user",
-                        workflow_id=feature_id,
-                    )
-                    logger.info(f"Component '{component.id}' rejected by approval gate, changes rolled back")
-                    return  # Do NOT mark as completed
-
-            # Approval granted (or no gate configured) - mark as completed
+            # Approval granted - mark as completed
             self._scheduler.update_component_status(
                 component.id,
                 ComponentStatus.COMPLETED,
@@ -890,19 +891,18 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
-            # FIX (v27 - Codex PR review): Only rollback THIS component's changes
-            # Re-detect and compute delta from baseline
+            # Rollback only THIS component's changes
             exc_changed, exc_untracked = self._get_changed_files(None)
             component_exc_changed = [f for f in exc_changed if f not in baseline_set]
             component_exc_untracked = [f for f in exc_untracked if f not in baseline_set]
             self._rollback_worktree_changes(component_exc_changed, component_exc_untracked)
-            # FIX (Codex review v4): Don't overwrite timeout error with exception error
+
             comp = self._scheduler.get_component(component.id)
             if comp and comp.status == ComponentStatus.FAILED:
                 logger.warning(
                     f"Component '{component.id}' raised exception after timeout - ignoring"
                 )
-                return  # Don't overwrite timeout error
+                return
             self._scheduler.update_component_status(
                 component.id,
                 ComponentStatus.FAILED,

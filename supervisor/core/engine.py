@@ -598,6 +598,197 @@ class ExecutionEngine:
                 )
             return self._cli_clients[cli_name]
 
+    # FIX (v27 - Gemini PR review): Helper methods to reduce run_role complexity
+
+    def _setup_role_execution(
+        self,
+        role_name: str,
+        task_description: str,
+        workflow_id: str,
+        step_id: str | None,
+        target_files: list[str] | None,
+        extra_context: dict[str, str] | None,
+        retry_policy: RetryPolicy | None,
+        gates: list[str] | None,
+    ) -> tuple[str, RetryPolicy, list[str], str, RoleConfig, str]:
+        """Setup role execution context.
+
+        Returns:
+            Tuple of (step_id, retry_policy, gates, circuit_key, role, prompt)
+        """
+        step_id = step_id or f"{workflow_id}-{role_name}-{uuid.uuid4().hex[:8]}"
+        retry_policy = retry_policy or RetryPolicy()
+        gates = gates or []
+
+        circuit_key = _generate_circuit_key(workflow_id, role_name, task_description)
+
+        if self.circuit_breaker.is_open(circuit_key):
+            raise CircuitOpenError(
+                f"Circuit breaker open for {circuit_key}. "
+                f"Too many failures. Manual intervention required."
+            )
+
+        role = self.role_loader.load_role(role_name)
+
+        template_name = self._get_template_for_role(role)
+        if template_name:
+            prompt = self.context_packer.build_full_prompt(
+                template_name, role, task_description, target_files, extra_context,
+            )
+        else:
+            prompt = self.context_packer.pack_context(
+                role=role, task_description=task_description,
+                target_files=target_files, extra_context=extra_context,
+            )
+
+        return step_id, retry_policy, gates, circuit_key, role, prompt
+
+    def _build_gate_overrides(
+        self,
+        gates: list[str],
+        role: RoleConfig,
+        gate_loader: GateLoader,
+    ) -> dict[str, GateFailAction]:
+        """Build effective gate fail action overrides.
+
+        Handles role overrides, gate severity defaults, and optional gate propagation.
+        """
+        resolved_gates = gate_loader.resolve_execution_order(gates)
+        effective_overrides: dict[str, GateFailAction] = {}
+
+        for gate_name in resolved_gates:
+            if gate_name in role.on_fail_overrides:
+                effective_overrides[gate_name] = role.on_fail_overrides[gate_name]
+            else:
+                try:
+                    gate_config = gate_loader.get_gate(gate_name)
+                    if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
+                        effective_overrides[gate_name] = GateFailAction.WARN
+                    else:
+                        effective_overrides[gate_name] = GateFailAction.BLOCK
+                except GateNotFoundError:
+                    effective_overrides[gate_name] = GateFailAction.BLOCK
+
+        # Propagate optional behavior to dependencies
+        deps_cache: dict[str, set[str]] = {}
+
+        def collect_deps(gn: str) -> set[str]:
+            if gn in deps_cache:
+                return deps_cache[gn]
+            deps: set[str] = set()
+            try:
+                gc = gate_loader.get_gate(gn)
+                for dep in gc.depends_on:
+                    if dep not in deps:
+                        deps.add(dep)
+                        deps.update(collect_deps(dep))
+            except GateNotFoundError:
+                pass
+            deps_cache[gn] = deps
+            return deps
+
+        for gate_name in gates:
+            if effective_overrides.get(gate_name) == GateFailAction.WARN:
+                for dep in collect_deps(gate_name):
+                    if effective_overrides.get(dep) == GateFailAction.BLOCK:
+                        effective_overrides[dep] = GateFailAction.WARN
+
+        return effective_overrides
+
+    def _apply_and_finalize_step(
+        self,
+        workflow_id: str,
+        step_id: str,
+        role_name: str,
+        output: BaseModel,
+        ctx: Any,  # IsolatedContext
+        cancellation_check: "Callable[[], bool] | None",
+    ) -> list[str]:
+        """Apply changes to main tree and record success.
+
+        Returns list of changed files.
+
+        Raises:
+            CancellationError: If cancelled before/during apply
+            ApplyError: If apply fails
+        """
+        if cancellation_check and cancellation_check():
+            logger.warning(
+                f"Step '{step_id}' cancelled before applying changes - "
+                "discarding worktree changes"
+            )
+            raise CancellationError(
+                f"Step '{step_id}' was cancelled (likely timeout). "
+                "Changes were not applied to avoid out-of-policy mutations."
+            )
+
+        self.db.append_event(
+            Event(
+                workflow_id=workflow_id,
+                event_type=EventType.STEP_APPLYING,
+                step_id=step_id,
+                role=role_name,
+                payload={"original_head": ctx.original_head},
+            )
+        )
+
+        try:
+            with self.workspace._apply_lock:
+                if cancellation_check and cancellation_check():
+                    raise CancellationError(
+                        f"Step '{step_id}' cancelled after acquiring apply lock. "
+                        "Changes not applied."
+                    )
+                changed_files = self.workspace._apply_changes(
+                    ctx.worktree_path, ctx.original_head
+                )
+        except CancellationError:
+            raise
+        except Exception as apply_err:
+            raise ApplyError(
+                f"Apply failed (repository may be in inconsistent state): {apply_err}"
+            ) from apply_err
+
+        try:
+            self.db.append_event(
+                Event(
+                    workflow_id=workflow_id,
+                    event_type=EventType.STEP_COMPLETED,
+                    step_id=step_id,
+                    role=role_name,
+                    payload={
+                        "output": output.model_dump() if hasattr(output, "model_dump") else output,
+                        "files_changed": changed_files,
+                    },
+                )
+            )
+        except Exception as db_error:
+            import sys
+            print(
+                f"CRITICAL: Step {step_id} applied changes but DB update failed: {db_error}. "
+                f"Changed files: {changed_files}. Manual remediation may be required.",
+                file=sys.stderr,
+            )
+            try:
+                self.db.append_event(
+                    Event(
+                        workflow_id=workflow_id,
+                        event_type=EventType.STEP_FAILED,
+                        step_id=step_id,
+                        role=role_name,
+                        payload={
+                            "error": f"DB update failed after apply: {db_error}",
+                            "files_changed": changed_files,
+                            "inconsistent_state": True,
+                        },
+                    )
+                )
+            except Exception:
+                pass
+            raise
+
+        return changed_files
+
     def run_role(
         self,
         role_name: str,
@@ -652,45 +843,11 @@ class ExecutionEngine:
             cli_used = "unknown"
 
         try:
-            # Generate unique step_id with UUID for worktree isolation
-            step_id = step_id or f"{workflow_id}-{role_name}-{uuid.uuid4().hex[:8]}"
-            retry_policy = retry_policy or RetryPolicy()
-            gates = gates or []
-
-            # Circuit breaker uses deterministic key based on task identity
-            # This ensures failures aggregate across retries of the same logical task
-            circuit_key = _generate_circuit_key(workflow_id, role_name, task_description)
-
-            # Check circuit breaker
-            if self.circuit_breaker.is_open(circuit_key):
-                raise CircuitOpenError(
-                    f"Circuit breaker open for {circuit_key}. "
-                    f"Too many failures. Manual intervention required."
-                )
-
-            # Load role configuration (now with schema validation)
-            role = self.role_loader.load_role(role_name)
-
-            # PHASE 2: Use template-based prompt building for known roles
-            # NOTE: Pass role object (not role_name) to resolve overlay extends chain
-            template_name = self._get_template_for_role(role)
-            if template_name:
-                # Template-based flow (planner, implementer, reviewer, AND overlays that extend them)
-                prompt = self.context_packer.build_full_prompt(
-                    template_name,
-                    role,
-                    task_description,
-                    target_files,
-                    extra_context,
-                )
-            else:
-                # Legacy fallback for truly unknown roles (no extends to known base)
-                prompt = self.context_packer.pack_context(
-                    role=role,
-                    task_description=task_description,
-                    target_files=target_files,
-                    extra_context=extra_context,
-                )
+            # FIX (v27 - Gemini PR review): Use helper method for setup
+            step_id, retry_policy, gates, circuit_key, role, prompt = self._setup_role_execution(
+                role_name, task_description, workflow_id, step_id,
+                target_files, extra_context, retry_policy, gates,
+            )
 
             # Record step started
             self.db.append_event(
@@ -736,8 +893,7 @@ class ExecutionEngine:
                         output = adapter.parse_output(result.stdout, schema)
 
                         # Run gates IN THE WORKTREE using GateExecutor
-                        # GateExecutor handles: dependency order, caching, integrity, event logging
-                        # Enable project-specific gate configs from .supervisor/gates.yaml
+                        # FIX (v27 - Gemini PR review): Use helper for gate setup
                         worktree_gate_loader = GateLoader(ctx.worktree_path, allow_project_gates=True)
                         worktree_gate_executor = GateExecutor(
                             executor=self.executor,
@@ -745,55 +901,8 @@ class ExecutionEngine:
                             db=self.db,
                         )
 
-                        # Resolve all gates (including dependencies) upfront for on_fail logic
-                        resolved_gates = worktree_gate_loader.resolve_execution_order(gates)
-
-                        # Build on_fail_overrides for ALL gates (including dependencies)
-                        effective_overrides: dict[str, GateFailAction] = {}
-                        for gate_name in resolved_gates:
-                            if gate_name in role.on_fail_overrides:
-                                effective_overrides[gate_name] = role.on_fail_overrides[gate_name]
-                            else:
-                                # Use gate's severity as default action
-                                try:
-                                    gate_config = worktree_gate_loader.get_gate(gate_name)
-                                    if gate_config.severity in (GateSeverity.WARNING, GateSeverity.INFO):
-                                        effective_overrides[gate_name] = GateFailAction.WARN
-                                    else:
-                                        effective_overrides[gate_name] = GateFailAction.BLOCK
-                                except GateNotFoundError:
-                                    # Gate not defined - default to BLOCK
-                                    effective_overrides[gate_name] = GateFailAction.BLOCK
-
-                        # Propagate optional (WARN) behavior from parent gates to dependencies.
-                        # If a gate is optional (required=false or on_fail=warn), its dependencies
-                        # should also be treated as optional so they don't block unexpectedly.
-                        deps_cache: dict[str, set[str]] = {}
-
-                        def collect_dependencies(gate_name: str) -> set[str]:
-                            """Recursively collect all dependencies of a gate (memoized)."""
-                            if gate_name in deps_cache:
-                                return deps_cache[gate_name]
-
-                            deps: set[str] = set()
-                            try:
-                                gate_config = worktree_gate_loader.get_gate(gate_name)
-                                for dep in gate_config.depends_on:
-                                    if dep not in deps:
-                                        deps.add(dep)
-                                        deps.update(collect_dependencies(dep))
-                            except GateNotFoundError:
-                                pass
-
-                            deps_cache[gate_name] = deps
-                            return deps
-
-                        for gate_name in gates:
-                            if effective_overrides.get(gate_name) == GateFailAction.WARN:
-                                # This gate is optional - propagate to all its dependencies
-                                for dep in collect_dependencies(gate_name):
-                                    if effective_overrides.get(dep) == GateFailAction.BLOCK:
-                                        effective_overrides[dep] = GateFailAction.WARN
+                        # Build effective overrides using helper method
+                        effective_overrides = self._build_gate_overrides(gates, role, worktree_gate_loader)
 
                         gate_results = worktree_gate_executor.run_gates(
                             gate_names=gates,
@@ -817,95 +926,10 @@ class ExecutionEngine:
                                 # BLOCK or RETRY_WITH_FEEDBACK: raise exception
                                 raise GateFailedError(gate_result.gate_name, gate_result.output)
 
-                        # ONLY after gates pass: apply changes to main tree
-                        # Use file lock to prevent race conditions with parallel execution
-                        # Pass original_head for conflict detection
-
-                        # FIX (Codex review): Check cancellation before applying changes
-                        # This prevents timed-out components from mutating the repo after
-                        # the workflow has already marked them as FAILED
-                        if cancellation_check and cancellation_check():
-                            logger.warning(
-                                f"Step '{step_id}' cancelled before applying changes - "
-                                "discarding worktree changes"
-                            )
-                            raise CancellationError(
-                                f"Step '{step_id}' was cancelled (likely timeout). "
-                                "Changes were not applied to avoid out-of-policy mutations."
-                            )
-
-                        # CRASH RECOVERY: Record applying event BEFORE modifying repo
-                        self.db.append_event(
-                            Event(
-                                workflow_id=workflow_id,
-                                event_type=EventType.STEP_APPLYING,
-                                step_id=step_id,
-                                role=role_name,
-                                payload={"original_head": ctx.original_head},
-                            )
+                        # FIX (v27 - Gemini PR review): Use helper for apply and finalize
+                        changed_files = self._apply_and_finalize_step(
+                            workflow_id, step_id, role_name, output, ctx, cancellation_check,
                         )
-
-                        # CRITICAL: Wrap apply errors - they are FATAL, not retriable
-                        try:
-                            with self.workspace._apply_lock:
-                                # FIX (Codex review): Re-check cancellation after acquiring lock
-                                # This closes the race window between check and apply
-                                if cancellation_check and cancellation_check():
-                                    raise CancellationError(
-                                        f"Step '{step_id}' cancelled after acquiring apply lock. "
-                                        "Changes not applied."
-                                    )
-                                changed_files = self.workspace._apply_changes(
-                                    ctx.worktree_path, ctx.original_head
-                                )
-                        except CancellationError:
-                            raise  # Re-raise cancellation without wrapping
-                        except Exception as apply_err:
-                            raise ApplyError(
-                                f"Apply failed (repository may be in inconsistent state): {apply_err}"
-                            ) from apply_err
-
-                    # Record success (outside of isolation context - worktree cleaned up)
-                    # Wrap in try/except to handle DB failure after git apply
-                    try:
-                        self.db.append_event(
-                            Event(
-                                workflow_id=workflow_id,
-                                event_type=EventType.STEP_COMPLETED,
-                                step_id=step_id,
-                                role=role_name,
-                                payload={
-                                    "output": output.model_dump() if hasattr(output, "model_dump") else output,
-                                    "files_changed": changed_files,
-                                },
-                            )
-                        )
-                    except Exception as db_error:
-                        # CRITICAL: Git repo was modified but DB update failed
-                        import sys
-                        print(
-                            f"CRITICAL: Step {step_id} applied changes but DB update failed: {db_error}. "
-                            f"Changed files: {changed_files}. Manual remediation may be required.",
-                            file=sys.stderr,
-                        )
-                        # Try to record failure (best effort)
-                        try:
-                            self.db.append_event(
-                                Event(
-                                    workflow_id=workflow_id,
-                                    event_type=EventType.STEP_FAILED,
-                                    step_id=step_id,
-                                    role=role_name,
-                                    payload={
-                                        "error": f"DB update failed after apply: {db_error}",
-                                        "files_changed": changed_files,
-                                        "inconsistent_state": True,
-                                    },
-                                )
-                            )
-                        except Exception:
-                            pass
-                        raise
 
                     self.circuit_breaker.reset(circuit_key)
                     success = True
