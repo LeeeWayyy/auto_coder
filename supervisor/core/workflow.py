@@ -810,6 +810,61 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cancellation_check=is_cancelled,
         )
 
+    def _build_component_scope(
+        self, component: Component
+    ) -> tuple[set[str], set[str], bool]:
+        """Build scope for component change detection.
+
+        FIX (v27 - Codex PR review): Extract helper to avoid duplication.
+        FIX (v27 - Codex PR review HIGH): Handle empty component.files.
+        FIX (v27 - Codex PR review MEDIUM): Only include file's directory, not parents.
+
+        Returns:
+            (component_file_set, component_dirs, has_scope) where has_scope=False
+            means no scoping (all changes should be included).
+        """
+        import os
+        component_dirs: set[str] = set()
+        component_file_set: set[str] = set()
+
+        # FIX (v27 - Codex PR review HIGH): Empty component.files means no scoping
+        if not component.files:
+            return component_file_set, component_dirs, False
+
+        for f in component.files:
+            component_file_set.add(f)
+            # FIX (v27 - Codex PR review MEDIUM): Only add the file's direct directory
+            # Not parent dirs to avoid sibling directory bleed-through
+            dirname = os.path.dirname(f)
+            if dirname:
+                component_dirs.add(dirname)
+            else:
+                component_dirs.add(".")  # Root level files
+
+        return component_file_set, component_dirs, True
+
+    def _is_in_component_scope(
+        self,
+        filepath: str,
+        component_file_set: set[str],
+        component_dirs: set[str],
+    ) -> bool:
+        """Check if filepath is in component's scope.
+
+        FIX (v27 - Codex PR review): Extract helper to avoid duplication.
+        """
+        import os
+        # Direct match to declared files
+        if filepath in component_file_set:
+            return True
+        # Check if file is in one of component's directories (or subdirectory)
+        file_dir = os.path.dirname(filepath) or "."
+        # Check if file_dir starts with any component dir
+        for comp_dir in component_dirs:
+            if file_dir == comp_dir or file_dir.startswith(comp_dir + os.sep):
+                return True
+        return False
+
     def _handle_post_execution_approval(
         self,
         component: Component,
@@ -821,55 +876,32 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         """Handle post-execution approval flow.
 
         FIX (v27 - Codex PR review): Track changes by content hash, not just filename.
-        Files that were already modified but changed again by this component are
-        now detected and included in rollback.
         FIX (v27 - Codex PR review): Pass baseline_contents to rollback for restoration.
-        FIX (v27 - Codex PR review P1): Scope change detection to component's files/dirs
-        to avoid including concurrent components' changes in parallel execution.
+        FIX (v27 - Codex PR review P1): Scope change detection to component's files/dirs.
 
         Returns:
             Tuple of (approved, component_changed, component_untracked)
         """
-        # FIX (v27 - Codex PR review P1): Build set of directories this component owns
-        # to scope change detection and avoid affecting concurrent components' changes
-        import os
-        component_dirs: set[str] = set()
-        component_file_set: set[str] = set()
-        for f in (component.files or []):
-            component_file_set.add(f)
-            # Add the file's directory and parent dirs up to 2 levels
-            dirname = os.path.dirname(f)
-            if dirname:
-                component_dirs.add(dirname)
-                parent = os.path.dirname(dirname)
-                if parent:
-                    component_dirs.add(parent)
-            else:
-                component_dirs.add(".")  # Root level files
+        # Build component scope
+        component_file_set, component_dirs, has_scope = self._build_component_scope(component)
 
-        # Get all worktree changes, then filter to this component's scope
+        # Get all worktree changes
         current_changed, current_untracked = self._get_changed_files(None)
 
-        # FIX (v27 - Codex PR review P1): Filter changes to component's files/directories
-        def is_in_component_scope(filepath: str) -> bool:
-            """Check if filepath is in this component's scope."""
-            # Direct match to declared files
-            if filepath in component_file_set:
-                return True
-            # Check if file is in one of component's directories
-            dirname = os.path.dirname(filepath)
-            while dirname:
-                if dirname in component_dirs:
-                    return True
-                dirname = os.path.dirname(dirname)
-            # Root-level file when component works on root
-            if "." in component_dirs and not os.path.dirname(filepath):
-                return True
-            return False
-
-        # Scope changes to this component
-        scoped_changed = [f for f in current_changed if is_in_component_scope(f)]
-        scoped_untracked = [f for f in current_untracked if is_in_component_scope(f)]
+        # FIX (v27 - Codex PR review HIGH): If no scope, include all changes
+        if has_scope:
+            scoped_changed = [
+                f for f in current_changed
+                if self._is_in_component_scope(f, component_file_set, component_dirs)
+            ]
+            scoped_untracked = [
+                f for f in current_untracked
+                if self._is_in_component_scope(f, component_file_set, component_dirs)
+            ]
+        else:
+            # No scoping - component can touch any file
+            scoped_changed = current_changed
+            scoped_untracked = current_untracked
 
         current_hashes = self._get_file_hashes(scoped_changed)
 
@@ -888,14 +920,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         component_untracked = new_untracked
         all_component_changes = component_changed + component_untracked
 
-        # FIX (v27 - Codex PR review P2): Show diff for all detected changes, not just component.files
-        # FIX (v27 - Codex PR review): Pass untracked files separately to show their content
-        diff_lines = self._get_worktree_diff(
-            component_changed if component_changed else None,
-            component_untracked if component_untracked else None,
-        )
-
+        # FIX (v27 - Gemini PR review LOW): Only call diff when approval gate exists
         if self.approval_gate:
+            diff_lines = self._get_worktree_diff(
+                component_changed if component_changed else None,
+                component_untracked if component_untracked else None,
+            )
             if not self._check_approval_gate(
                 feature_id, component, all_component_changes, diff_lines, component_untracked
             ):
@@ -1011,36 +1041,22 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         except Exception as e:
             logger.error(f"Component '{component.id}' failed: {e}")
             # Rollback only THIS component's changes using hash-based detection
-            # FIX (v27 - Codex PR review P1): Scope to component's files/dirs
-            import os as _os
-            component_dirs_exc: set[str] = set()
-            component_file_set_exc: set[str] = set()
-            for f in (component.files or []):
-                component_file_set_exc.add(f)
-                dirname = _os.path.dirname(f)
-                if dirname:
-                    component_dirs_exc.add(dirname)
-                    parent = _os.path.dirname(dirname)
-                    if parent:
-                        component_dirs_exc.add(parent)
-                else:
-                    component_dirs_exc.add(".")
+            # FIX (v27 - Codex PR review): Use helper methods for scoping
+            component_file_set_exc, component_dirs_exc, has_scope = self._build_component_scope(component)
 
             exc_changed, exc_untracked = self._get_changed_files(None)
 
-            # Filter to component's scope
-            def in_scope(fp: str) -> bool:
-                if fp in component_file_set_exc:
-                    return True
-                dn = _os.path.dirname(fp)
-                while dn:
-                    if dn in component_dirs_exc:
-                        return True
-                    dn = _os.path.dirname(dn)
-                return "." in component_dirs_exc and not _os.path.dirname(fp)
+            # FIX (v27 - Codex PR review HIGH): If no scope, include all changes
+            if has_scope:
+                exc_changed = [
+                    f for f in exc_changed
+                    if self._is_in_component_scope(f, component_file_set_exc, component_dirs_exc)
+                ]
+                exc_untracked = [
+                    f for f in exc_untracked
+                    if self._is_in_component_scope(f, component_file_set_exc, component_dirs_exc)
+                ]
 
-            exc_changed = [f for f in exc_changed if in_scope(f)]
-            exc_untracked = [f for f in exc_untracked if in_scope(f)]
             exc_hashes = self._get_file_hashes(exc_changed)
 
             new_changed = [f for f in exc_changed if f not in baseline_set]
