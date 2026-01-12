@@ -566,8 +566,9 @@ class ModelRouter:
         all_models = list(MODEL_PROFILES.items())
         all_models = self._filter_by_context(all_models, context_size)
         if not all_models:
-            # No model can handle context - use large context selection
-            return self._select_for_large_context(task_type, context_size)
+            raise ValueError(
+                f"No model available with sufficient context capacity for {context_size} tokens."
+            )
         if self.prefer_cost:
             # Find cheapest model that can handle context
             all_models.sort(key=lambda x: (x[1].relative_cost, -x[1].quality_score))

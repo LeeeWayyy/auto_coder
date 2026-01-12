@@ -624,19 +624,15 @@ class SandboxedLLMClient:
         cmd_args, uses_stdin = base_configs.get(self.cli_name, ([self.cli_name], True))
 
         # Add model flag if model_id is specified
+        # Insert into existing command list to avoid duplication with base_configs
         if self.model_id:
-            if self.cli_name == "claude":
-                # claude --model <id> -p <prompt>
-                cmd_args = ["claude", "--model", self.model_id, "-p"]
-            elif self.cli_name == "codex":
-                # codex exec --model <id> --json --stdin
-                cmd_args = ["codex", "exec", "--model", self.model_id, "--json", "--stdin"]
-            elif self.cli_name == "gemini":
-                # gemini --model <id> -o json
-                cmd_args = ["gemini", "--model", self.model_id, "-o", "json"]
+            model_flag = ["--model", self.model_id]
+            if self.cli_name == "codex":
+                # codex exec --model <id> --json --stdin (insert after 'exec')
+                cmd_args = cmd_args[:2] + model_flag + cmd_args[2:]
             else:
-                # Generic: prepend --model flag
-                cmd_args = [self.cli_name, "--model", self.model_id] + cmd_args[1:]
+                # For claude, gemini, and generic: insert after cli name
+                cmd_args = cmd_args[:1] + model_flag + cmd_args[1:]
 
         return cmd_args, uses_stdin
 
