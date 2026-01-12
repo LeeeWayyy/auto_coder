@@ -20,7 +20,8 @@
     },
     "cli": {
       "type": "string",
-      "enum": ["claude", "codex", "gemini"]
+      "pattern": "^(claude|codex|gemini):[a-z0-9_-]+$",
+      "description": "CLI with model in 'cli:model' format (e.g., 'claude:opus', 'codex:gpt52', 'gemini:flash3')"
     },
     "flags": {
       "type": "array",

@@ -23,7 +23,7 @@ from supervisor.core.models import (
     Phase,
     PhaseStatus,
 )
-from supervisor.core.routing import ModelRouter, create_router, AdaptiveConfig
+from supervisor.core.routing import ModelRouter, create_router, AdaptiveConfig, get_capability_for_role
 from supervisor.core.scheduler import (
     DAGScheduler,
     WorkflowBlockedError,
@@ -111,7 +111,6 @@ class WorkflowCoordinator:
         db: Database,
         repo_path: str | Path | None = None,
         max_parallel_workers: int = 3,
-        prefer_speed: bool = False,
         prefer_cost: bool = False,
         max_stall_seconds: float = 600.0,
         component_timeout: float = 300.0,
@@ -134,15 +133,14 @@ class WorkflowCoordinator:
         self.component_timeout = component_timeout  # Per-component timeout (default 5 min)
         self.git_timeout = git_timeout  # Git subprocess timeout (default 60s)
         self._scheduler: DAGScheduler | None = None
-        
+
         # Parse adaptive config
         self.adaptive_config = None
         if adaptive_config:
             self.adaptive_config = AdaptiveConfig(**adaptive_config)
 
-        # FIX (Gemini review): Integrate ModelRouter with adaptive support
+        # FIX (v28): Quality-first routing - removed prefer_speed parameter
         self._router = create_router(
-            prefer_speed=prefer_speed, 
             prefer_cost=prefer_cost,
             db=self.db,
             adaptive_config=self.adaptive_config,
@@ -788,10 +786,12 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         role_cli = role_config.cli if role_config else None
 
         estimated_context = len(component.files) * 5000 if component.files else 10000
+        task_capability = get_capability_for_role(role_name)
         selected_model = self._router.select_model(
             role_name=role_name,
             role_cli=role_cli,
             context_size=estimated_context,
+            task_type=task_capability,
         )
         logger.debug(
             f"Component '{component.id}': Router selected '{selected_model}' for role '{role_name}'"

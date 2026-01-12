@@ -484,6 +484,8 @@ class SandboxedLLMClient:
     IMPORTANT: Egress allowlist must be enforced via iptables rules on the host.
     This class creates the network but cannot enforce egress rules without root.
     See docs/PLANS/SUPERVISOR_ORCHESTRATOR.md for iptables configuration.
+
+    Updated (v28): Added model_id support for granular model selection.
     """
 
     # ANSI escape code pattern for stripping terminal colors
@@ -493,8 +495,18 @@ class SandboxedLLMClient:
         self,
         cli_name: str,
         config: SandboxConfig | None = None,
+        model_id: str | None = None,
     ):
+        """Initialize sandboxed CLI client.
+
+        Args:
+            cli_name: CLI binary name (claude, codex, gemini)
+            config: Sandbox configuration
+            model_id: Optional model ID to pass via --model flag
+                      (e.g., "claude-opus-4-5-20251101", "gpt-5.2-codex")
+        """
         self.cli_name = cli_name
+        self.model_id = model_id
         self.config = config or SandboxConfig()
         self._validate_setup()
 
@@ -583,6 +595,8 @@ class SandboxedLLMClient:
     def _get_cli_config(self) -> tuple[list[str], bool]:
         """Get CLI command and whether it uses stdin for prompt.
 
+        Updated (v28): Includes --model flag when model_id is set.
+
         Returns:
             Tuple of (command_args, uses_stdin).
             If uses_stdin=False, prompt is appended as final argument.
@@ -591,8 +605,14 @@ class SandboxedLLMClient:
         - claude: Requires prompt as argument after -p (uses_stdin=False)
         - codex: Reads from stdin with --stdin flag (uses_stdin=True)
         - gemini: Reads from stdin (uses_stdin=True)
+
+        Model flag formats:
+        - claude: --model <model_id> (before -p)
+        - codex: --model <model_id> (after exec)
+        - gemini: --model <model_id> (before -o)
         """
-        configs: dict[str, tuple[list[str], bool]] = {
+        # Base configs without model flag
+        base_configs: dict[str, tuple[list[str], bool]] = {
             # Claude Code CLI: prompt must be argument, not stdin
             "claude": (["claude", "-p"], False),
             # Codex: supports stdin with --stdin flag
@@ -600,7 +620,21 @@ class SandboxedLLMClient:
             # Gemini: reads prompt from stdin
             "gemini": (["gemini", "-o", "json"], True),
         }
-        return configs.get(self.cli_name, ([self.cli_name], True))
+
+        cmd_args, uses_stdin = base_configs.get(self.cli_name, ([self.cli_name], True))
+
+        # Add model flag if model_id is specified
+        # Insert into existing command list to avoid duplication with base_configs
+        if self.model_id:
+            model_flag = ["--model", self.model_id]
+            if self.cli_name == "codex":
+                # codex exec --model <id> --json --stdin (insert after 'exec')
+                cmd_args = cmd_args[:2] + model_flag + cmd_args[2:]
+            else:
+                # For claude, gemini, and generic: insert after cli name
+                cmd_args = cmd_args[:1] + model_flag + cmd_args[1:]
+
+        return cmd_args, uses_stdin
 
     def execute(
         self,

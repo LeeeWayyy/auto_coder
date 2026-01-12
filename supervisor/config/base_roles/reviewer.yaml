@@ -2,7 +2,7 @@
 name: reviewer
 description: "Code review with security and quality focus"
 
-cli: claude
+cli: claude:opus
 flags:
   - "-p"
   - "--output-format"

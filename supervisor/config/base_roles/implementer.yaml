@@ -2,7 +2,7 @@
 name: implementer
 description: "Code implementation with TDD approach"
 
-cli: claude
+cli: claude:sonnet
 flags:
   - "-p"
   - "--output-format"
