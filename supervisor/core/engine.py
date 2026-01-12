@@ -579,11 +579,11 @@ class ExecutionEngine:
     def _get_cli_client(self, model_key: str) -> SandboxedLLMClient:
         """Get or create sandboxed CLI client.
 
-        Updated (v28): Supports cli:model format for granular model selection.
+        Updated (v28): Requires cli:model format for granular model selection.
 
         Args:
-            model_key: Model key in "cli:model" format (e.g., "claude:opus")
-                       or legacy "cli" format (e.g., "claude")
+            model_key: Model key in "cli:model" format (e.g., "claude:opus").
+                       Must be a valid key from MODEL_PROFILES.
 
         Thread-safe using double-checked locking pattern.
         """
