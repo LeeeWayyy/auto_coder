@@ -29,8 +29,8 @@ Thank you for your interest in contributing to Supervisor! This document provide
 1. **Fork and Clone**:
 ```bash
 # Fork on GitHub, then clone your fork
-git clone https://github.com/YOUR_USERNAME/supervisor.git
-cd supervisor
+git clone https://github.com/YOUR_USERNAME/auto_coder.git
+cd auto_coder
 
 # Add upstream remote
 git remote add upstream https://github.com/LeeeWayyy/auto_coder.git
