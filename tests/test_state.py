@@ -17,23 +17,13 @@ Following Gemini's advice:
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
-from pathlib import Path
-
-import pytest
 
 from supervisor.core.models import (
-    Component,
     ComponentStatus,
-    Feature,
     FeatureStatus,
-    Phase,
     PhaseStatus,
-    Step,
-    StepStatus,
 )
-from supervisor.core.state import Database, Event, EventType
-
+from supervisor.core.state import Event, EventType
 
 # =============================================================================
 # Event Logging Tests

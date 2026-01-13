@@ -10,15 +10,21 @@ Commands:
 - supervisor roles: List available roles
 """
 
+from __future__ import annotations
+
 import sys
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from supervisor.core.approval import ApprovalPolicy
 
 from supervisor.core.engine import ExecutionEngine
 from supervisor.core.roles import RoleLoader
@@ -129,7 +135,7 @@ approval:
         )
 
     # Initialize database
-    db = Database(supervisor_dir / "state.db")
+    Database(supervisor_dir / "state.db")
 
     console.print(
         Panel(
@@ -250,7 +256,7 @@ def run(role: str, task: str, workflow_id: str | None, target: tuple[str, ...]) 
 
 
 # FIX (v27 - Gemini PR review): Helper functions for config loading
-def _load_approval_config(repo_path: Path) -> "ApprovalPolicy | None":
+def _load_approval_config(repo_path: Path) -> ApprovalPolicy | None:
     """Load approval policy from .supervisor/approval.yaml."""
     from supervisor.core.approval import ApprovalPolicy
 
@@ -327,9 +333,9 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int | None) ->
     console.print(f"[dim]Mode: {'TUI' if tui else 'CLI'}, Parallel: {parallel}[/dim]\n")
 
     try:
-        from supervisor.core.workflow import WorkflowCoordinator
-        from supervisor.core.interaction import InteractionBridge
         from supervisor.core.approval import ApprovalGate
+        from supervisor.core.interaction import InteractionBridge
+        from supervisor.core.workflow import WorkflowCoordinator
 
         engine = ExecutionEngine(repo_path)
 
@@ -438,7 +444,7 @@ def status(workflow_id: str | None) -> None:
         console.print("[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]")
         return
 
-    db = Database(db_path)
+    Database(db_path)
 
     # For now, just show that the database exists
     console.print(

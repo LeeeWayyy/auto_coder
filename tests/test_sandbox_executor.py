@@ -16,21 +16,19 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 from supervisor.sandbox.executor import (
     DockerNotAvailableError,
     ExecutionResult,
+    LocalExecutor,
     SandboxConfig,
     SandboxedExecutor,
     SandboxedLLMClient,
-    LocalExecutor,
     SandboxError,
 )
-
 
 # =============================================================================
 # Docker Availability Tests

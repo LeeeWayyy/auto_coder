@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from supervisor.core.gates import (
+    PACKAGE_DIR,
     CircularDependencyError,
     GateConfig,
     GateConfigError,
@@ -17,7 +18,6 @@ from supervisor.core.gates import (
     GateResult,
     GateSeverity,
     GateStatus,
-    PACKAGE_DIR,
 )
 
 
@@ -510,6 +510,7 @@ class TestGateExecutor:
     def test_run_gate_success(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
         """Test successful gate execution."""
         from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gate config
@@ -544,6 +545,7 @@ class TestGateExecutor:
     def test_run_gate_failure(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
         """Test failed gate execution."""
         from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gate config
@@ -579,6 +581,7 @@ class TestGateExecutor:
     ):
         """Test gate execution with allowed_writes patterns."""
         from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gate config with allowed_writes
@@ -622,7 +625,8 @@ class TestGateExecutor:
         self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file
     ):
         """Test that run_gates executes gates in dependency order."""
-        from unittest.mock import MagicMock, call
+        from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gates with dependencies
@@ -722,7 +726,7 @@ class TestGateExecutor:
         self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file
     ):
         """Test that allowed_writes is included in cache key."""
-        from supervisor.core.gates import GateExecutor, GateLoader, GateConfig
+        from supervisor.core.gates import GateConfig, GateExecutor, GateLoader
 
         # Create a minimal git repo
         (tmp_path / ".git").mkdir()

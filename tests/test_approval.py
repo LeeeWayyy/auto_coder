@@ -9,13 +9,10 @@ This module tests the ApprovalGate class which provides:
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 
 from supervisor.core.approval import ApprovalGate, ApprovalPolicy
-from supervisor.core.interaction import ApprovalDecision, ApprovalRequest
-from supervisor.core.state import EventType
-
+from supervisor.core.interaction import ApprovalDecision
 
 # =============================================================================
 # Risk Assessment Tests
@@ -271,7 +268,7 @@ class TestApprovalRequest:
         )
 
         # Verify event recorded
-        events = test_db.get_events("feat-123")
+        test_db.get_events("feat-123")
         # (Event types depend on implementation - check for approval-related events)
 
 

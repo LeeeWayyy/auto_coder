@@ -4,8 +4,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from supervisor.core.interaction import ApprovalDecision, ApprovalRequest, InteractionBridge
 from supervisor.core.state import Database, Event, EventType
-from supervisor.core.interaction import ApprovalRequest, ApprovalDecision, InteractionBridge
 
 logger = logging.getLogger(__name__)
 

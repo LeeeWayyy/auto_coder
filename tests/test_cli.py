@@ -13,9 +13,8 @@ Tests all supervisor CLI commands using Click's CliRunner:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -258,8 +257,7 @@ class TestWorkflowCommand:
         mocker.patch("supervisor.cli._load_approval_config", return_value=None)
 
         # Mock ExecutionEngine to avoid git repo requirement
-        mock_engine = mocker.patch("supervisor.cli.ExecutionEngine")
-        mock_engine_instance = mock_engine.return_value
+        mocker.patch("supervisor.cli.ExecutionEngine")
 
         mock_coordinator = mocker.patch("supervisor.core.workflow.WorkflowCoordinator")
         mock_instance = mock_coordinator.return_value
@@ -327,8 +325,8 @@ class TestMetricsCommand:
 
     def test_metrics_command_basic(self, cli_runner, mocker):
         """Metrics command displays performance data."""
-        mock_db = mocker.patch("supervisor.cli.Database")
-        mock_aggregator = mocker.patch("supervisor.cli.MetricsAggregator")
+        mocker.patch("supervisor.cli.Database")
+        mocker.patch("supervisor.cli.MetricsAggregator")
         mock_dashboard = mocker.patch("supervisor.cli.MetricsDashboard")
         mock_dashboard_instance = mock_dashboard.return_value
 
@@ -370,8 +368,7 @@ class TestMetricsCommand:
         """Metrics command shows message for unimplemented live mode."""
         mocker.patch("supervisor.cli.Database")
         mocker.patch("supervisor.cli.MetricsAggregator")
-        mock_dashboard = mocker.patch("supervisor.cli.MetricsDashboard")
-        mock_dashboard_instance = mock_dashboard.return_value
+        mocker.patch("supervisor.cli.MetricsDashboard")
 
         with cli_runner.isolated_filesystem():
             Path(".supervisor").mkdir()

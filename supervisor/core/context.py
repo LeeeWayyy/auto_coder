@@ -13,7 +13,6 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from supervisor.core.roles import RoleConfig
 
-
 # SECURITY: Allowlist of valid template names (shipped with package)
 ALLOWED_TEMPLATES = frozenset(
     [
@@ -375,7 +374,7 @@ class ContextPacker:
 
                 content = validated.read_text()
                 parts.append(f"### {file_path}\n\n```\n{content}\n```\n")
-            except (IOError, OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError):
                 parts.append(f"### {file_path}\n\n[Could not read file]\n")
 
         return "\n".join(parts) if len(parts) > 1 else ""
@@ -443,7 +442,7 @@ class ContextPacker:
             rel_path = file_path.relative_to(self.repo_path)
             parts.append(f"### {rel_path}\n\n```\n{content}\n```\n")
             return len(content.encode("utf-8"))
-        except (IOError, OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError):
             return 0  # Skip unreadable files
 
     def _truncate_lines(self, text: str, max_lines: int) -> str:

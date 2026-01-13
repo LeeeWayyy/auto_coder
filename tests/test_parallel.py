@@ -3,15 +3,13 @@
 Tests multi-model parallel review and result aggregation.
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from dataclasses import dataclass
+from unittest.mock import MagicMock
 
+import pytest
 from pydantic import BaseModel
 
 from supervisor.core.parallel import (
     AggregatedReviewResult,
-    ParallelExecutionError,
     ParallelReviewer,
     ReviewResult,
 )

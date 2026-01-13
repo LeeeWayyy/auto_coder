@@ -136,7 +136,6 @@ class DAGScheduler:
             DependencyNotFoundError: If a dependency references non-existent component
             ValueError: If any component file path resolves outside repo root
         """
-        from supervisor.core.models import Component, Phase
 
         # Load data
         phases = self.db.get_phases(feature_id)
@@ -149,7 +148,7 @@ class DAGScheduler:
         # FIX (Codex v4): Normalize file paths for conflict detection
         # Ensures ./a.py and a.py are detected as the same file
         self._component_files = {
-            c.id: set(self._normalize_path(f) for f in c.files) for c in all_components
+            c.id: {self._normalize_path(f) for f in c.files} for c in all_components
         }
 
         # Build component-to-phase mapping
@@ -409,7 +408,6 @@ class DAGScheduler:
         Used by ApprovalGate to persist SKIP flags for later audit.
         Metadata is stored as JSON in the component's metadata field via event.
         """
-        import json
 
         with self._status_lock:
             # Store via event for audit trail
@@ -510,9 +508,7 @@ class DAGScheduler:
             return False  # Still working, not blocked
 
         # Check if there are pending components (blocked by failed deps)
-        has_pending = any(
-            comp.status == ComponentStatus.PENDING for comp in self._components.values()
-        )
+        any(comp.status == ComponentStatus.PENDING for comp in self._components.values())
 
         # FIX: If no pending and no ready and no in_progress, we're blocked
         # This includes the "all FAILED" case

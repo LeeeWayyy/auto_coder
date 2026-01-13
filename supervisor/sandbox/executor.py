@@ -8,6 +8,7 @@ SECURITY: Docker is REQUIRED. LocalExecutor is only for unit tests.
 """
 
 import atexit
+import contextlib
 import os
 import re
 import shlex
@@ -324,14 +325,12 @@ class ContainerRegistry:
         """Kill all tracked containers."""
         with self._lock:
             for container_id in list(self._containers):
-                try:
+                with contextlib.suppress(Exception):
                     subprocess.run(
                         ["docker", "kill", container_id],
                         capture_output=True,
                         timeout=5,
                     )
-                except Exception:
-                    pass
             self._containers.clear()
 
     def _signal_handler(self, signum: int, frame: Any) -> None:

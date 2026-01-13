@@ -1,15 +1,12 @@
 """Tests for role configuration loading and validation."""
 
-import json
-import tempfile
-from pathlib import Path
 
 import pytest
 import yaml
 
 from supervisor.core.roles import (
-    RoleCycleError,
     RoleConfig,
+    RoleCycleError,
     RoleLoader,
     RoleNotFoundError,
     RoleValidationError,

@@ -14,8 +14,8 @@ from supervisor.core.routing import (
     ModelProfile,
     ModelRouter,
     create_router,
-    get_cli_and_model_id,
     get_capability_for_role,
+    get_cli_and_model_id,
     parse_model_key,
     register_model,
     set_role_model,
@@ -208,7 +208,7 @@ class TestModelRouterCapabilitySelection:
         capable = router.get_models_for_capability(ModelCapability.CODE_REVIEW)
 
         assert len(capable) > 0
-        for key, profile in capable:
+        for _key, profile in capable:
             assert ModelCapability.CODE_REVIEW in profile.strengths
 
     def test_get_models_sorted_by_quality(self):

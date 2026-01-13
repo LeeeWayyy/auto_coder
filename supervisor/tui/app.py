@@ -16,8 +16,7 @@ USES EXISTING:
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Callable
+from collections.abc import Callable
 
 from rich.console import Console
 from rich.layout import Layout
@@ -27,9 +26,9 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.tree import Tree
 
-from supervisor.core.state import Database
-from supervisor.core.models import ComponentStatus, FeatureStatus
 from supervisor.core.interaction import ApprovalDecision, ApprovalRequest, InteractionBridge
+from supervisor.core.models import ComponentStatus
+from supervisor.core.state import Database
 
 logger = logging.getLogger(__name__)
 

@@ -18,7 +18,7 @@ import random
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from supervisor.metrics.aggregator import MetricsAggregator
 

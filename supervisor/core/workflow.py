@@ -3,12 +3,12 @@
 Phase 4 deliverable 4.4: Full workflow orchestration from feature to completion.
 """
 
+import contextlib
 import logging
 import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError, as_completed
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,22 +24,21 @@ from supervisor.core.models import (
     PhaseStatus,
 )
 from supervisor.core.routing import (
-    ModelRouter,
-    create_router,
     AdaptiveConfig,
+    create_router,
     get_capability_for_role,
 )
 from supervisor.core.scheduler import (
     DAGScheduler,
     WorkflowBlockedError,
 )
-from supervisor.core.state import Database, Event, EventType
+from supervisor.core.state import Database
 from supervisor.core.utils import normalize_repo_path
 
 if TYPE_CHECKING:
+    from supervisor.core.approval import ApprovalGate
     from supervisor.core.engine import ExecutionEngine
     from supervisor.core.interaction import InteractionBridge
-    from supervisor.core.approval import ApprovalGate
 
 logger = logging.getLogger(__name__)
 
@@ -644,7 +643,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         self._scheduler.update_component_status(
                             comp.id,
                             ComponentStatus.FAILED,
-                            error=f"Component timed out",
+                            error="Component timed out",
                             workflow_id=feature_id,
                         )
                         logger.error(f"Component '{comp.id}' timed out")
@@ -749,10 +748,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         finally:
             # Wait for any remaining active futures to complete
             for future in active_futures:
-                try:
+                with contextlib.suppress(Exception):
                     future.result(timeout=60)
-                except Exception:
-                    pass
             # FIX (Codex review v4): Also wait for timed-out futures before shutdown
             # This ensures their threads finish and file locks can be released
             for future in timed_out_futures:
@@ -1170,6 +1167,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         Returns False if workflow should halt (REJECT or EDIT).
         """
         from datetime import datetime
+
         from supervisor.core.interaction import ApprovalDecision
 
         if not self.approval_gate:

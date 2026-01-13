@@ -11,10 +11,11 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Generator
+from typing import Any
 
 try:
     from filelock import FileLock
@@ -31,9 +32,9 @@ class FileLockRequiredError(Exception):
     pass
 
 
-from supervisor.core.models import Step, StepStatus
+from supervisor.core.models import Step
 from supervisor.core.state import Database, Event, EventType
-from supervisor.sandbox.executor import ExecutionResult, SandboxedExecutor
+from supervisor.sandbox.executor import SandboxedExecutor
 
 
 class WorktreeError(Exception):

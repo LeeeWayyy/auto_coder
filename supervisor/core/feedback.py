@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Callable, Protocol
+from collections.abc import Callable
+from typing import Protocol
 
 from supervisor.core.gates import GateResult
 

@@ -18,19 +18,15 @@ import pytest
 
 from supervisor.core.engine import (
     CircuitBreaker,
-    CircuitOpenError,
     EnhancedCircuitBreaker,
     ErrorAction,
     ErrorCategory,
     ErrorClassifier,
     ExecutionEngine,
-    RetryExhaustedError,
     RetryPolicy,
 )
-from supervisor.core.models import StepStatus
-from supervisor.core.state import Database, Event, EventType
+from supervisor.core.state import EventType
 from supervisor.sandbox.executor import ExecutionResult
-
 
 # =============================================================================
 # RetryPolicy Tests
@@ -525,7 +521,7 @@ class TestExecutionEngine:
         mock_workspace_instance.worktree_path = Path("/tmp/worktree")
 
         # Should succeed after retry
-        result = engine.run_role(
+        engine.run_role(
             role_name="implementer",
             task_description="Test task",
             workflow_id="test-wf",
@@ -554,7 +550,7 @@ class TestExecutionEngine:
             stderr="Connection failed",
         )
 
-        mock_workspace = mocker.patch("supervisor.core.engine.IsolatedWorkspace")
+        mocker.patch("supervisor.core.engine.IsolatedWorkspace")
 
         # Should fail after max_retries
         with pytest.raises(Exception):  # RetryExhaustedError or similar

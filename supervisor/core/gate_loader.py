@@ -10,12 +10,12 @@ from pathlib import Path
 import yaml
 
 from supervisor.core.gate_models import (
+    PACKAGE_DIR,
     CircularDependencyError,
     GateConfig,
     GateConfigError,
     GateNotFoundError,
     GateSeverity,
-    PACKAGE_DIR,
 )
 
 
@@ -258,11 +258,11 @@ class GateLoader:
                     return idx
                 break
             if arg.startswith("-"):
-                if arg in self.ENV_FLAGS_WITH_ARGS or any(
-                    arg.startswith(f + "=") for f in self.ENV_FLAGS_WITH_ARGS
-                ):
-                    if "=" not in arg:
-                        skip_next = True
+                if (
+                    arg in self.ENV_FLAGS_WITH_ARGS
+                    or any(arg.startswith(f + "=") for f in self.ENV_FLAGS_WITH_ARGS)
+                ) and "=" not in arg:
+                    skip_next = True
                 continue
             is_assign, _ = self._is_env_assignment(arg)
             if is_assign:
@@ -293,11 +293,11 @@ class GateLoader:
                 past_options = True
                 continue
             if not past_options and arg.startswith("-"):
-                if arg in self.ENV_FLAGS_WITH_ARGS or any(
-                    arg.startswith(f + "=") for f in self.ENV_FLAGS_WITH_ARGS
-                ):
-                    if "=" not in arg:
-                        skip_next = True
+                if (
+                    arg in self.ENV_FLAGS_WITH_ARGS
+                    or any(arg.startswith(f + "=") for f in self.ENV_FLAGS_WITH_ARGS)
+                ) and "=" not in arg:
+                    skip_next = True
                 continue
             is_assign, key = self._is_env_assignment(arg)
             if is_assign and key:

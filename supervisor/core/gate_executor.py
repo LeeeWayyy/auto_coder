@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import functools
 import hashlib
@@ -112,9 +113,9 @@ class GateExecutor:
 
     def __init__(
         self,
-        executor: "SandboxedExecutor",
-        gate_loader: "GateLoader",
-        db: "Database",
+        executor: SandboxedExecutor,
+        gate_loader: GateLoader,
+        db: Database,
     ) -> None:
         self.executor = executor
         self.gate_loader = gate_loader
@@ -296,7 +297,7 @@ class GateExecutor:
                         for chunk in iter(lambda: f.read(8192), b""):
                             file_hasher.update(chunk)
                     file_hash = file_hasher.hexdigest()[:32]
-                    content_hasher.update(f"{filename}:{file_hash}\n".encode("utf-8"))
+                    content_hasher.update(f"{filename}:{file_hash}\n".encode())
 
             # Include cache_inputs: additional files/patterns that affect the gate
             if config.cache_inputs:
@@ -345,11 +346,11 @@ class GateExecutor:
                         for chunk in iter(lambda: f.read(8192), b""):
                             file_hasher.update(chunk)
                     file_hash = file_hasher.hexdigest()[:32]
-                    content_hasher.update(f"cache_input:{rel_path}:{file_hash}\n".encode("utf-8"))
+                    content_hasher.update(f"cache_input:{rel_path}:{file_hash}\n".encode())
 
             executor_image_id = getattr(self.executor, "image_id", None)
             if executor_image_id:
-                content_hasher.update(f"image:{executor_image_id}".encode("utf-8"))
+                content_hasher.update(f"image:{executor_image_id}".encode())
 
             return content_hasher.hexdigest()[:32]
         except self.GateTimeout:
@@ -895,10 +896,8 @@ class GateExecutor:
                             oldest.resolve().relative_to(resolved_worktree)
                         except ValueError:
                             continue
-                        try:
+                        with contextlib.suppress(OSError):
                             oldest.unlink()
-                        except OSError:
-                            pass
                 except OSError:
                     pass
 
@@ -909,7 +908,7 @@ class GateExecutor:
                 if len(output_bytes) > max_bytes:
                     marker = (
                         f"...[artifact truncated to {GateResult.ARTIFACT_MAX_SIZE} bytes]...\n"
-                    ).encode("utf-8")
+                    ).encode()
                     tail_budget = max_bytes - len(marker)
                     tail = output_bytes[-tail_budget:] if tail_budget > 0 else b""
                     redacted = marker.decode("utf-8") + tail.decode("utf-8", errors="replace")
@@ -943,10 +942,8 @@ class GateExecutor:
                     os.replace(temp_path, str(artifact_file))
                     return str(artifact_file)
                 except Exception:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(temp_path)
-                    except OSError:
-                        pass
                     raise
         except Exception as e:
             logger.warning(f"Failed to store artifact for gate '{gate_name}': {e}")

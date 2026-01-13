@@ -10,14 +10,11 @@ Note: MetricsCollector was deprecated - use Database.record_metric directly.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from supervisor.core.state import Database
 from supervisor.metrics.aggregator import MetricsAggregator
 from supervisor.metrics.dashboard import MetricsDashboard
-
 
 # =============================================================================
 # Direct Metrics Recording Tests

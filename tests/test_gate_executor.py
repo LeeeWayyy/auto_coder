@@ -9,22 +9,16 @@ This module tests the GateExecutor class which provides:
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch
-
 import pytest
 
 from supervisor.core.gate_executor import GateExecutor
 from supervisor.core.gate_models import (
     GateConfig,
-    GateResult,
-    GateStatus,
-    GateSeverity,
     GateFailAction,
+    GateResult,
+    GateSeverity,
+    GateStatus,
 )
-from supervisor.sandbox.executor import ExecutionResult
-
 
 # =============================================================================
 # Environment Filtering Tests (Security)

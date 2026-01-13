@@ -16,15 +16,14 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any, Generator
-from unittest.mock import MagicMock, Mock
+from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import yaml
 
 from supervisor.core.roles import RoleConfig
 from supervisor.core.state import Database
-
 
 # =============================================================================
 # Repository and File System Fixtures

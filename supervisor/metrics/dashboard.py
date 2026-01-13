@@ -1,10 +1,8 @@
 """Rich-based metrics dashboard."""
 
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from rich.layout import Layout
-from rich.live import Live
+from rich.table import Table
 
 from supervisor.metrics.aggregator import MetricsAggregator
 

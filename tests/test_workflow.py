@@ -3,28 +3,27 @@
 Tests Feature->Phase->Component workflow orchestration.
 """
 
-import pytest
+import contextlib
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch, Mock
+from unittest.mock import MagicMock
 
+import pytest
 from pydantic import BaseModel
 
 from supervisor.core.models import (
     ComponentStatus,
     FeatureStatus,
-    PhaseStatus,
 )
-from supervisor.core.state import Database, Event, EventType
+from supervisor.core.state import Database
 from supervisor.core.workflow import (
+    CancellationError,
     ComponentPlan,
     PhasePlan,
     PlannerOutput,
     WorkflowCoordinator,
     WorkflowError,
-    WorkflowBlockedError,
-    CancellationError,
 )
 
 
@@ -581,9 +580,7 @@ class TestWorkflowRollback:
         )
 
         # Mock rollback method to track calls
-        mock_rollback = mocker.patch.object(
-            coordinator, "_rollback_worktree_changes", return_value=True
-        )
+        mocker.patch.object(coordinator, "_rollback_worktree_changes", return_value=True)
 
         # Mock execution to fail
         mocker.patch.object(
@@ -591,10 +588,8 @@ class TestWorkflowRollback:
         )
 
         # Run implementation
-        try:
+        with contextlib.suppress(Exception):
             coordinator.run_implementation(feature.id, parallel=False)
-        except Exception:
-            pass
 
         # Verify rollback was called (implementation-dependent)
         # The rollback might be called within _execute_component's exception handler

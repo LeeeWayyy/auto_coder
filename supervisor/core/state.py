@@ -6,11 +6,12 @@ Other tables are read models (projections) rebuilt from events.
 
 import json
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -71,7 +72,7 @@ class EventType(str, Enum):
 
 def _utc_now() -> datetime:
     """Get current UTC time (timezone-aware)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class _SafeJSONEncoder(json.JSONEncoder):
@@ -326,7 +327,7 @@ class Database:
             query += " ORDER BY timestamp DESC"
             cursor = conn.execute(query, params)
             columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
 
     def _verify_projection_sync(self) -> None:
         """Verify projections are in sync with event log.

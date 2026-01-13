@@ -6,7 +6,6 @@ Cannot use db.execute() as it doesn't exist.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import Any
 
 from supervisor.core.state import Database

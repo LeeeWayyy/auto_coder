@@ -13,24 +13,23 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from supervisor.core.models import Step
+from supervisor.core.state import EventType
 from supervisor.core.workspace import (
-    IsolatedWorkspace,
-    WorktreeError,
-    GateFailedError,
     ApplyError,
     FileLockRequiredError,
+    GateFailedError,
+    IsolatedWorkspace,
+    WorktreeError,
+    _reject_symlinks_ignore,
     _sanitize_step_id,
     _truncate_output,
-    _reject_symlinks_ignore,
 )
-from supervisor.core.models import Step, StepStatus
-from supervisor.core.state import Database, Event, EventType
-
 
 # =============================================================================
 # Utility Function Tests
@@ -151,12 +150,17 @@ class TestIsolatedWorkspaceInit:
 
     def test_creates_supervisor_directory(self, repo_with_git, test_db, mock_sandbox_executor):
         """Initialization creates .supervisor directory if missing."""
-        (repo_with_git / ".supervisor").rmdir()
+        import shutil
 
-        workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
+        supervisor_dir = repo_with_git / ".supervisor"
+        if supervisor_dir.exists():
+            shutil.rmtree(supervisor_dir)
+
+        IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
         assert (repo_with_git / ".supervisor").exists()
-        assert (repo_with_git / ".supervisor" / ".apply.lock").exists()
+        # Note: FileLock creates the .apply.lock file lazily on first acquire,
+        # not during IsolatedWorkspace construction
 
     def test_validates_git_repo(self, tmp_path, test_db, mock_sandbox_executor):
         """Initialization validates that repo_path is a git repository."""
@@ -172,7 +176,7 @@ class TestIsolatedWorkspaceInit:
         stale_worktree.mkdir(parents=True)
         (stale_worktree / "marker.txt").touch()
 
-        workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
+        IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
         # Stale worktree should be cleaned up
         # Note: Actual cleanup logic may vary, just verify workspace initializes
@@ -222,7 +226,7 @@ class TestWorktreeCreation:
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
         # Mock subprocess to simulate timeout
-        mock_run = mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30))
+        mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30))
 
         with pytest.raises((WorktreeError, subprocess.TimeoutExpired)):
             workspace._create_worktree("step-timeout")
@@ -355,10 +359,10 @@ class TestGateExecution:
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
         worktree_path = workspace._create_worktree("step-gate-test")
 
-        # Mock executor to return success
+        # Mock executor to return success (uses .run() not .execute())
         from supervisor.sandbox.executor import ExecutionResult
 
-        mock_sandbox_executor.execute.return_value = ExecutionResult(
+        mock_sandbox_executor.run.return_value = ExecutionResult(
             returncode=0, stdout="All tests passed", stderr="", timed_out=False
         )
 
@@ -374,7 +378,7 @@ class TestGateExecution:
 
         from supervisor.sandbox.executor import ExecutionResult
 
-        mock_sandbox_executor.execute.return_value = ExecutionResult(
+        mock_sandbox_executor.run.return_value = ExecutionResult(
             returncode=1, stdout="", stderr="Test failed: 3 errors", timed_out=False
         )
 
@@ -393,15 +397,16 @@ class TestGateExecution:
 
         from supervisor.sandbox.executor import ExecutionResult
 
-        # Gate command should see worktree files
-        mock_sandbox_executor.execute.return_value = ExecutionResult(
+        # Gate command should see worktree files (uses .run() not .execute())
+        mock_sandbox_executor.run.return_value = ExecutionResult(
             returncode=0, stdout="", stderr="", timed_out=False
         )
 
         workspace._run_gate("test", worktree_path)
 
         # Verify executor was called with worktree path
-        call_args = mock_sandbox_executor.execute.call_args
+        call_args = mock_sandbox_executor.run.call_args
+        assert call_args is not None
         assert worktree_path in call_args[1].values() or str(worktree_path) in str(call_args)
 
 
@@ -434,8 +439,8 @@ class TestAtomicApply:
         """Apply detects HEAD conflicts and raises ApplyError."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
-        # Mock get_current_head to return different HEAD
-        mocker.patch.object(workspace, "_get_current_head", return_value="new-commit-hash")
+        # Mock _get_head_sha to return different HEAD
+        mocker.patch.object(workspace, "_get_head_sha", return_value="new-commit-hash")
 
         def worker_fn(step: Step, worktree_path: Path) -> dict[str, Any]:
             (worktree_path / "output.txt").write_text("content")
@@ -443,8 +448,8 @@ class TestAtomicApply:
 
         sample_step.gates = []
 
-        # Apply should detect HEAD moved and raise ApplyError
-        with pytest.raises(ApplyError, match="HEAD has moved"):
+        # Apply should detect HEAD changed and raise ApplyError
+        with pytest.raises(ApplyError, match="HEAD has changed"):
             workspace.execute_step(sample_step, worker_fn, gates=[])
 
 
@@ -466,7 +471,7 @@ class TestSecurityValidation:
 
         sample_step.gates = []
 
-        with pytest.raises(WorktreeError, match="Symlinks not allowed"):
+        with pytest.raises(ApplyError, match="Symlink.*not allowed"):
             workspace.execute_step(sample_step, worker_fn, gates=[])
 
     def test_path_traversal_prevention_in_step_id(
@@ -499,7 +504,7 @@ class TestWorktreeCleanup:
         stale_dir.mkdir(parents=True)
         (stale_dir / "marker.txt").touch()
 
-        workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
+        IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
         # Cleanup should have run during __init__
         # Verify cleanup logic (may vary based on implementation)
@@ -512,7 +517,7 @@ class TestWorktreeCleanup:
         worktree_path = workspace._create_worktree("step-active")
 
         # Re-initialize workspace (triggers cleanup)
-        workspace2 = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
+        IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
         # Active worktree should still exist
         assert worktree_path.exists()
@@ -526,7 +531,7 @@ class TestWorktreeCleanup:
             mock_lock = MagicMock()
             mock_filelock_class.return_value = mock_lock
 
-            workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
+            IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
             # Verify cleanup lock was created and acquired
             # (actual verification depends on implementation details)

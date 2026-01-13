@@ -1,14 +1,14 @@
 """Core modules for the Supervisor orchestrator."""
 
-from supervisor.core.state import Database, Event, EventType
 from supervisor.core.models import (
+    Component,
     Feature,
     Phase,
-    Component,
     Step,
     StepStatus,
     WorkflowState,
 )
+from supervisor.core.state import Database, Event, EventType
 
 __all__ = [
     "Database",

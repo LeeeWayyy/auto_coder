@@ -9,15 +9,23 @@ Coordinates:
 - State updates
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from supervisor.core.models import Feature
+    from supervisor.core.parallel import AggregatedReviewResult
+    from supervisor.core.workflow import WorkflowCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +42,14 @@ from supervisor.core.gates import (
     GateSeverity,
     GateStatus,
 )
-from supervisor.core.models import ErrorAction, ErrorCategory, Step, StepStatus
+from supervisor.core.models import ErrorAction, ErrorCategory, Step
 from supervisor.core.parser import (
+    ROLE_SCHEMAS,
     GenericOutput,
     InvalidOutputError,
     ParsingError,
-    ROLE_SCHEMAS,
     get_adapter,
-    parse_role_output,
+    parse_role_output,  # noqa: F401 - re-exported for test mocking
 )
 from supervisor.core.roles import RoleConfig, RoleLoader
 from supervisor.core.routing import _infer_task_type, get_cli_and_model_id
@@ -50,13 +58,10 @@ from supervisor.core.workspace import (
     ApplyError,
     GateFailedError,
     IsolatedWorkspace,
-    _truncate_output,
 )
 from supervisor.sandbox.executor import (
-    DockerNotAvailableError,
     ExecutionResult,
     SandboxConfig,
-    SandboxedExecutor,
     SandboxedLLMClient,
     get_sandboxed_executor,
     require_docker,
@@ -83,6 +88,8 @@ class CircuitOpenError(Exception):
 
 # FIX (v27 - Gemini PR review): Import from models to avoid circular imports
 # Re-export for backwards compatibility
+import contextlib
+
 from supervisor.core.models import CancellationError  # noqa: F401
 
 
@@ -717,7 +724,7 @@ class ExecutionEngine:
         role_name: str,
         output: BaseModel,
         ctx: Any,  # IsolatedContext
-        cancellation_check: "Callable[[], bool] | None",
+        cancellation_check: Callable[[], bool] | None,
     ) -> list[str]:
         """Apply changes to main tree and record success.
 
@@ -783,7 +790,7 @@ class ExecutionEngine:
                 f"Changed files: {changed_files}. Manual remediation may be required.",
                 file=sys.stderr,
             )
-            try:
+            with contextlib.suppress(Exception):
                 self.db.append_event(
                     Event(
                         workflow_id=workflow_id,
@@ -797,8 +804,6 @@ class ExecutionEngine:
                         },
                     )
                 )
-            except Exception:
-                pass
             raise
 
         return changed_files
@@ -814,7 +819,7 @@ class ExecutionEngine:
         retry_policy: RetryPolicy | None = None,
         gates: list[str] | None = None,
         cli_override: str | None = None,
-        cancellation_check: "Callable[[], bool] | None" = None,
+        cancellation_check: Callable[[], bool] | None = None,
     ) -> BaseModel:
         """Run a role with full context packing, isolation, and error handling.
 
@@ -954,7 +959,7 @@ class ExecutionEngine:
                                 raise GateFailedError(gate_result.gate_name, gate_result.output)
 
                         # FIX (v27 - Gemini PR review): Use helper for apply and finalize
-                        changed_files = self._apply_and_finalize_step(
+                        self._apply_and_finalize_step(
                             workflow_id,
                             step_id,
                             role_name,
@@ -1238,7 +1243,7 @@ class ExecutionEngine:
         approval_gate: Any = None,  # Type hint looser to avoid cyclic import
         interaction_bridge: Any = None,
         adaptive_config: dict[str, Any] | None = None,
-    ) -> "WorkflowCoordinator":
+    ) -> WorkflowCoordinator:
         """Create a WorkflowCoordinator for multi-model hierarchical workflows.
 
         Phase 4 integration point for Feature->Phase->Component execution.
@@ -1281,7 +1286,7 @@ class ExecutionEngine:
         prefer_cost: bool = False,
         max_stall_seconds: float = 600.0,
         component_timeout: float = 300.0,
-    ) -> "Feature":
+    ) -> Feature:
         """Execute all components of a feature in dependency order.
 
         Phase 4 convenience method that creates a WorkflowCoordinator
@@ -1312,7 +1317,6 @@ class ExecutionEngine:
         Raises:
             WorkflowBlockedError: If no progress can be made
         """
-        from supervisor.core.models import Feature
 
         coordinator = self.create_workflow_coordinator(
             max_parallel_workers=max_parallel_workers,
@@ -1333,7 +1337,7 @@ class ExecutionEngine:
         approval_policy: str = "ALL_APPROVED",
         timeout: float = 300.0,
         max_workers: int = 3,
-    ) -> "AggregatedReviewResult":
+    ) -> AggregatedReviewResult:
         """Run multiple reviewers in parallel and aggregate results.
 
         Phase 4 convenience method for parallel multi-model review.
@@ -1351,7 +1355,7 @@ class ExecutionEngine:
         Returns:
             AggregatedReviewResult with individual results and approval decision
         """
-        from supervisor.core.parallel import AggregatedReviewResult, ParallelReviewer
+        from supervisor.core.parallel import ParallelReviewer
 
         reviewer = ParallelReviewer(
             engine=self,
