@@ -1087,7 +1087,7 @@ class ExecutionEngine:
             raise e
 
         finally:
-            if hasattr(self, "db") and self.db is not None:
+            if self.db is not None:
                 duration = time.time() - start_time
                 task_type = _infer_task_type(role_name)
                 try:

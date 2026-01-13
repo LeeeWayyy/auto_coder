@@ -3,6 +3,8 @@
 Phase 4 deliverable 4.1: Dependency-aware scheduling of components.
 """
 
+from __future__ import annotations
+
 import logging
 import threading
 from collections import deque
@@ -244,7 +246,7 @@ class DAGScheduler:
                 f"Check depends_on configuration for these components."
             )
 
-    def get_ready_components(self) -> list["Component"]:
+    def get_ready_components(self) -> list[Component]:
         """Get components ready for execution (all dependencies satisfied).
 
         A component is ready when:
@@ -284,7 +286,7 @@ class DAGScheduler:
 
             return ready
 
-    def get_parallel_batches(self, ready: list["Component"]) -> list[list["Component"]]:
+    def get_parallel_batches(self, ready: list[Component]) -> list[list[Component]]:
         """Group ready components into conflict-free parallel batches.
 
         Components that modify the same files cannot run in parallel.
@@ -338,7 +340,7 @@ class DAGScheduler:
     def update_component_status(
         self,
         component_id: str,
-        status: "ComponentStatus",
+        status: ComponentStatus,
         output: str | None = None,
         error: str | None = None,
         workflow_id: str | None = None,
@@ -436,7 +438,7 @@ class DAGScheduler:
                 comp.status == ComponentStatus.COMPLETED for comp in self._components.values()
             )
 
-    def get_component(self, component_id: str) -> "Component | None":
+    def get_component(self, component_id: str) -> Component | None:
         """Get a component by ID from the scheduler's cache.
 
         FIX (PR review): Public method to avoid direct access to _components dict.

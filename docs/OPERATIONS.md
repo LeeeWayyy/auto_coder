@@ -943,8 +943,8 @@ For issues not covered in this guide:
 1. Check logs: `.supervisor/logs/` or `docker logs`
 2. Query database: `sqlite3 .supervisor/state.db`
 3. Review metrics: `supervisor metrics`
-4. Check GitHub issues: https://github.com/your-org/supervisor/issues
-5. Contact support: support@your-org.com
+4. Check GitHub issues: https://github.com/LeeeWayyy/auto_coder/issues
+5. Check GitHub discussions: https://github.com/LeeeWayyy/auto_coder/discussions
 
 ---
 
