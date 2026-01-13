@@ -99,11 +99,9 @@ class TestEgressVerification:
         """Egress verification returns True, False, or None."""
         from supervisor.sandbox.executor import _verify_egress_rules
 
-        # Mock subprocess to simulate network not found
-        mocker.patch(
-            "subprocess.run",
-            side_effect=subprocess.CalledProcessError(1, "docker", stderr=b"not found"),
-        )
+        # Mock subprocess to simulate network not found (non-zero returncode)
+        mock_result = Mock(returncode=1, stdout="", stderr="network not found")
+        mocker.patch("subprocess.run", return_value=mock_result)
 
         result = _verify_egress_rules("test-network", ["api.anthropic.com:443"])
 
@@ -206,8 +204,8 @@ class TestSandboxedLLMClient:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = Mock(
             returncode=0,
-            stdout=b"AI response output",
-            stderr=b"",
+            stdout="AI response output",  # text=True returns str, not bytes
+            stderr="",
         )
 
         config = SandboxConfig(
@@ -246,8 +244,8 @@ class TestSandboxedExecutor:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = Mock(
             returncode=0,
-            stdout=b"Command output",
-            stderr=b"",
+            stdout="Command output",  # text=True returns str, not bytes
+            stderr="",
         )
 
         config = SandboxConfig(
@@ -352,6 +350,14 @@ class TestSandboxDockerIntegration:
             _validate_docker()
         except DockerNotAvailableError:
             pytest.skip("Docker not available")
+
+        # Check if the executor image exists
+        image_check = subprocess.run(
+            ["docker", "image", "inspect", "supervisor-executor:latest"],
+            capture_output=True,
+        )
+        if image_check.returncode != 0:
+            pytest.skip("Docker image 'supervisor-executor:latest' not available")
 
         config = SandboxConfig(
             allowed_workdir_roots=[str(temp_repo.parent)],

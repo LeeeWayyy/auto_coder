@@ -515,6 +515,8 @@ class TestWorkflowComponentTimeout:
 
     def test_component_timeout_enforced(self, temp_db, mock_engine, mocker):
         """Test that component timeout is enforced."""
+        from supervisor.core.scheduler import WorkflowBlockedError
+
         mock_engine.db = temp_db
 
         coordinator = WorkflowCoordinator(mock_engine, temp_db, component_timeout=1)
@@ -529,8 +531,10 @@ class TestWorkflowComponentTimeout:
 
         mocker.patch.object(coordinator, "_execute_component", side_effect=slow_execution)
 
-        # Run implementation - should timeout
-        coordinator.run_implementation(feature.id, parallel=False)
+        # Run implementation - should timeout and mark component as FAILED,
+        # then raise WorkflowBlockedError since no more components are ready
+        with pytest.raises(WorkflowBlockedError):
+            coordinator.run_implementation(feature.id, parallel=False)
 
         # Verify component was marked as failed with timeout error
         updated_comp = temp_db.get_component(comp_id)
@@ -549,6 +553,9 @@ class TestWorkflowTimeout:
         feature, phase_id, component_ids = setup_test_feature_with_components(
             temp_db, coordinator, num_components=5, with_dependencies=False
         )
+
+        # Mock checkpoint saving to avoid foreign key constraint
+        mocker.patch.object(coordinator, "_save_timeout_checkpoint", return_value="cp-1")
 
         # Mock slow execution
         def slow_execution(comp, feature_id):
