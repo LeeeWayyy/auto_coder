@@ -177,6 +177,7 @@ class TestSandboxedLLMClient:
         """SandboxedLLMClient requires cli_name parameter."""
         mocker.patch("supervisor.sandbox.executor._validate_docker")
         mocker.patch("supervisor.sandbox.executor._verify_egress_rules", return_value=True)
+        mocker.patch.object(SandboxedLLMClient, "_ensure_network_exists")
 
         config = SandboxConfig(require_docker=False, verify_egress_rules=False)
         client = SandboxedLLMClient(cli_name="claude", config=config)
@@ -187,6 +188,7 @@ class TestSandboxedLLMClient:
         """SandboxedLLMClient accepts optional model_id."""
         mocker.patch("supervisor.sandbox.executor._validate_docker")
         mocker.patch("supervisor.sandbox.executor._verify_egress_rules", return_value=True)
+        mocker.patch.object(SandboxedLLMClient, "_ensure_network_exists")
 
         config = SandboxConfig(require_docker=False, verify_egress_rules=False)
         client = SandboxedLLMClient(

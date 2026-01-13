@@ -418,14 +418,20 @@ class TestExecutionEngine:
     @pytest.fixture
     def engine(self, repo_with_git, test_db):
         """Create ExecutionEngine with test database."""
-        # Mock Docker requirement
-        with patch("supervisor.core.engine.require_docker"):
+        # Mock Docker requirement at both locations
+        with (
+            patch("supervisor.core.engine.require_docker"),
+            patch("supervisor.sandbox.executor._validate_docker"),
+        ):
             engine = ExecutionEngine(repo_with_git, db=test_db)
             return engine
 
     def test_engine_initialization(self, repo_with_git, test_db):
         """Engine initializes with correct dependencies."""
-        with patch("supervisor.core.engine.require_docker"):
+        with (
+            patch("supervisor.core.engine.require_docker"),
+            patch("supervisor.sandbox.executor._validate_docker"),
+        ):
             engine = ExecutionEngine(repo_with_git, db=test_db)
 
             assert engine.repo_path == repo_with_git
@@ -720,7 +726,10 @@ class TestExecutionEngineIntegration:
 
         from supervisor.core.workspace import WorktreeContext
 
-        with patch("supervisor.core.engine.require_docker"):
+        with (
+            patch("supervisor.core.engine.require_docker"),
+            patch("supervisor.sandbox.executor._validate_docker"),
+        ):
             engine = ExecutionEngine(repo_with_git, db=test_db)
 
         # Mock all external dependencies with proper attributes
