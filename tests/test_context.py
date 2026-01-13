@@ -1,6 +1,5 @@
 """Tests for context packing and template rendering."""
 
-
 import pytest
 
 from supervisor.core.context import ALLOWED_TEMPLATES, ContextPacker

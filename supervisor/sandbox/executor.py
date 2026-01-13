@@ -482,7 +482,7 @@ def _validate_workdir(workdir: Path, allowed_roots: list[str]) -> Path:
             continue  # Not under this root, try next
 
     raise SandboxError(
-        f"Workdir '{workdir}' is not under any allowed root. " f"Allowed roots: {allowed_roots}"
+        f"Workdir '{workdir}' is not under any allowed root. Allowed roots: {allowed_roots}"
     )
 
 

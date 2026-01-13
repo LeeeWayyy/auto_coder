@@ -1275,7 +1275,7 @@ class GateExecutor:
                             gate_name=gate_name,
                             status=GateStatus.SKIPPED,
                             output=(
-                                "SKIPPED: Dependencies had blocking failures: " f"{blocking_deps}"
+                                f"SKIPPED: Dependencies had blocking failures: {blocking_deps}"
                             ),
                             duration_seconds=0,
                             cached=False,

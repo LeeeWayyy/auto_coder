@@ -1,6 +1,5 @@
 """Tests for role configuration loading and validation."""
 
-
 import pytest
 import yaml
 

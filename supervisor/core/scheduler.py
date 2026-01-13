@@ -92,7 +92,7 @@ class DAGScheduler:
         # Reverse: node -> list of its dependencies
         self._dependencies: dict[str, list[str]] = {}
         # Component data cache
-        self._components: dict[str, "Component"] = {}
+        self._components: dict[str, Component] = {}
         # Files assigned to each component (for conflict detection) - normalized paths
         self._component_files: dict[str, set[str]] = {}
         # Build state
@@ -305,9 +305,9 @@ class DAGScheduler:
             ready = [A (files: x.py), B (files: y.py), C (files: x.py)]
             returns: [[A, B], [C]]  # A and B in parallel, then C
         """
-        batches: list[list["Component"]] = []
+        batches: list[list[Component]] = []
         scheduled_files: set[str] = set()
-        current_batch: list["Component"] = []
+        current_batch: list[Component] = []
 
         # Sort by component ID for deterministic, repeatable batching
         sorted_ready = sorted(ready, key=lambda c: c.id)

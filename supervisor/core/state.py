@@ -389,8 +389,7 @@ class Database:
             conn.rollback()
             if "database is locked" in str(e):
                 raise sqlite3.OperationalError(
-                    f"Database locked after 30s timeout. "
-                    f"Check for long-running transactions: {e}"
+                    f"Database locked after 30s timeout. Check for long-running transactions: {e}"
                 ) from e
             raise
         except Exception:

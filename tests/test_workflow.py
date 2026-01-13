@@ -83,7 +83,7 @@ def setup_test_feature_with_components(
     # Create components
     component_ids = []
     for i in range(num_components):
-        comp_id = f"{feature_id}-PH1-C{i+1}"
+        comp_id = f"{feature_id}-PH1-C{i + 1}"
         depends_on = []
         if with_dependencies and i > 0:
             # Each component depends on the previous one
@@ -92,8 +92,8 @@ def setup_test_feature_with_components(
         temp_db.create_component(
             component_id=comp_id,
             phase_id=phase_id,
-            title=f"Component {i+1}",
-            files=[f"file{i+1}.py"],
+            title=f"Component {i + 1}",
+            files=[f"file{i + 1}.py"],
             depends_on=depends_on,
             feature_id=feature_id,
         )

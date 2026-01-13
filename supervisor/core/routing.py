@@ -404,7 +404,7 @@ def parse_model_key(model_key: str) -> tuple[str, str]:
 
     # Unknown model key - raise error with helpful message
     available = ", ".join(sorted(MODEL_PROFILES.keys()))
-    raise ValueError(f"Unknown model key '{model_key}'. " f"Available models: {available}")
+    raise ValueError(f"Unknown model key '{model_key}'. Available models: {available}")
 
 
 class ModelRouter:
@@ -919,7 +919,7 @@ def set_role_model(role_name: str, model_key: str) -> None:
     """
     if model_key not in MODEL_PROFILES:
         available = ", ".join(sorted(MODEL_PROFILES.keys()))
-        raise ValueError(f"Unknown model key '{model_key}'. " f"Available models: {available}")
+        raise ValueError(f"Unknown model key '{model_key}'. Available models: {available}")
     ROLE_MODEL_MAP[role_name] = model_key
 
 

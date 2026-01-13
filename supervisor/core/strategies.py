@@ -572,7 +572,7 @@ def get_strategy(name: str) -> ContextStrategy:
         StrategyError: If strategy not found
     """
     if name not in STRATEGIES:
-        raise StrategyError(f"Unknown strategy '{name}'. " f"Available: {list(STRATEGIES.keys())}")
+        raise StrategyError(f"Unknown strategy '{name}'. Available: {list(STRATEGIES.keys())}")
     return STRATEGIES[name]()
 
 

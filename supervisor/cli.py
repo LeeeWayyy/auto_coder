@@ -449,7 +449,7 @@ def status(workflow_id: str | None) -> None:
     # For now, just show that the database exists
     console.print(
         Panel(
-            f"Database: {db_path}\n" f"Workflow ID filter: {workflow_id or 'All'}",
+            f"Database: {db_path}\nWorkflow ID filter: {workflow_id or 'All'}",
             title="Supervisor Status",
         )
     )

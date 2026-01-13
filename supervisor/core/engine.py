@@ -736,8 +736,7 @@ class ExecutionEngine:
         """
         if cancellation_check and cancellation_check():
             logger.warning(
-                f"Step '{step_id}' cancelled before applying changes - "
-                "discarding worktree changes"
+                f"Step '{step_id}' cancelled before applying changes - discarding worktree changes"
             )
             raise CancellationError(
                 f"Step '{step_id}' was cancelled (likely timeout). "

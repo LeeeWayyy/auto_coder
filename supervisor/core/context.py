@@ -855,7 +855,7 @@ class ContextPacker:
         # SECURITY: Validate template name against allowlist
         if template_name not in ALLOWED_TEMPLATES:
             raise ValueError(
-                f"Unknown template '{template_name}'. " f"Allowed: {sorted(ALLOWED_TEMPLATES)}"
+                f"Unknown template '{template_name}'. Allowed: {sorted(ALLOWED_TEMPLATES)}"
             )
 
         # jinja_env availability is checked in build_full_prompt

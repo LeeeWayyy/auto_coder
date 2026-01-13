@@ -414,8 +414,7 @@ class GateLoader:
                 )
             if "\0" in k or "=" in k:
                 raise GateConfigError(
-                    f"Gate '{gate_name}' env key '{k}' contains invalid characters "
-                    f"in {source_path}"
+                    f"Gate '{gate_name}' env key '{k}' contains invalid characters in {source_path}"
                 )
 
     def _validate_single_gate(self, gate_name: str, gate_config: dict, source_path: Path) -> None:
@@ -571,7 +570,7 @@ class GateLoader:
                 if dep not in all_gates:
                     to_process.append(dep)
 
-        in_degree: dict[str, int] = {g: 0 for g in all_gates}
+        in_degree: dict[str, int] = dict.fromkeys(all_gates, 0)
         dependents: dict[str, list[str]] = {g: [] for g in all_gates}
 
         for gate_name in all_gates:

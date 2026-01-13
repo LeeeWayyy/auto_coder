@@ -461,7 +461,7 @@ class IsolatedWorkspace:
         # SECURITY: Also validate the specific worktree path
         if worktree_path.is_symlink():
             raise WorktreeError(
-                f"SECURITY: {worktree_path} is a symlink. " "This could be an attack attempt."
+                f"SECURITY: {worktree_path} is a symlink. This could be an attack attempt."
             )
 
         # Check if worktree exists
@@ -772,7 +772,7 @@ class IsolatedWorkspace:
                     for name in dirs + files:
                         if (root_path / name).is_symlink():
                             raise WorktreeError(
-                                f"SECURITY: Symlink in worktree not allowed: " f"{root_path / name}"
+                                f"SECURITY: Symlink in worktree not allowed: {root_path / name}"
                             )
 
     def _verify_head_unchanged(self, original_head: str) -> None:

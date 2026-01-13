@@ -29,8 +29,7 @@ class BaseFileLock:
     def __init__(self, worktree_path: Path, exclusive: bool = True):
         if FileLock is None:
             raise RuntimeError(
-                "The 'filelock' package is required for locking. "
-                "Install with: pip install filelock"
+                "The 'filelock' package is required for locking. Install with: pip install filelock"
             )
         self.worktree_path = worktree_path.resolve()
         self._filelock: FileLock | None = None
