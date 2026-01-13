@@ -13,15 +13,16 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from supervisor.core.roles import RoleConfig
 
-
 # SECURITY: Allowlist of valid template names (shipped with package)
-ALLOWED_TEMPLATES = frozenset([
-    "_base.j2",
-    "_output_schema.j2",
-    "planning.j2",
-    "implement.j2",
-    "review_strict.j2",
-])
+ALLOWED_TEMPLATES = frozenset(
+    [
+        "_base.j2",
+        "_output_schema.j2",
+        "planning.j2",
+        "implement.j2",
+        "review_strict.j2",
+    ]
+)
 
 
 class ContextPackerError(Exception):
@@ -81,24 +82,24 @@ class ContextPacker:
     # Priority order for pruning (only non-protected keys are pruned)
     # Higher in list = higher priority = pruned last
     PRUNABLE_PRIORITY_ORDER = [
-        "target_file",     # High priority (last to prune)
-        "git_diff",        # Changes in progress
-        "changed_files",   # Full content of changed files
+        "target_file",  # High priority (last to prune)
+        "git_diff",  # Changes in progress
+        "changed_files",  # Full content of changed files
         "imports",
         "related",
         "files",
-        "tree",            # Low priority (first to prune)
+        "tree",  # Low priority (first to prune)
     ]
 
     # File-context specific priority order (maps from role-level keys to file-context keys)
     FILE_CONTEXT_PRIORITY = [
-        "target_file",     # High priority - the file being modified
-        "git_diff",        # Changes in progress
-        "changed_files",   # Full content of changed files
-        "imports",         # Import dependencies
-        "related",         # Related files
-        "files",           # General file context
-        "tree",            # Directory tree (low priority - first to prune)
+        "target_file",  # High priority - the file being modified
+        "git_diff",  # Changes in progress
+        "changed_files",  # Full content of changed files
+        "imports",  # Import dependencies
+        "related",  # Related files
+        "files",  # General file context
+        "tree",  # Directory tree (low priority - first to prune)
     ]
 
     # Mapping from role priority_order keys to file-context keys
@@ -200,6 +201,7 @@ class ContextPacker:
             # TemplateError covers all Jinja2 errors (TemplateSyntaxError, UndefinedError, etc.)
             # ValueError covers template allowlist violations
             import logging
+
             logging.debug(f"Template rendering failed, using legacy fallback: {e}")
             return self.pack_context(role, task_description, target_files, extra_context)
 
@@ -372,7 +374,7 @@ class ContextPacker:
 
                 content = validated.read_text()
                 parts.append(f"### {file_path}\n\n```\n{content}\n```\n")
-            except (IOError, OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError):
                 parts.append(f"### {file_path}\n\n[Could not read file]\n")
 
         return "\n".join(parts) if len(parts) > 1 else ""
@@ -440,7 +442,7 @@ class ContextPacker:
             rel_path = file_path.relative_to(self.repo_path)
             parts.append(f"### {rel_path}\n\n```\n{content}\n```\n")
             return len(content.encode("utf-8"))
-        except (IOError, OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError):
             return 0  # Skip unreadable files
 
     def _truncate_lines(self, text: str, max_lines: int) -> str:
@@ -757,7 +759,9 @@ class ContextPacker:
 
         # Add notice if files were skipped
         if skipped_large > 0 or skipped_total_limit > 0:
-            notice = f"\n[Skipped {skipped_large} files exceeding {self.MAX_FILE_SIZE // 1024}KB limit"
+            notice = (
+                f"\n[Skipped {skipped_large} files exceeding {self.MAX_FILE_SIZE // 1024}KB limit"
+            )
             if skipped_total_limit > 0:
                 notice += f", {skipped_total_limit} files due to total size limit"
             notice += "]\n"
@@ -787,20 +791,11 @@ class ContextPacker:
             return full
 
         # Separate protected and prunable keys
-        prunable_parts = {
-            k: v for k, v in context_parts.items()
-            if k not in self.PROTECTED_KEYS
-        }
+        prunable_parts = {k: v for k, v in context_parts.items() if k not in self.PROTECTED_KEYS}
 
         # Build pruning order: unlisted keys first, then listed keys in reverse priority
-        unlisted_keys = [
-            k for k in prunable_parts
-            if k not in self.PRUNABLE_PRIORITY_ORDER
-        ]
-        listed_keys = [
-            k for k in reversed(self.PRUNABLE_PRIORITY_ORDER)
-            if k in prunable_parts
-        ]
+        unlisted_keys = [k for k in prunable_parts if k not in self.PRUNABLE_PRIORITY_ORDER]
+        listed_keys = [k for k in reversed(self.PRUNABLE_PRIORITY_ORDER) if k in prunable_parts]
         prune_order = unlisted_keys + listed_keys
 
         # Progressive pruning
@@ -860,8 +855,7 @@ class ContextPacker:
         # SECURITY: Validate template name against allowlist
         if template_name not in ALLOWED_TEMPLATES:
             raise ValueError(
-                f"Unknown template '{template_name}'. "
-                f"Allowed: {sorted(ALLOWED_TEMPLATES)}"
+                f"Unknown template '{template_name}'. Allowed: {sorted(ALLOWED_TEMPLATES)}"
             )
 
         # jinja_env availability is checked in build_full_prompt
@@ -904,7 +898,8 @@ class ContextPacker:
             if result.returncode == 0:
                 # Filter out hidden files and format
                 files = [
-                    f for f in result.stdout.strip().split("\n")
+                    f
+                    for f in result.stdout.strip().split("\n")
                     if not any(part.startswith(".") for part in f.split("/")[1:])
                 ]
                 return "\n".join(sorted(files))

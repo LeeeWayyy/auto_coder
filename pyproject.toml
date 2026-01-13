@@ -29,14 +29,17 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "networkx>=3.0",
+    "filelock>=3.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "pytest-mock>=3.10",
     "ruff>=0.1",
     "mypy>=1.0",
+    "bandit[toml]>=1.7",
 ]
 
 [project.scripts]
@@ -57,7 +60,16 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]
+ignore = [
+    "E501",   # Line too long (handled by formatter)
+    "E402",   # Module level import not at top (needed for some circular imports)
+    "SIM102", # Use single if statement (readability preference)
+    "SIM105", # Use contextlib.suppress (readability preference)
+    "SIM117", # Use single with statement (readability preference)
+    "B904",   # Raise from err (style preference)
+    "B007",   # Loop control variable not used (sometimes intentional)
+    "B017",   # pytest.raises(Exception) (acceptable in tests)
+]
 
 [tool.mypy]
 python_version = "3.11"
@@ -68,3 +80,9 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --cov=supervisor --cov-report=term-missing"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "docker: marks tests requiring Docker",
+    "integration: marks integration tests",
+    "git: marks tests requiring git",
+]

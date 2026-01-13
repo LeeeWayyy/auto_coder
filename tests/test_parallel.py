@@ -3,15 +3,13 @@
 Tests multi-model parallel review and result aggregation.
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from dataclasses import dataclass
+from unittest.mock import MagicMock
 
+import pytest
 from pydantic import BaseModel
 
 from supervisor.core.parallel import (
     AggregatedReviewResult,
-    ParallelExecutionError,
     ParallelReviewer,
     ReviewResult,
 )
@@ -194,9 +192,7 @@ class TestParallelReviewer:
         engine.role_loader.load_role.return_value = MockRoleConfig("claude")
 
         # Mock run_role to return approved output
-        engine.run_role.return_value = MockReviewOutput(
-            status="APPROVED", review_status="APPROVED"
-        )
+        engine.run_role.return_value = MockReviewOutput(status="APPROVED", review_status="APPROVED")
 
         return engine
 

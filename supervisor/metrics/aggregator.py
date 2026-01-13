@@ -6,7 +6,6 @@ Cannot use db.execute() as it doesn't exist.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import Any
 
 from supervisor.core.state import Database
@@ -17,6 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RolePerformance:
     """Aggregated performance for a role."""
+
     role: str
     success_rate: float
     avg_duration_seconds: float
@@ -31,6 +31,7 @@ class RolePerformance:
 @dataclass
 class CLIPerformance:
     """Aggregated performance for a CLI by task type."""
+
     cli: str
     task_type: str
     success_rate: float
@@ -151,7 +152,7 @@ class MetricsAggregator:
                 ORDER BY success_rate DESC
                 LIMIT 1
                 """,
-                (task_type, min_samples)
+                (task_type, min_samples),
             ).fetchone()
 
         return rows[0] if rows else None
@@ -179,7 +180,7 @@ class MetricsAggregator:
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
-                (limit,)
+                (limit,),
             ).fetchall()
 
         return [

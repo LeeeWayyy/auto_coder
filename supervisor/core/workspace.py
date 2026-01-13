@@ -11,10 +11,11 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Generator
+from typing import Any
 
 try:
     from filelock import FileLock
@@ -30,9 +31,10 @@ class FileLockRequiredError(Exception):
 
     pass
 
-from supervisor.core.models import Step, StepStatus
+
+from supervisor.core.models import Step
 from supervisor.core.state import Database, Event, EventType
-from supervisor.sandbox.executor import ExecutionResult, SandboxedExecutor
+from supervisor.sandbox.executor import SandboxedExecutor
 
 
 class WorktreeError(Exception):
@@ -380,9 +382,7 @@ class IsolatedWorkspace:
                 timeout=self.GIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired:
-            raise WorktreeError(
-                f"Getting HEAD timed out after {self.GIT_TIMEOUT}s"
-            )
+            raise WorktreeError(f"Getting HEAD timed out after {self.GIT_TIMEOUT}s")
         if result.returncode != 0:
             raise WorktreeError(f"Failed to get HEAD: {result.stderr}")
         return result.stdout.strip()
@@ -461,8 +461,7 @@ class IsolatedWorkspace:
         # SECURITY: Also validate the specific worktree path
         if worktree_path.is_symlink():
             raise WorktreeError(
-                f"SECURITY: {worktree_path} is a symlink. "
-                "This could be an attack attempt."
+                f"SECURITY: {worktree_path} is a symlink. This could be an attack attempt."
             )
 
         # Check if worktree exists
@@ -487,9 +486,7 @@ class IsolatedWorkspace:
                 timeout=self.GIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired:
-            raise WorktreeError(
-                f"Creating worktree timed out after {self.GIT_TIMEOUT}s"
-            )
+            raise WorktreeError(f"Creating worktree timed out after {self.GIT_TIMEOUT}s")
         if result.returncode != 0:
             raise WorktreeError(f"Failed to create worktree: {result.stderr}")
 
@@ -515,6 +512,7 @@ class IsolatedWorkspace:
         except ValueError:
             # Path escapes repo - possible attack, refuse to delete
             import sys
+
             print(
                 f"SECURITY WARNING: Worktree path {worktree_path} resolves outside repo. "
                 f"Refusing to delete. Manual cleanup may be required.",
@@ -527,6 +525,7 @@ class IsolatedWorkspace:
         while current != self.repo_path and current != current.parent:
             if current.is_symlink():
                 import sys
+
                 print(
                     f"SECURITY WARNING: Ancestor {current} is a symlink. "
                     f"Refusing to delete worktree. Manual cleanup may be required.",
@@ -561,6 +560,7 @@ class IsolatedWorkspace:
             except ValueError:
                 # Path escapes repo - possible attack, refuse to delete
                 import sys
+
                 print(
                     f"SECURITY WARNING: Worktree path {worktree_path} resolves outside repo. "
                     f"Refusing to delete. Manual cleanup may be required.",
@@ -573,6 +573,7 @@ class IsolatedWorkspace:
             while current != self.repo_path and current != current.parent:
                 if current.is_symlink():
                     import sys
+
                     print(
                         f"SECURITY WARNING: Ancestor {current} is a symlink. "
                         f"Refusing to delete worktree. Manual cleanup may be required.",
@@ -613,9 +614,7 @@ class IsolatedWorkspace:
             )
         if result.returncode != 0:
             # Fail loudly instead of returning empty - prevents silent data loss
-            raise WorktreeError(
-                f"git status failed in worktree {worktree_path}: {result.stderr}"
-            )
+            raise WorktreeError(f"git status failed in worktree {worktree_path}: {result.stderr}")
 
         # CONFLICT DETECTION: Unmerged status codes in git porcelain v1
         # These indicate merge conflicts that must be resolved before apply
@@ -642,7 +641,7 @@ class IsolatedWorkspace:
                 sep_pos = 2
 
             status = entry[:sep_pos]
-            first_path = entry[sep_pos + 1:]
+            first_path = entry[sep_pos + 1 :]
 
             # SECURITY: Detect unmerged/conflict statuses and fail fast
             # These indicate merge conflicts that should not be applied
@@ -764,9 +763,7 @@ class IsolatedWorkspace:
                 continue
 
             if src.is_symlink():
-                raise WorktreeError(
-                    f"SECURITY: Symlink in worktree not allowed: {change.path}"
-                )
+                raise WorktreeError(f"SECURITY: Symlink in worktree not allowed: {change.path}")
 
             # Check for symlinks inside directories
             if src.is_dir():
@@ -775,8 +772,7 @@ class IsolatedWorkspace:
                     for name in dirs + files:
                         if (root_path / name).is_symlink():
                             raise WorktreeError(
-                                f"SECURITY: Symlink in worktree not allowed: "
-                                f"{root_path / name}"
+                                f"SECURITY: Symlink in worktree not allowed: {root_path / name}"
                             )
 
     def _verify_head_unchanged(self, original_head: str) -> None:
@@ -883,16 +879,12 @@ class IsolatedWorkspace:
 
         while current != self.repo_path and current != current.parent:
             if current.is_symlink():
-                raise WorktreeError(
-                    f"SECURITY: Parent directory is symlink: {current}"
-                )
+                raise WorktreeError(f"SECURITY: Parent directory is symlink: {current}")
             # Verify we're still within repo
             try:
                 current.resolve().relative_to(repo_resolved)
             except ValueError:
-                raise WorktreeError(
-                    f"SECURITY: Path escapes repo via parent: {current}"
-                )
+                raise WorktreeError(f"SECURITY: Path escapes repo via parent: {current}")
             current = current.parent
 
     def _copy_safe(self, src: Path, dst: Path, display_path: str) -> None:
@@ -905,9 +897,7 @@ class IsolatedWorkspace:
         """
         # SECURITY: Reject top-level symlinks in source
         if src.is_symlink():
-            raise WorktreeError(
-                f"Symlinks not allowed in worktree changes: {display_path}"
-            )
+            raise WorktreeError(f"Symlinks not allowed in worktree changes: {display_path}")
 
         # SECURITY: Validate parent directories before any write operations
         # This prevents writing outside repo via symlinked parent dirs
@@ -986,9 +976,7 @@ class IsolatedWorkspace:
                 timeout=self.GIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired:
-            raise WorktreeError(
-                f"Getting worktree HEAD timed out after {self.GIT_TIMEOUT}s"
-            )
+            raise WorktreeError(f"Getting worktree HEAD timed out after {self.GIT_TIMEOUT}s")
         if result.returncode != 0:
             raise WorktreeError(f"Failed to get worktree HEAD: {result.stderr}")
         return result.stdout.strip()
@@ -1090,7 +1078,10 @@ class IsolatedWorkspace:
                             workflow_id=step.workflow_id,
                             event_type=EventType.GATE_PASSED,
                             step_id=step.id,
-                            payload={"gate": gate_name, "output": _truncate_output(gate_output, 1000)},
+                            payload={
+                                "gate": gate_name,
+                                "output": _truncate_output(gate_output, 1000),
+                            },
                         )
                     )
                 else:
@@ -1100,7 +1091,10 @@ class IsolatedWorkspace:
                             workflow_id=step.workflow_id,
                             event_type=EventType.GATE_FAILED,
                             step_id=step.id,
-                            payload={"gate": gate_name, "output": _truncate_output(gate_output, 1000)},
+                            payload={
+                                "gate": gate_name,
+                                "output": _truncate_output(gate_output, 1000),
+                            },
                         )
                     )
                     # Event sourcing: append_event updates projection via _update_projections
@@ -1159,6 +1153,7 @@ class IsolatedWorkspace:
                 # CRITICAL: Git repo was modified but DB update failed
                 # Log this inconsistent state so it can be detected and remediated
                 import sys
+
                 print(
                     f"CRITICAL: Step {step.id} applied changes to repo but DB update failed: {db_error}. "
                     f"Changed files: {changed_files}. Manual remediation may be required.",

@@ -16,8 +16,7 @@ USES EXISTING:
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Callable
+from collections.abc import Callable
 
 from rich.console import Console
 from rich.layout import Layout
@@ -27,9 +26,9 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.tree import Tree
 
-from supervisor.core.state import Database
-from supervisor.core.models import ComponentStatus, FeatureStatus
 from supervisor.core.interaction import ApprovalDecision, ApprovalRequest, InteractionBridge
+from supervisor.core.models import ComponentStatus
+from supervisor.core.state import Database
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +169,9 @@ class SupervisorTUI:
                     all_components = self.db.get_components(feature.id)
                     phase_components = [c for c in all_components if c.phase_id == phase.id]
                     # FIX: Use ComponentStatus.COMPLETED (not COMPLETE)
-                    completed = sum(1 for c in phase_components if c.status == ComponentStatus.COMPLETED)
+                    completed = sum(
+                        1 for c in phase_components if c.status == ComponentStatus.COMPLETED
+                    )
                     total = len(phase_components)
                     phase_node.add(f"[dim]{completed}/{total} components[/dim]")
 
@@ -202,7 +203,9 @@ class SupervisorTUI:
                 table.add_row(
                     event.timestamp.strftime("%H:%M:%S") if event.timestamp else "",
                     event.event_type.value,
-                    str(event.payload)[:50] + "..." if len(str(event.payload)) > 50 else str(event.payload),
+                    str(event.payload)[:50] + "..."
+                    if len(str(event.payload)) > 50
+                    else str(event.payload),
                 )
 
         return Panel(table, title="Recent Events")
@@ -223,7 +226,7 @@ class SupervisorTUI:
             "failed": "❌",
         }
         # FIX (v11): Handle Enum types properly - use .value not str()
-        status_key = status.value if hasattr(status, 'value') else str(status).lower()
+        status_key = status.value if hasattr(status, "value") else str(status).lower()
         return status_icons.get(status_key, "❓")
 
     def _render_footer(self) -> Panel:
@@ -245,7 +248,9 @@ class SupervisorTUI:
         # Show details
         self.console.print(f"\n[bold]Feature:[/bold] {request.feature_id}")
         self.console.print(f"[bold]Gate:[/bold] {request.gate_id}")
-        self.console.print(f"[bold]Risk:[/bold] [{self._risk_color(request.risk_level)}]{request.risk_level}[/]")
+        self.console.print(
+            f"[bold]Risk:[/bold] [{self._risk_color(request.risk_level)}]{request.risk_level}[/]"
+        )
 
         self.console.print("\n[bold]Changes:[/bold]")
         for change in request.changes:

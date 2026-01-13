@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from supervisor.core.gates import (
+    PACKAGE_DIR,
     CircularDependencyError,
     GateConfig,
     GateConfigError,
@@ -17,7 +18,6 @@ from supervisor.core.gates import (
     GateResult,
     GateSeverity,
     GateStatus,
-    PACKAGE_DIR,
 )
 
 
@@ -178,9 +178,7 @@ class TestGateLoader:
 
     def test_invalid_string_command_rejected(self, tmp_path, temp_gate_file, monkeypatch):
         """String commands are rejected."""
-        temp_gate_file.write_text(
-            yaml.safe_dump({"gates": {"bad": {"command": "pytest -q"}}})
-        )
+        temp_gate_file.write_text(yaml.safe_dump({"gates": {"bad": {"command": "pytest -q"}}}))
         monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
 
         loader = GateLoader(worktree_path=tmp_path)
@@ -208,9 +206,7 @@ class TestGateLoader:
         with pytest.raises(GateConfigError, match="allow_shell is not set"):
             loader.load_gates()
 
-    def test_path_traversal_in_allowed_writes_rejected(
-        self, tmp_path, temp_gate_file, monkeypatch
-    ):
+    def test_path_traversal_in_allowed_writes_rejected(self, tmp_path, temp_gate_file, monkeypatch):
         """Path traversal patterns in allowed_writes are rejected."""
         write_gates(
             temp_gate_file,
@@ -331,11 +327,7 @@ class TestSecurityValidation:
         """Env denylist bypass is detected."""
         write_gates(
             temp_gate_file,
-            {
-                "bad": {
-                    "command": ["command", "env", "PATH=/tmp", "echo", "hi"]
-                }
-            },
+            {"bad": {"command": ["command", "env", "PATH=/tmp", "echo", "hi"]}},
         )
         monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
 
@@ -343,9 +335,7 @@ class TestSecurityValidation:
         with pytest.raises(GateConfigError, match="denylisted"):
             loader.load_gates()
 
-    def test_path_traversal_in_cache_inputs_rejected(
-        self, tmp_path, temp_gate_file, monkeypatch
-    ):
+    def test_path_traversal_in_cache_inputs_rejected(self, tmp_path, temp_gate_file, monkeypatch):
         """Path traversal patterns in cache_inputs are rejected."""
         write_gates(
             temp_gate_file,
@@ -520,6 +510,7 @@ class TestGateExecutor:
     def test_run_gate_success(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
         """Test successful gate execution."""
         from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gate config
@@ -536,7 +527,9 @@ class TestGateExecutor:
         # Create worktree with git repo
         (tmp_path / ".git").mkdir()
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True
+        )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
 
         gate_loader = GateLoader(worktree_path=tmp_path)
@@ -552,6 +545,7 @@ class TestGateExecutor:
     def test_run_gate_failure(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
         """Test failed gate execution."""
         from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gate config
@@ -568,7 +562,9 @@ class TestGateExecutor:
         # Create worktree with git repo
         (tmp_path / ".git").mkdir()
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True
+        )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
 
         gate_loader = GateLoader(worktree_path=tmp_path)
@@ -580,19 +576,25 @@ class TestGateExecutor:
         assert result.status == GateStatus.FAILED
         assert "test failed" in result.output
 
-    def test_run_gate_with_allowed_writes(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+    def test_run_gate_with_allowed_writes(
+        self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file
+    ):
         """Test gate execution with allowed_writes patterns."""
         from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gate config with allowed_writes
-        write_gates(temp_gate_file, {
-            "test": {
-                "command": ["echo", "success"],
-                "timeout": 60,
-                "allowed_writes": [".coverage", "htmlcov/**"],
-            }
-        })
+        write_gates(
+            temp_gate_file,
+            {
+                "test": {
+                    "command": ["echo", "success"],
+                    "timeout": 60,
+                    "allowed_writes": [".coverage", "htmlcov/**"],
+                }
+            },
+        )
         monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
 
         # Mock executor to return success
@@ -605,7 +607,9 @@ class TestGateExecutor:
         # Create worktree with git repo
         (tmp_path / ".git").mkdir()
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True
+        )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
 
         gate_loader = GateLoader(worktree_path=tmp_path)
@@ -617,17 +621,27 @@ class TestGateExecutor:
         result = executor.run_gate(config, tmp_path, "wf-1", "step-1")
         assert result.status == GateStatus.PASSED
 
-    def test_run_gates_respects_dependencies(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+    def test_run_gates_respects_dependencies(
+        self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file
+    ):
         """Test that run_gates executes gates in dependency order."""
-        from unittest.mock import MagicMock, call
+        from unittest.mock import MagicMock
+
         from supervisor.core.gates import GateExecutor, GateLoader, GateStatus
 
         # Setup gates with dependencies
-        write_gates(temp_gate_file, {
-            "lint": {"command": ["echo", "lint"], "timeout": 60},
-            "type_check": {"command": ["echo", "typecheck"], "timeout": 60, "depends_on": ["lint"]},
-            "test": {"command": ["echo", "test"], "timeout": 60, "depends_on": ["lint"]},
-        })
+        write_gates(
+            temp_gate_file,
+            {
+                "lint": {"command": ["echo", "lint"], "timeout": 60},
+                "type_check": {
+                    "command": ["echo", "typecheck"],
+                    "timeout": 60,
+                    "depends_on": ["lint"],
+                },
+                "test": {"command": ["echo", "test"], "timeout": 60, "depends_on": ["lint"]},
+            },
+        )
         monkeypatch.setattr(GateLoader, "STATIC_SEARCH_PATHS", [temp_gate_file])
 
         # Mock executor to return success
@@ -640,7 +654,9 @@ class TestGateExecutor:
         # Create worktree with git repo
         (tmp_path / ".git").mkdir()
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True
+        )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
 
         gate_loader = GateLoader(worktree_path=tmp_path)
@@ -706,14 +722,18 @@ class TestGateExecutor:
         assert GateExecutor._glob_to_regex("src/**/*.ts") is not None
         assert GateExecutor._glob_to_regex("[abc].txt") is not None
 
-    def test_cache_key_includes_allowed_writes(self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file):
+    def test_cache_key_includes_allowed_writes(
+        self, tmp_path, mock_executor, mock_db, monkeypatch, temp_gate_file
+    ):
         """Test that allowed_writes is included in cache key."""
-        from supervisor.core.gates import GateExecutor, GateLoader, GateConfig
+        from supervisor.core.gates import GateConfig, GateExecutor, GateLoader
 
         # Create a minimal git repo
         (tmp_path / ".git").mkdir()
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True
+        )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
         (tmp_path / "test.py").write_text("print('hello')")
         subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
@@ -727,7 +747,9 @@ class TestGateExecutor:
 
         # Create two configs with different allowed_writes
         config1 = GateConfig(name="test", command=["echo"], allowed_writes=[".coverage"])
-        config2 = GateConfig(name="test", command=["echo"], allowed_writes=[".coverage", "htmlcov/**"])
+        config2 = GateConfig(
+            name="test", command=["echo"], allowed_writes=[".coverage", "htmlcov/**"]
+        )
 
         # Cache keys should be different
         key1 = executor._compute_cache_key(tmp_path, config1)

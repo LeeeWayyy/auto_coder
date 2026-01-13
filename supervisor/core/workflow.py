@@ -3,12 +3,12 @@
 Phase 4 deliverable 4.4: Full workflow orchestration from feature to completion.
 """
 
+import contextlib
 import logging
 import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError, as_completed
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,18 +23,22 @@ from supervisor.core.models import (
     Phase,
     PhaseStatus,
 )
-from supervisor.core.routing import ModelRouter, create_router, AdaptiveConfig, get_capability_for_role
+from supervisor.core.routing import (
+    AdaptiveConfig,
+    create_router,
+    get_capability_for_role,
+)
 from supervisor.core.scheduler import (
     DAGScheduler,
     WorkflowBlockedError,
 )
-from supervisor.core.state import Database, Event, EventType
+from supervisor.core.state import Database
 from supervisor.core.utils import normalize_repo_path
 
 if TYPE_CHECKING:
+    from supervisor.core.approval import ApprovalGate
     from supervisor.core.engine import ExecutionEngine
     from supervisor.core.interaction import InteractionBridge
-    from supervisor.core.approval import ApprovalGate
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +53,8 @@ class ComponentPlan(BaseModel):
     symbolic_id: str | None = Field(
         default=None, description="Optional symbolic ID for dependency references"
     )
-    files: list[str] = Field(
-        default_factory=list, description="Files to create/modify"
-    )
-    depends_on: list[str] = Field(
-        default_factory=list, description="Component IDs this depends on"
-    )
+    files: list[str] = Field(default_factory=list, description="Files to create/modify")
+    depends_on: list[str] = Field(default_factory=list, description="Component IDs this depends on")
     role: str = Field(default="implementer", description="Role to execute this component")
     description: str = Field(default="", description="Component description")
 
@@ -66,9 +66,7 @@ class PhasePlan(BaseModel):
     components: list[ComponentPlan] = Field(
         ..., min_length=1, description="Components in this phase"
     )
-    interfaces: dict[str, Any] = Field(
-        default_factory=dict, description="Interface definitions"
-    )
+    interfaces: dict[str, Any] = Field(default_factory=dict, description="Interface definitions")
 
 
 class PlannerOutput(BaseModel):
@@ -268,9 +266,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         # Update feature status to in_progress
         self.db.update_feature_status(feature_id, FeatureStatus.IN_PROGRESS)
 
-        logger.info(
-            f"Planning complete for '{feature_id}': {len(phases)} phases created"
-        )
+        logger.info(f"Planning complete for '{feature_id}': {len(phases)} phases created")
         return phases
 
     def _create_phase_from_plan(
@@ -303,7 +299,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         else:
             # Already a list - ensure each item has type field
             interfaces_list = []
-            for item in (raw_interfaces if isinstance(raw_interfaces, list) else []):
+            for item in raw_interfaces if isinstance(raw_interfaces, list) else []:
                 if isinstance(item, dict):
                     if "type" not in item:
                         item = {**item, "type": "unknown"}
@@ -366,9 +362,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         generated_id = f"{phase_id}-C{component_number}"
 
         # Get symbolic ID from planner output (or use title as fallback)
-        raw_symbolic_id = component_data.get("symbolic_id") or component_data.get(
-            "title"
-        )
+        raw_symbolic_id = component_data.get("symbolic_id") or component_data.get("title")
 
         # FIX (Codex v9 review): Prefix with phase_id to ensure global uniqueness
         # This prevents collision when same title appears in different phases
@@ -497,9 +491,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             else:
                 # FIX (Gemini review): Continuous parallel scheduling
                 self._run_continuous_parallel(
-                    feature_id,
-                    num_components,
-                    workflow_deadline=workflow_deadline
+                    feature_id, num_components, workflow_deadline=workflow_deadline
                 )
 
         except Exception as e:
@@ -565,7 +557,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         error=f"Component timed out after {role_timeout}s",
                         workflow_id=feature_id,
                     )
-                    logger.error(f"Component '{comp.id}' timed out after {role_timeout}s (sequential mode)")
+                    logger.error(
+                        f"Component '{comp.id}' timed out after {role_timeout}s (sequential mode)"
+                    )
 
     def _run_continuous_parallel(
         self,
@@ -630,8 +624,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 # FIX (Codex review): Only mark as timed out if future is NOT done
                 # A future that completed just before timeout should be processed normally
                 timed_out = [
-                    (f, c) for f, c in active_futures.items()
-                    if now > future_timeouts.get(f, now + 9999) # Use stored deadline
+                    (f, c)
+                    for f, c in active_futures.items()
+                    if now > future_timeouts.get(f, now + 9999)  # Use stored deadline
                     and not f.done()  # Don't timeout completed futures
                 ]
                 if timed_out:
@@ -648,7 +643,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         self._scheduler.update_component_status(
                             comp.id,
                             ComponentStatus.FAILED,
-                            error=f"Component timed out",
+                            error="Component timed out",
                             workflow_id=feature_id,
                         )
                         logger.error(f"Component '{comp.id}' timed out")
@@ -669,7 +664,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     with files_lock:
                         for file in comp.files or []:
                             files_in_progress.discard(normalize_path(file))
-                    logger.debug(f"Timed-out component '{comp.id}' thread finished - released file locks")
+                    logger.debug(
+                        f"Timed-out component '{comp.id}' thread finished - released file locks"
+                    )
 
                 # Get ready components that don't conflict with in-progress work
                 ready = self._scheduler.get_ready_components()
@@ -697,16 +694,16 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     with files_lock:
                         # Normalize paths when adding to files_in_progress
                         files_in_progress.update(normalize_path(f) for f in (comp.files or []))
-                    
+
                     # NEW (v9): Look up role-specific timeout
                     role_name = comp.assigned_role or "implementer"
                     timeout = self.role_timeouts.get(role_name, self.component_timeout)
-                    
+
                     future = executor.submit(self._execute_component, comp, feature_id)
                     active_futures[future] = comp
                     active_component_ids.add(comp.id)  # FIX (Codex review): O(1) tracking
                     future_start_times[future] = time.time()  # Track start time for timeout
-                    future_timeouts[future] = time.time() + timeout # NEW (v9): Store deadline
+                    future_timeouts[future] = time.time() + timeout  # NEW (v9): Store deadline
 
                 # If no active work and nothing ready, check if blocked
                 if not active_futures:
@@ -751,10 +748,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         finally:
             # Wait for any remaining active futures to complete
             for future in active_futures:
-                try:
+                with contextlib.suppress(Exception):
                     future.result(timeout=60)
-                except Exception:
-                    pass
             # FIX (Codex review v4): Also wait for timed-out futures before shutdown
             # This ensures their threads finish and file locks can be released
             for future in timed_out_futures:
@@ -810,9 +805,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cancellation_check=is_cancelled,
         )
 
-    def _build_component_scope(
-        self, component: Component
-    ) -> tuple[set[str], set[str], bool]:
+    def _build_component_scope(self, component: Component) -> tuple[set[str], set[str], bool]:
         """Build scope for component change detection.
 
         FIX (v27 - Codex PR review): Extract helper to avoid duplication.
@@ -824,6 +817,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             means no scoping (all changes should be included).
         """
         import os
+
         component_dirs: set[str] = set()
         component_file_set: set[str] = set()
 
@@ -854,6 +848,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         FIX (v27 - Codex PR review): Extract helper to avoid duplication.
         """
         import os
+
         # Direct match to declared files
         if filepath in component_file_set:
             return True
@@ -891,11 +886,13 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         # FIX (v27 - Codex PR review HIGH): If no scope, include all changes
         if has_scope:
             scoped_changed = [
-                f for f in current_changed
+                f
+                for f in current_changed
                 if self._is_in_component_scope(f, component_file_set, component_dirs)
             ]
             scoped_untracked = [
-                f for f in current_untracked
+                f
+                for f in current_untracked
                 if self._is_in_component_scope(f, component_file_set, component_dirs)
             ]
         else:
@@ -911,7 +908,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
         # Files that were in baseline but have different hash now (re-modified)
         re_modified = [
-            f for f in scoped_changed
+            f
+            for f in scoped_changed
             if f in baseline_hashes and current_hashes.get(f) != baseline_hashes[f]
         ]
 
@@ -949,6 +947,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         """
         import hashlib
         import os
+
         hashes = {}
         for filepath in files:
             full_path = os.path.join(self.repo_path or ".", filepath)
@@ -967,6 +966,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         This allows restoring to baseline state, not HEAD, preserving prior component changes.
         """
         import os
+
         contents = {}
         for filepath in files:
             full_path = os.path.join(self.repo_path or ".", filepath)
@@ -1023,16 +1023,16 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                     error="Approval rejected by user",
                     workflow_id=feature_id,
                 )
-                logger.info(f"Component '{component.id}' rejected by approval gate, changes rolled back")
+                logger.info(
+                    f"Component '{component.id}' rejected by approval gate, changes rolled back"
+                )
                 return
 
             # Approval granted - mark as completed
             self._scheduler.update_component_status(
                 component.id,
                 ComponentStatus.COMPLETED,
-                output=str(
-                    result.model_dump() if hasattr(result, "model_dump") else result
-                ),
+                output=str(result.model_dump() if hasattr(result, "model_dump") else result),
                 workflow_id=feature_id,
             )
 
@@ -1042,18 +1042,22 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             logger.error(f"Component '{component.id}' failed: {e}")
             # Rollback only THIS component's changes using hash-based detection
             # FIX (v27 - Codex PR review): Use helper methods for scoping
-            component_file_set_exc, component_dirs_exc, has_scope = self._build_component_scope(component)
+            component_file_set_exc, component_dirs_exc, has_scope = self._build_component_scope(
+                component
+            )
 
             exc_changed, exc_untracked = self._get_changed_files(None)
 
             # FIX (v27 - Codex PR review HIGH): If no scope, include all changes
             if has_scope:
                 exc_changed = [
-                    f for f in exc_changed
+                    f
+                    for f in exc_changed
                     if self._is_in_component_scope(f, component_file_set_exc, component_dirs_exc)
                 ]
                 exc_untracked = [
-                    f for f in exc_untracked
+                    f
+                    for f in exc_untracked
                     if self._is_in_component_scope(f, component_file_set_exc, component_dirs_exc)
                 ]
 
@@ -1061,7 +1065,8 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
 
             new_changed = [f for f in exc_changed if f not in baseline_set]
             re_modified = [
-                f for f in exc_changed
+                f
+                for f in exc_changed
                 if f in baseline_hashes and exc_hashes.get(f) != baseline_hashes[f]
             ]
             component_exc_changed = list(set(new_changed + re_modified))
@@ -1114,7 +1119,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             "reason": reason,
             "feature_status": feature.status.value if feature else "unknown",
             "phases_completed": sum(1 for p in phases if p.status == PhaseStatus.COMPLETED),
-            "components_completed": sum(1 for c in components if c.status == ComponentStatus.COMPLETED),
+            "components_completed": sum(
+                1 for c in components if c.status == ComponentStatus.COMPLETED
+            ),
             "resumable": True,
         }
 
@@ -1160,6 +1167,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         Returns False if workflow should halt (REJECT or EDIT).
         """
         from datetime import datetime
+
         from supervisor.core.interaction import ApprovalDecision
 
         if not self.approval_gate:
@@ -1223,9 +1231,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             logger.info(f"Component '{component.id}' rejected by user")
         return False
 
-    def _get_changed_files(
-        self, target_files: list[str] | None
-    ) -> tuple[list[str], list[str]]:
+    def _get_changed_files(self, target_files: list[str] | None) -> tuple[list[str], list[str]]:
         """Get lists of changed tracked files and new untracked files.
 
         FIX (v26 - Codex): Include both staged (--cached) and unstaged changes.
@@ -1236,6 +1242,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             - untracked_files: Newly created files from git status --porcelain
         """
         import subprocess
+
         changed: set[str] = set()
         untracked = []
         try:
@@ -1243,7 +1250,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cmd = ["git", "diff", "--name-only"]
             if target_files:
                 cmd.extend(["--", *target_files])
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path
+            )
             if result.returncode == 0 and result.stdout.strip():
                 changed.update(result.stdout.strip().split("\n"))
 
@@ -1251,14 +1260,23 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
             cmd_cached = ["git", "diff", "--name-only", "--cached"]
             if target_files:
                 cmd_cached.extend(["--", *target_files])
-            result = subprocess.run(cmd_cached, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
+            result = subprocess.run(
+                cmd_cached,
+                capture_output=True,
+                text=True,
+                timeout=self.git_timeout,
+                cwd=self.repo_path,
+            )
             if result.returncode == 0 and result.stdout.strip():
                 changed.update(result.stdout.strip().split("\n"))
 
             # Get untracked files (newly created)
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
-                capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=self.git_timeout,
+                cwd=self.repo_path,
             )
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
@@ -1266,8 +1284,10 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         filepath = line[3:].strip()
                         # If target_files specified, filter to those paths
                         if target_files:
-                            if any(filepath.startswith(tf) or tf.startswith(filepath)
-                                   for tf in target_files):
+                            if any(
+                                filepath.startswith(tf) or tf.startswith(filepath)
+                                for tf in target_files
+                            ):
                                 untracked.append(filepath)
                         else:
                             untracked.append(filepath)
@@ -1297,6 +1317,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         """
         import os
         import subprocess
+
         all_diff_lines: list[str] = []
         try:
             # FIX (v27 - Codex PR review P2): Only run tracked diff if we have files
@@ -1338,8 +1359,13 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         # Use git diff --no-index with repo-relative path
                         # The -- separator ensures paths are treated as paths, not options
                         cmd_untracked = [
-                            "git", "diff", "--no-index", "--no-color",
-                            "--", "/dev/null", filepath
+                            "git",
+                            "diff",
+                            "--no-index",
+                            "--no-color",
+                            "--",
+                            "/dev/null",
+                            filepath,
                         ]
                         result = subprocess.run(
                             cmd_untracked,
@@ -1382,6 +1408,7 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
         import os
         import shutil
         import subprocess
+
         restore_failed = False
         try:
             # FIX (v27 - Codex PR review P1): Restore files from baseline contents
@@ -1405,7 +1432,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                             # FIX (v27 - Codex PR review): Don't fall back to git checkout
                             # for files we have baseline content for - that defeats P1 fix
                             # FIX (v27 - Codex PR review): Track failures to surface to caller
-                            logger.error(f"Failed to restore {filepath} from baseline: {restore_err}")
+                            logger.error(
+                                f"Failed to restore {filepath} from baseline: {restore_err}"
+                            )
                             restore_failed = True
                     else:
                         # File wasn't in baseline - use git checkout to discard
@@ -1416,7 +1445,13 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                 if files_to_checkout:
                     cmd = ["git", "checkout", "--"]
                     cmd.extend(files_to_checkout)
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.git_timeout, cwd=self.repo_path)
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.git_timeout,
+                        cwd=self.repo_path,
+                    )
                     if result.returncode != 0:
                         logger.warning(
                             f"git checkout failed for: {files_to_checkout}. "
@@ -1424,7 +1459,9 @@ Use 'symbolic_id' for cross-referencing dependencies within same phase.
                         )
                         restore_failed = True
                     else:
-                        logger.debug(f"Rolled back tracked changes via git checkout for: {files_to_checkout}")
+                        logger.debug(
+                            f"Rolled back tracked changes via git checkout for: {files_to_checkout}"
+                        )
             else:
                 # No tracked files to rollback - this is expected when component
                 # only created new files or edited files already in baseline

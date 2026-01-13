@@ -20,7 +20,6 @@ from supervisor.core.models import (
     ReviewOutput,
 )
 
-
 # --- Generic output schema for unknown/overlay roles ---
 
 

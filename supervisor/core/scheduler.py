@@ -3,6 +3,8 @@
 Phase 4 deliverable 4.1: Dependency-aware scheduling of components.
 """
 
+from __future__ import annotations
+
 import logging
 import threading
 from collections import deque
@@ -92,7 +94,7 @@ class DAGScheduler:
         # Reverse: node -> list of its dependencies
         self._dependencies: dict[str, list[str]] = {}
         # Component data cache
-        self._components: dict[str, "Component"] = {}
+        self._components: dict[str, Component] = {}
         # Files assigned to each component (for conflict detection) - normalized paths
         self._component_files: dict[str, set[str]] = {}
         # Build state
@@ -136,7 +138,6 @@ class DAGScheduler:
             DependencyNotFoundError: If a dependency references non-existent component
             ValueError: If any component file path resolves outside repo root
         """
-        from supervisor.core.models import Component, Phase
 
         # Load data
         phases = self.db.get_phases(feature_id)
@@ -149,8 +150,7 @@ class DAGScheduler:
         # FIX (Codex v4): Normalize file paths for conflict detection
         # Ensures ./a.py and a.py are detected as the same file
         self._component_files = {
-            c.id: set(self._normalize_path(f) for f in c.files)
-            for c in all_components
+            c.id: {self._normalize_path(f) for f in c.files} for c in all_components
         }
 
         # Build component-to-phase mapping
@@ -246,7 +246,7 @@ class DAGScheduler:
                 f"Check depends_on configuration for these components."
             )
 
-    def get_ready_components(self) -> list["Component"]:
+    def get_ready_components(self) -> list[Component]:
         """Get components ready for execution (all dependencies satisfied).
 
         A component is ready when:
@@ -286,9 +286,7 @@ class DAGScheduler:
 
             return ready
 
-    def get_parallel_batches(
-        self, ready: list["Component"]
-    ) -> list[list["Component"]]:
+    def get_parallel_batches(self, ready: list[Component]) -> list[list[Component]]:
         """Group ready components into conflict-free parallel batches.
 
         Components that modify the same files cannot run in parallel.
@@ -309,9 +307,9 @@ class DAGScheduler:
             ready = [A (files: x.py), B (files: y.py), C (files: x.py)]
             returns: [[A, B], [C]]  # A and B in parallel, then C
         """
-        batches: list[list["Component"]] = []
+        batches: list[list[Component]] = []
         scheduled_files: set[str] = set()
-        current_batch: list["Component"] = []
+        current_batch: list[Component] = []
 
         # Sort by component ID for deterministic, repeatable batching
         sorted_ready = sorted(ready, key=lambda c: c.id)
@@ -342,7 +340,7 @@ class DAGScheduler:
     def update_component_status(
         self,
         component_id: str,
-        status: "ComponentStatus",
+        status: ComponentStatus,
         output: str | None = None,
         error: str | None = None,
         workflow_id: str | None = None,
@@ -412,7 +410,6 @@ class DAGScheduler:
         Used by ApprovalGate to persist SKIP flags for later audit.
         Metadata is stored as JSON in the component's metadata field via event.
         """
-        import json
 
         with self._status_lock:
             # Store via event for audit trail
@@ -438,11 +435,10 @@ class DAGScheduler:
 
         with self._status_lock:
             return all(
-                comp.status == ComponentStatus.COMPLETED
-                for comp in self._components.values()
+                comp.status == ComponentStatus.COMPLETED for comp in self._components.values()
             )
 
-    def get_component(self, component_id: str) -> "Component | None":
+    def get_component(self, component_id: str) -> Component | None:
         """Get a component by ID from the scheduler's cache.
 
         FIX (PR review): Public method to avoid direct access to _components dict.
@@ -482,8 +478,7 @@ class DAGScheduler:
 
         with self._status_lock:
             return sum(
-                1 for comp in self._components.values()
-                if comp.status == ComponentStatus.COMPLETED
+                1 for comp in self._components.values() if comp.status == ComponentStatus.COMPLETED
             )
 
     def is_feature_blocked(self) -> bool:
@@ -509,17 +504,13 @@ class DAGScheduler:
 
         # Check if any components are still in progress
         has_in_progress = any(
-            comp.status == ComponentStatus.IMPLEMENTING
-            for comp in self._components.values()
+            comp.status == ComponentStatus.IMPLEMENTING for comp in self._components.values()
         )
         if has_in_progress:
             return False  # Still working, not blocked
 
         # Check if there are pending components (blocked by failed deps)
-        has_pending = any(
-            comp.status == ComponentStatus.PENDING
-            for comp in self._components.values()
-        )
+        any(comp.status == ComponentStatus.PENDING for comp in self._components.values())
 
         # FIX: If no pending and no ready and no in_progress, we're blocked
         # This includes the "all FAILED" case

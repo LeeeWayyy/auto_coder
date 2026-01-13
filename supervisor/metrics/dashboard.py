@@ -1,10 +1,8 @@
 """Rich-based metrics dashboard."""
 
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from rich.layout import Layout
-from rich.live import Live
+from rich.table import Table
 
 from supervisor.metrics.aggregator import MetricsAggregator
 
@@ -70,7 +68,13 @@ class MetricsDashboard:
         table.add_column("Executions", justify="right")
 
         for role in roles:
-            success_style = "green" if role.success_rate > 0.9 else "yellow" if role.success_rate > 0.7 else "red"
+            success_style = (
+                "green"
+                if role.success_rate > 0.9
+                else "yellow"
+                if role.success_rate > 0.7
+                else "red"
+            )
             table.add_row(
                 role.role,
                 f"[{success_style}]{role.formatted_success_rate}[/]",
@@ -105,7 +109,13 @@ class MetricsDashboard:
             )
             best_marker = " ✓" if is_best else ""
 
-            success_style = "green" if stat.success_rate > 0.9 else "yellow" if stat.success_rate > 0.7 else "red"
+            success_style = (
+                "green"
+                if stat.success_rate > 0.9
+                else "yellow"
+                if stat.success_rate > 0.7
+                else "red"
+            )
 
             table.add_row(
                 stat.task_type,

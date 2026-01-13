@@ -8,6 +8,7 @@ SECURITY: Docker is REQUIRED. LocalExecutor is only for unit tests.
 """
 
 import atexit
+import contextlib
 import os
 import re
 import shlex
@@ -243,10 +244,15 @@ class ContainerRegistry:
             # Using --filter status=exited and status=dead to avoid killing running ones
             result = subprocess.run(
                 [
-                    "docker", "ps", "-a",
-                    "--filter", "name=autocoder-supervisor-",
-                    "--filter", "status=exited",
-                    "--format", "{{.Names}}",
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--filter",
+                    "name=autocoder-supervisor-",
+                    "--filter",
+                    "status=exited",
+                    "--format",
+                    "{{.Names}}",
                 ],
                 capture_output=True,
                 text=True,
@@ -260,17 +266,24 @@ class ContainerRegistry:
             # Also check for dead containers
             result_dead = subprocess.run(
                 [
-                    "docker", "ps", "-a",
-                    "--filter", "name=autocoder-supervisor-",
-                    "--filter", "status=dead",
-                    "--format", "{{.Names}}",
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--filter",
+                    "name=autocoder-supervisor-",
+                    "--filter",
+                    "status=dead",
+                    "--format",
+                    "{{.Names}}",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
             if result_dead.returncode == 0:
-                dead = [name.strip() for name in result_dead.stdout.strip().split("\n") if name.strip()]
+                dead = [
+                    name.strip() for name in result_dead.stdout.strip().split("\n") if name.strip()
+                ]
                 exited.extend(dead)
 
             if not exited:
@@ -291,6 +304,7 @@ class ContainerRegistry:
 
             if removed_count > 0:
                 import sys
+
                 print(
                     f"Cleaned up {removed_count} exited supervisor containers from previous run.",
                     file=sys.stderr,
@@ -311,14 +325,12 @@ class ContainerRegistry:
         """Kill all tracked containers."""
         with self._lock:
             for container_id in list(self._containers):
-                try:
+                with contextlib.suppress(Exception):
                     subprocess.run(
                         ["docker", "kill", container_id],
                         capture_output=True,
                         timeout=5,
                     )
-                except Exception:
-                    pass
             self._containers.clear()
 
     def _signal_handler(self, signum: int, frame: Any) -> None:
@@ -470,8 +482,7 @@ def _validate_workdir(workdir: Path, allowed_roots: list[str]) -> Path:
             continue  # Not under this root, try next
 
     raise SandboxError(
-        f"Workdir '{workdir}' is not under any allowed root. "
-        f"Allowed roots: {allowed_roots}"
+        f"Workdir '{workdir}' is not under any allowed root. Allowed roots: {allowed_roots}"
     )
 
 
@@ -523,7 +534,9 @@ class SandboxedLLMClient:
 
         # SECURITY: Verify egress rules if configured to do so
         if self.config.verify_egress_rules:
-            egress_status = _verify_egress_rules(self.config.egress_network, self.config.allowed_egress)
+            egress_status = _verify_egress_rules(
+                self.config.egress_network, self.config.allowed_egress
+            )
             if egress_status is False:
                 # Definitely not configured - fail closed
                 raise EgressNotConfiguredError(
@@ -559,9 +572,13 @@ class SandboxedLLMClient:
             # Try to create the network
             create_result = subprocess.run(
                 [
-                    "docker", "network", "create",
-                    "--driver", "bridge",
-                    "--opt", "com.docker.network.bridge.enable_icc=false",
+                    "docker",
+                    "network",
+                    "create",
+                    "--driver",
+                    "bridge",
+                    "--opt",
+                    "com.docker.network.bridge.enable_icc=false",
                     self.config.egress_network,
                 ],
                 capture_output=True,
@@ -586,6 +603,7 @@ class SandboxedLLMClient:
             else:
                 # Network was created successfully, warn about egress rules
                 import sys
+
                 print(
                     f"WARNING: Created network '{self.config.egress_network}' but egress "
                     f"rules must be configured manually via iptables. See documentation.",
@@ -678,7 +696,8 @@ class SandboxedLLMClient:
         # Base docker command
         # TOCTOU MITIGATION: Use resolved path for Docker mount
         cmd = [
-            "docker", "run",
+            "docker",
+            "run",
             "--rm",
             f"--name={container_name}",
             f"--network={self.config.egress_network}",
@@ -692,36 +711,38 @@ class SandboxedLLMClient:
         if docker_user:
             cmd.append(f"--user={docker_user}")
 
-        cmd.extend([
-            "--read-only",
-            "--tmpfs=/tmp:size=1g",
-            "--tmpfs=/home:size=100m",
-            f"--memory={self.config.memory_limit}",
-            f"--cpus={self.config.cpu_limit}",
-            # Process limits (prevent fork-bomb DoS)
-            f"--pids-limit={self.config.pids_limit}",
-            f"--ulimit=nproc={self.config.ulimit_nproc}:{self.config.ulimit_nproc}",
-            # Security options
-            "--security-opt=no-new-privileges:true",
-            "--cap-drop=ALL",
-            # Environment variables
-            # HOME must match tmpfs mount so CLI tools can write config/cache
-            "--env=HOME=/home",
-            # API keys passed through from host
-            # SECURITY NOTE: Using "--env=KEY" (without value) passes through from host
-            # environment, so the actual secret is NOT visible in `ps` output.
-            # However, `docker inspect` can still reveal the value.
-            #
-            # KNOWN LIMITATION: docker inspect exposure remains acceptable for this use case
-            # because: (1) requires Docker API access, (2) containers are short-lived,
-            # (3) same-user isolation is assumed.
-            #
-            # FUTURE: Consider using --env-file with a tmpfs-backed temporary file,
-            # or mounting secrets via Docker secrets/volumes for enhanced isolation.
-            "--env=ANTHROPIC_API_KEY",
-            "--env=OPENAI_API_KEY",
-            "--env=GOOGLE_API_KEY",
-        ])
+        cmd.extend(
+            [
+                "--read-only",
+                "--tmpfs=/tmp:size=1g",
+                "--tmpfs=/home:size=100m",
+                f"--memory={self.config.memory_limit}",
+                f"--cpus={self.config.cpu_limit}",
+                # Process limits (prevent fork-bomb DoS)
+                f"--pids-limit={self.config.pids_limit}",
+                f"--ulimit=nproc={self.config.ulimit_nproc}:{self.config.ulimit_nproc}",
+                # Security options
+                "--security-opt=no-new-privileges:true",
+                "--cap-drop=ALL",
+                # Environment variables
+                # HOME must match tmpfs mount so CLI tools can write config/cache
+                "--env=HOME=/home",
+                # API keys passed through from host
+                # SECURITY NOTE: Using "--env=KEY" (without value) passes through from host
+                # environment, so the actual secret is NOT visible in `ps` output.
+                # However, `docker inspect` can still reveal the value.
+                #
+                # KNOWN LIMITATION: docker inspect exposure remains acceptable for this use case
+                # because: (1) requires Docker API access, (2) containers are short-lived,
+                # (3) same-user isolation is assumed.
+                #
+                # FUTURE: Consider using --env-file with a tmpfs-backed temporary file,
+                # or mounting secrets via Docker secrets/volumes for enhanced isolation.
+                "--env=ANTHROPIC_API_KEY",
+                "--env=OPENAI_API_KEY",
+                "--env=GOOGLE_API_KEY",
+            ]
+        )
 
         # Handle prompt passing based on CLI capability
         # SECURITY: Prompt is always passed via stdin to avoid `ps` exposure.
@@ -753,13 +774,16 @@ class SandboxedLLMClient:
             #   - This is safe even if prompt contains quotes, $, backticks, etc.
             # NOTE: Command substitution $(cat file) still subject to ARG_MAX (~2MB).
             cmd.append("-i")  # Keep stdin open
-            cmd.extend([
-                self.config.cli_image,
-                "sh", "-c",
-                # Write stdin to file, capture into variable, pass safely quoted
-                f'cat > /tmp/prompt.txt && chmod 600 /tmp/prompt.txt && '
-                f'PROMPT="$(cat /tmp/prompt.txt)" && {shlex.join(cli_args)} "$PROMPT"',
-            ])
+            cmd.extend(
+                [
+                    self.config.cli_image,
+                    "sh",
+                    "-c",
+                    # Write stdin to file, capture into variable, pass safely quoted
+                    f"cat > /tmp/prompt.txt && chmod 600 /tmp/prompt.txt && "
+                    f'PROMPT="$(cat /tmp/prompt.txt)" && {shlex.join(cli_args)} "$PROMPT"',
+                ]
+            )
 
         _registry.add(container_name)
         try:
@@ -862,7 +886,8 @@ class SandboxedExecutor:
 
         # TOCTOU MITIGATION: Use resolved path for Docker mount
         cmd = [
-            "docker", "run",
+            "docker",
+            "run",
             "--rm",
             f"--name={container_name}",
             "--network=none",  # NO network access
@@ -876,21 +901,23 @@ class SandboxedExecutor:
         if docker_user:
             cmd.append(f"--user={docker_user}")
 
-        cmd.extend([
-            "--read-only",
-            "--tmpfs=/tmp:size=1g",
-            "--tmpfs=/home:size=100m",
-            f"--memory={self.config.memory_limit}",
-            f"--cpus={self.config.cpu_limit}",
-            # Process limits (prevent fork-bomb DoS)
-            f"--pids-limit={self.config.pids_limit}",
-            f"--ulimit=nproc={self.config.ulimit_nproc}:{self.config.ulimit_nproc}",
-            # Security options
-            "--security-opt=no-new-privileges:true",
-            "--cap-drop=ALL",
-            # HOME must match tmpfs mount so tools can write config/cache
-            "--env=HOME=/home",
-        ])
+        cmd.extend(
+            [
+                "--read-only",
+                "--tmpfs=/tmp:size=1g",
+                "--tmpfs=/home:size=100m",
+                f"--memory={self.config.memory_limit}",
+                f"--cpus={self.config.cpu_limit}",
+                # Process limits (prevent fork-bomb DoS)
+                f"--pids-limit={self.config.pids_limit}",
+                f"--ulimit=nproc={self.config.ulimit_nproc}:{self.config.ulimit_nproc}",
+                # Security options
+                "--security-opt=no-new-privileges:true",
+                "--cap-drop=ALL",
+                # HOME must match tmpfs mount so tools can write config/cache
+                "--env=HOME=/home",
+            ]
+        )
 
         # Add environment variables
         if env:
@@ -898,10 +925,14 @@ class SandboxedExecutor:
                 cmd.extend(["--env", f"{key}={value}"])
 
         # Add image and command
-        cmd.extend([
-            self.config.executor_image,
-            "bash", "-lc", shell_command,
-        ])
+        cmd.extend(
+            [
+                self.config.executor_image,
+                "bash",
+                "-lc",
+                shell_command,
+            ]
+        )
 
         _registry.add(container_name)
         try:
@@ -957,6 +988,7 @@ class LocalExecutor:
 
         self.workdir = Path(workdir).absolute() if workdir else Path.cwd()
         import sys
+
         print(
             "WARNING: Using LocalExecutor - commands run WITHOUT SANDBOX. "
             "This should only be used for unit tests.",

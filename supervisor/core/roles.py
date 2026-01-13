@@ -214,9 +214,7 @@ class RoleLoader:
             if role_file.exists():
                 return role_file
 
-        raise RoleNotFoundError(
-            f"Role '{name}' not found in search paths: {self.search_paths}"
-        )
+        raise RoleNotFoundError(f"Role '{name}' not found in search paths: {self.search_paths}")
 
     def _load_yaml(self, path: Path) -> dict[str, Any]:
         """Load YAML file with proper error handling."""
@@ -286,9 +284,7 @@ class RoleLoader:
                 name = item["name"]
                 required = item.get("required", True)
                 if not isinstance(required, bool):
-                    raise RoleValidationError(
-                        f"Gate '{name}' field 'required' must be boolean"
-                    )
+                    raise RoleValidationError(f"Gate '{name}' field 'required' must be boolean")
                 on_fail_value = item.get("on_fail")
                 on_fail: GateFailAction | None = None
                 if on_fail_value is not None:
@@ -303,14 +299,10 @@ class RoleLoader:
                         raise RoleValidationError(
                             f"Gate '{name}' field 'on_fail' must be one of: {valid}"
                         ) from exc
-                parsed.append(
-                    RoleGateConfig(name=name, on_fail=on_fail, required=required)
-                )
+                parsed.append(RoleGateConfig(name=name, on_fail=on_fail, required=required))
                 continue
 
-            raise RoleValidationError(
-                f"Gate entry at index {idx} must be string or dict"
-            )
+            raise RoleValidationError(f"Gate entry at index {idx} must be string or dict")
 
         return parsed
 
@@ -349,9 +341,7 @@ class RoleLoader:
 
             if key == "system_prompt_additions":
                 # Append to parent system prompt
-                merged["system_prompt"] = (
-                    parent_dict["system_prompt"] + "\n\n" + value
-                )
+                merged["system_prompt"] = parent_dict["system_prompt"] + "\n\n" + value
 
             elif key in ("flags", "gates"):
                 # Append lists

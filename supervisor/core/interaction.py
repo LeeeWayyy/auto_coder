@@ -12,7 +12,6 @@ import queue
 import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +21,7 @@ class ApprovalDecision(str, Enum):
 
     FIX (v22 - Codex): Added is_proceed() helper for cleaner decision handling.
     """
+
     APPROVE = "approve"
     REJECT = "reject"
     EDIT = "edit"  # Reserved for future implementation
@@ -39,6 +39,7 @@ class ApprovalRequest:
     FIX (v25 - Codex): Added diff_lines and expiry_time for post-execution
     approval flow showing actual git diff.
     """
+
     gate_id: str
     feature_id: str
     component_id: str | None

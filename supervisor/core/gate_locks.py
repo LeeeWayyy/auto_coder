@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 
 try:
-    from filelock import FileLock, Timeout as FileLockTimeout
+    from filelock import FileLock
+    from filelock import Timeout as FileLockTimeout
 except ImportError:
     FileLock = None  # type: ignore[misc, assignment]
     FileLockTimeout = None  # type: ignore[misc, assignment]
@@ -27,15 +29,14 @@ class BaseFileLock:
     def __init__(self, worktree_path: Path, exclusive: bool = True):
         if FileLock is None:
             raise RuntimeError(
-                "The 'filelock' package is required for locking. "
-                "Install with: pip install filelock"
+                "The 'filelock' package is required for locking. Install with: pip install filelock"
             )
         self.worktree_path = worktree_path.resolve()
         self._filelock: FileLock | None = None
         self.acquired = False
         self._exclusive = exclusive
 
-    def __enter__(self) -> "BaseFileLock":
+    def __enter__(self) -> BaseFileLock:
         supervisor_dir = self.worktree_path / ".supervisor"
 
         # SECURITY: Check for symlink attacks
@@ -76,10 +77,8 @@ class BaseFileLock:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._filelock is not None and self.acquired:
-            try:
+            with contextlib.suppress(Exception):
                 self._filelock.release()
-            except Exception:
-                pass
         return False
 
 

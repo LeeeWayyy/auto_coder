@@ -3,24 +3,18 @@
 Tests dependency-aware scheduling with phase sequencing.
 """
 
-import pytest
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+
+import pytest
 
 from supervisor.core.models import (
-    Component,
     ComponentStatus,
-    Feature,
-    FeatureStatus,
-    Phase,
-    PhaseStatus,
 )
 from supervisor.core.scheduler import (
     CyclicDependencyError,
     DAGScheduler,
     DependencyNotFoundError,
-    WorkflowBlockedError,
 )
 from supervisor.core.state import Database
 

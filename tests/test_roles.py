@@ -1,15 +1,11 @@
 """Tests for role configuration loading and validation."""
 
-import json
-import tempfile
-from pathlib import Path
-
 import pytest
 import yaml
 
 from supervisor.core.roles import (
-    RoleCycleError,
     RoleConfig,
+    RoleCycleError,
     RoleLoader,
     RoleNotFoundError,
     RoleValidationError,
@@ -138,9 +134,7 @@ class TestRoleLoader:
         assert role.flags == ["-p"]  # Inherited
         assert role.base_role == "base"  # Root of extends chain
 
-    def test_multi_level_inheritance_base_role(
-        self, temp_roles_dir, loader_with_temp_roles
-    ):
+    def test_multi_level_inheritance_base_role(self, temp_roles_dir, loader_with_temp_roles):
         """Multi-level inheritance sets base_role to root."""
         # Create three-level hierarchy: grandparent -> parent -> child
         grandparent = {
@@ -204,9 +198,7 @@ class TestRoleLoader:
         with pytest.raises(RoleNotFoundError):
             loader_with_temp_roles.load_role("nonexistent")
 
-    def test_schema_validation_invalid_cli(
-        self, temp_roles_dir, loader_with_temp_roles
-    ):
+    def test_schema_validation_invalid_cli(self, temp_roles_dir, loader_with_temp_roles):
         """Invalid CLI value is rejected by schema."""
         role_config = {
             "name": "invalid",

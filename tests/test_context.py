@@ -1,8 +1,5 @@
 """Tests for context packing and template rendering."""
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from supervisor.core.context import ALLOWED_TEMPLATES, ContextPacker

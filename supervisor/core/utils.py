@@ -33,10 +33,7 @@ def normalize_repo_path(
     path = Path(file_path)
     resolved_root = repo_root.resolve()
 
-    if path.is_absolute():
-        resolved = path.resolve()
-    else:
-        resolved = (resolved_root / path).resolve()
+    resolved = path.resolve() if path.is_absolute() else (resolved_root / path).resolve()
 
     try:
         return str(resolved.relative_to(resolved_root))

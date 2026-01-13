@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import functools
 import hashlib
@@ -112,9 +113,9 @@ class GateExecutor:
 
     def __init__(
         self,
-        executor: "SandboxedExecutor",
-        gate_loader: "GateLoader",
-        db: "Database",
+        executor: SandboxedExecutor,
+        gate_loader: GateLoader,
+        db: Database,
     ) -> None:
         self.executor = executor
         self.gate_loader = gate_loader
@@ -125,9 +126,7 @@ class GateExecutor:
     @classmethod
     def _get_safe_hooks_dir(cls) -> Path:
         if cls._safe_hooks_dir is None:
-            cls._safe_hooks_dir = Path(
-                tempfile.mkdtemp(prefix="supervisor_safe_hooks_")
-            )
+            cls._safe_hooks_dir = Path(tempfile.mkdtemp(prefix="supervisor_safe_hooks_"))
         return cls._safe_hooks_dir
 
     def _filter_env(self, env: dict[str, str]) -> dict[str, str]:
@@ -208,9 +207,7 @@ class GateExecutor:
             head_result = _run_git(["rev-parse", "HEAD"], timeout=5)
             if head_result.returncode != 0:
                 return None
-            head_commit = head_result.stdout.decode(
-                "utf-8", errors="surrogateescape"
-            ).strip()
+            head_commit = head_result.stdout.decode("utf-8", errors="surrogateescape").strip()
             _check_deadline()
 
             staged_result = _run_git(["diff", "--cached"], timeout=10)
@@ -271,7 +268,9 @@ class GateExecutor:
                     for pattern in self.CACHE_KEY_SKIP_PATTERNS:
                         pattern_norm = pattern.replace("\\", "/").strip("/")
                         # Check if pattern matches as a path component (gitignore-style)
-                        if normalized.startswith(pattern_norm + "/") or pattern_norm in normalized.split("/"):
+                        if normalized.startswith(
+                            pattern_norm + "/"
+                        ) or pattern_norm in normalized.split("/"):
                             skip = True
                             break
                     if skip:
@@ -298,7 +297,7 @@ class GateExecutor:
                         for chunk in iter(lambda: f.read(8192), b""):
                             file_hasher.update(chunk)
                     file_hash = file_hasher.hexdigest()[:32]
-                    content_hasher.update(f"{filename}:{file_hash}\n".encode("utf-8"))
+                    content_hasher.update(f"{filename}:{file_hash}\n".encode())
 
             # Include cache_inputs: additional files/patterns that affect the gate
             if config.cache_inputs:
@@ -322,9 +321,7 @@ class GateExecutor:
                 cache_input_files = sorted(set(cache_input_files))
                 if len(cache_input_files) > self.CACHE_KEY_MAX_UNTRACKED_FILES:
                     if config.force_hash_large_cache_inputs:
-                        cache_input_files = cache_input_files[
-                            : self.CACHE_KEY_MAX_UNTRACKED_FILES
-                        ]
+                        cache_input_files = cache_input_files[: self.CACHE_KEY_MAX_UNTRACKED_FILES]
                     else:
                         return None  # Too many files to hash
 
@@ -349,13 +346,11 @@ class GateExecutor:
                         for chunk in iter(lambda: f.read(8192), b""):
                             file_hasher.update(chunk)
                     file_hash = file_hasher.hexdigest()[:32]
-                    content_hasher.update(
-                        f"cache_input:{rel_path}:{file_hash}\n".encode("utf-8")
-                    )
+                    content_hasher.update(f"cache_input:{rel_path}:{file_hash}\n".encode())
 
             executor_image_id = getattr(self.executor, "image_id", None)
             if executor_image_id:
-                content_hasher.update(f"image:{executor_image_id}".encode("utf-8"))
+                content_hasher.update(f"image:{executor_image_id}".encode())
 
             return content_hasher.hexdigest()[:32]
         except self.GateTimeout:
@@ -555,7 +550,9 @@ class GateExecutor:
                         try:
                             symlink_target = str(file_path.readlink())
                             # Hash the symlink target for change detection
-                            target_hash = hashlib.sha256(symlink_target.encode("utf-8")).hexdigest()[:32]
+                            target_hash = hashlib.sha256(
+                                symlink_target.encode("utf-8")
+                            ).hexdigest()[:32]
                             baseline[path] = (0, -2, target_hash)  # -2 indicates symlink
                         except OSError:
                             baseline[path] = (0, -2, None)
@@ -579,9 +576,7 @@ class GateExecutor:
                 except OSError:
                     baseline[path] = (0, -1, None)
 
-            return WorktreeBaseline(
-                files=baseline, pre_tracked_clean=not has_tracked_changes
-            )
+            return WorktreeBaseline(files=baseline, pre_tracked_clean=not has_tracked_changes)
         except Exception as e:
             logger.warning(f"Baseline capture failed: {e}")
             return None
@@ -748,7 +743,9 @@ class GateExecutor:
 
                         # Change detection: hash the symlink target
                         symlink_target = str(file_path.readlink())
-                        cur_target_hash = hashlib.sha256(symlink_target.encode("utf-8")).hexdigest()[:32]
+                        cur_target_hash = hashlib.sha256(
+                            symlink_target.encode("utf-8")
+                        ).hexdigest()[:32]
 
                         # Check if symlink target changed (unless exempt untracked)
                         if pre_hash is not None and cur_target_hash != pre_hash:
@@ -817,8 +814,14 @@ class GateExecutor:
         (re.compile(r"AKIA[A-Z0-9]{16}"), "[REDACTED:aws_access_key]"),
         (re.compile(r"xox[baprs]-[a-zA-Z0-9\-]+"), "[REDACTED:slack_token]"),
         (re.compile(r"(?i)(api[_-]?key|apikey)[\"']?\s*[:=]\s*[\"']?[\w\-]+"), r"\1=[REDACTED]"),
-        (re.compile(r"(?i)(token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?[\w\-]+"), r"\1=[REDACTED]"),
-        (re.compile(r"(?i)(authorization|auth)[\"']?\s*[:=]\s*[\"']?bearer\s+[\w\-\.]+"), r"\1=Bearer [REDACTED]"),
+        (
+            re.compile(r"(?i)(token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?[\w\-]+"),
+            r"\1=[REDACTED]",
+        ),
+        (
+            re.compile(r"(?i)(authorization|auth)[\"']?\s*[:=]\s*[\"']?bearer\s+[\w\-\.]+"),
+            r"\1=Bearer [REDACTED]",
+        ),
     ]
 
     def _redact_secrets(self, text: str) -> str:
@@ -848,9 +851,7 @@ class GateExecutor:
                 check_path = resolved_worktree / part
                 if check_path.exists():
                     if check_path.is_symlink():
-                        logger.warning(
-                            f"SECURITY: {part} is a symlink. Artifact storage disabled."
-                        )
+                        logger.warning(f"SECURITY: {part} is a symlink. Artifact storage disabled.")
                         return None
                     try:
                         check_path.resolve().relative_to(resolved_worktree)
@@ -861,11 +862,7 @@ class GateExecutor:
                         return None
 
             artifacts_dir = (
-                resolved_worktree
-                / ".supervisor"
-                / "artifacts"
-                / "gates"
-                / safe_workflow_id
+                resolved_worktree / ".supervisor" / "artifacts" / "gates" / safe_workflow_id
             )
 
             # Concurrency protection.
@@ -899,10 +896,8 @@ class GateExecutor:
                             oldest.resolve().relative_to(resolved_worktree)
                         except ValueError:
                             continue
-                        try:
+                        with contextlib.suppress(OSError):
                             oldest.unlink()
-                        except OSError:
-                            pass
                 except OSError:
                     pass
 
@@ -913,12 +908,10 @@ class GateExecutor:
                 if len(output_bytes) > max_bytes:
                     marker = (
                         f"...[artifact truncated to {GateResult.ARTIFACT_MAX_SIZE} bytes]...\n"
-                    ).encode("utf-8")
+                    ).encode()
                     tail_budget = max_bytes - len(marker)
                     tail = output_bytes[-tail_budget:] if tail_budget > 0 else b""
-                    redacted = marker.decode("utf-8") + tail.decode(
-                        "utf-8", errors="replace"
-                    )
+                    redacted = marker.decode("utf-8") + tail.decode("utf-8", errors="replace")
 
                 # Unique filename to avoid collisions.
                 timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")
@@ -949,10 +942,8 @@ class GateExecutor:
                     os.replace(temp_path, str(artifact_file))
                     return str(artifact_file)
                 except Exception:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(temp_path)
-                    except OSError:
-                        pass
                     raise
         except Exception as e:
             logger.warning(f"Failed to store artifact for gate '{gate_name}': {e}")
@@ -1104,9 +1095,7 @@ class GateExecutor:
                     step_id=step_id,
                     payload={
                         "gate": gate_result.gate_name,
-                        "output": _truncate(
-                            gate_result.output, GateResult.EVENT_OUTPUT_MAX_CHARS
-                        ),
+                        "output": _truncate(gate_result.output, GateResult.EVENT_OUTPUT_MAX_CHARS),
                         "duration": gate_result.duration_seconds,
                         "returncode": gate_result.returncode,
                         "timed_out": gate_result.timed_out,
@@ -1138,9 +1127,7 @@ class GateExecutor:
                         step_id=step_id,
                         payload={
                             "gate": result.gate_name,
-                            "output": _truncate(
-                                result.output, GateResult.EVENT_OUTPUT_MAX_CHARS
-                            ),
+                            "output": _truncate(result.output, GateResult.EVENT_OUTPUT_MAX_CHARS),
                             "duration": result.duration_seconds,
                             "returncode": result.returncode,
                             "timed_out": result.timed_out,
@@ -1182,15 +1169,10 @@ class GateExecutor:
             raw_output = error_output or "Gate executor error"
             returncode = None
 
-        integrity_ok, violations = self._verify_worktree_integrity(
-            worktree_path, baseline, config
-        )
+        integrity_ok, violations = self._verify_worktree_integrity(worktree_path, baseline, config)
         integrity_violation = not integrity_ok
         if violations:
-            raw_output += (
-                "\n\nWORKTREE INTEGRITY VIOLATION: "
-                + ", ".join(sorted(set(violations)))
-            )
+            raw_output += "\n\nWORKTREE INTEGRITY VIOLATION: " + ", ".join(sorted(set(violations)))
 
         redacted_output = self._redact_secrets(raw_output)
         artifact_path = None
@@ -1234,9 +1216,7 @@ class GateExecutor:
                 step_id=step_id,
                 payload={
                     "gate": gate_result.gate_name,
-                    "output": _truncate(
-                        gate_result.output, GateResult.EVENT_OUTPUT_MAX_CHARS
-                    ),
+                    "output": _truncate(gate_result.output, GateResult.EVENT_OUTPUT_MAX_CHARS),
                     "duration": gate_result.duration_seconds,
                     "returncode": gate_result.returncode,
                     "timed_out": gate_result.timed_out,
@@ -1269,6 +1249,7 @@ class GateExecutor:
         on_fail_overrides: dict[str, GateFailAction] | None = None,
     ) -> list[GateResult]:
         """Run multiple gates in dependency order with skip-on-blocking behavior."""
+
         def _truncate(text: str, max_chars: int) -> str:
             if len(text) <= max_chars:
                 return text
@@ -1288,16 +1269,13 @@ class GateExecutor:
                 config = self.gate_loader.get_gate(gate_name)
 
                 if config.skip_on_dependency_failure:
-                    blocking_deps = [
-                        dep for dep in config.depends_on if dep in blocking_failures
-                    ]
+                    blocking_deps = [dep for dep in config.depends_on if dep in blocking_failures]
                     if blocking_deps:
                         skip_result = GateResult(
                             gate_name=gate_name,
                             status=GateStatus.SKIPPED,
                             output=(
-                                "SKIPPED: Dependencies had blocking failures: "
-                                f"{blocking_deps}"
+                                f"SKIPPED: Dependencies had blocking failures: {blocking_deps}"
                             ),
                             duration_seconds=0,
                             cached=False,
@@ -1337,9 +1315,7 @@ class GateExecutor:
                     return results
 
                 if result.status == GateStatus.FAILED:
-                    action = self._get_on_fail_action(
-                        config, on_fail_overrides=on_fail_overrides
-                    )
+                    action = self._get_on_fail_action(config, on_fail_overrides=on_fail_overrides)
                     if action in (
                         GateFailAction.BLOCK,
                         GateFailAction.RETRY_WITH_FEEDBACK,
