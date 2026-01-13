@@ -635,6 +635,22 @@ class Database:
                     ),
                 )
 
+            case EventType.FEATURE_COMPLETED:
+                # Update feature status to COMPLETED with completed_at timestamp
+                conn.execute(
+                    """
+                    UPDATE features SET status = ?, completed_at = ?, updated_by_event_id = ?
+                    WHERE id = ? AND updated_by_event_id < ?
+                    """,
+                    (
+                        FeatureStatus.COMPLETED.value,
+                        _utc_now().isoformat(),
+                        event_id,
+                        event.payload.get("feature_id", event.workflow_id),
+                        event_id,
+                    ),
+                )
+
             case EventType.PHASE_CREATED:
                 # Insert if not exists
                 conn.execute(
