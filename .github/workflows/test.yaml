@@ -126,7 +126,8 @@ jobs:
 
       - name: Run integration tests
         run: |
-          pytest -v -m integration --cov=supervisor --cov-report=term-missing
+          # Exit code 5 means no tests collected - allow that to pass
+          pytest -v -m integration --cov=supervisor --cov-report=term-missing || test $? -eq 5
 
   lint-and-format:
     runs-on: ubuntu-latest

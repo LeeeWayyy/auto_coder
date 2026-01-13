@@ -34,36 +34,28 @@ _ROLE_TO_TASK_TYPE: dict[str, str] = {
     # Planning & Architecture
     "planner": "architecture",
     "architect": "architecture",
-
     # Implementation
     "implementer": "code_gen",
     "implementer_frontend": "frontend",
     "implementer_backend": "backend",
     "implementer_algorithm": "algorithms",
-
     # Debugging
     "debugger": "debugging",
     "debugger_deep": "debugging",
-
     # Review
     "reviewer": "code_review",
     "reviewer_security": "security",
-
     # Refactoring
     "refactorer": "refactoring",
     "refactorer_multi_file": "refactoring",
-
     # Testing
     "tester": "test_gen",
-
     # Security
     "security_reviewer": "security",
     "security_fix": "security_fix",
-
     # Investigation
     "investigator": "investigation",
     "investigator_deep": "investigation",
-
     # Documentation
     "doc_generator": "documentation",
 }
@@ -94,7 +86,9 @@ def _infer_task_type(role_name: str) -> str:
 
 # Map string task types to ModelCapability enum
 # Used to wire task-based routing from role names
-_TASK_TYPE_TO_CAPABILITY: dict[str, "ModelCapability"] = {}  # Populated after ModelCapability defined
+_TASK_TYPE_TO_CAPABILITY: dict[
+    str, "ModelCapability"
+] = {}  # Populated after ModelCapability defined
 
 
 def _init_task_type_mapping() -> None:
@@ -133,6 +127,7 @@ def get_capability_for_role(role_name: str) -> "ModelCapability | None":
 @dataclass
 class AdaptiveConfig:
     """Configuration for adaptive model selection."""
+
     enabled: bool = False
     exploration_rate: float = 0.1  # Epsilon for epsilon-greedy
     min_samples: int = 5
@@ -147,32 +142,32 @@ class ModelCapability(str, Enum):
     """
 
     # === Context & Session Management ===
-    LARGE_CONTEXT = "large_context"      # 1M+ token handling
-    LONG_SESSION = "long_session"        # 30+ hour autonomous operation
-    MULTI_FILE = "multi_file"            # Coherent cross-file changes
+    LARGE_CONTEXT = "large_context"  # 1M+ token handling
+    LONG_SESSION = "long_session"  # 30+ hour autonomous operation
+    MULTI_FILE = "multi_file"  # Coherent cross-file changes
 
     # === Code Generation ===
-    CODE_GEN = "code_generation"         # General code writing
-    FRONTEND = "frontend"                # UI/React/CSS work
-    BACKEND = "backend"                  # API/database/server logic
-    ALGORITHMS = "algorithms"            # Competitive programming, complex algos
+    CODE_GEN = "code_generation"  # General code writing
+    FRONTEND = "frontend"  # UI/React/CSS work
+    BACKEND = "backend"  # API/database/server logic
+    ALGORITHMS = "algorithms"  # Competitive programming, complex algos
 
     # === Code Quality ===
-    REFACTORING = "refactoring"          # Large-scale restructuring
-    DEBUGGING = "debugging"              # Bug finding & fixing
-    CODE_REVIEW = "code_review"          # Thorough code analysis
-    TEST_GEN = "test_generation"         # Unit/integration test generation
+    REFACTORING = "refactoring"  # Large-scale restructuring
+    DEBUGGING = "debugging"  # Bug finding & fixing
+    CODE_REVIEW = "code_review"  # Thorough code analysis
+    TEST_GEN = "test_generation"  # Unit/integration test generation
 
     # === Security ===
-    SECURITY = "security"                # Vulnerability detection
-    SECURITY_FIX = "security_fix"        # Secure code remediation
+    SECURITY = "security"  # Vulnerability detection
+    SECURITY_FIX = "security_fix"  # Secure code remediation
 
     # === Design & Planning ===
-    ARCHITECTURE = "architecture"        # System design decisions
-    REASONING = "reasoning"              # Complex logical analysis
+    ARCHITECTURE = "architecture"  # System design decisions
+    REASONING = "reasoning"  # Complex logical analysis
 
     # === Documentation ===
-    DOCUMENTATION = "documentation"      # Docs, comments, READMEs
+    DOCUMENTATION = "documentation"  # Docs, comments, READMEs
 
     # === Cost Efficiency (for budget-sensitive tasks) ===
     COST_EFFICIENCY = "cost_efficiency"  # Low token cost
@@ -211,14 +206,14 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="claude",
         model_id="claude-opus-4-5-20251101",
         strengths=[
-            ModelCapability.ARCHITECTURE,      # Best at system design
-            ModelCapability.SECURITY,          # Best vulnerability detection
-            ModelCapability.SECURITY_FIX,      # Only model 10/10 on security refactor
-            ModelCapability.REFACTORING,       # "Boring in how consistently they handle multi-file refactors"
-            ModelCapability.CODE_REVIEW,       # SOTA review quality
-            ModelCapability.LONG_SESSION,      # 30+ hour autonomous operation
-            ModelCapability.MULTI_FILE,        # Coherent cross-file changes
-            ModelCapability.REASONING,         # Deep logical analysis
+            ModelCapability.ARCHITECTURE,  # Best at system design
+            ModelCapability.SECURITY,  # Best vulnerability detection
+            ModelCapability.SECURITY_FIX,  # Only model 10/10 on security refactor
+            ModelCapability.REFACTORING,  # "Boring in how consistently they handle multi-file refactors"
+            ModelCapability.CODE_REVIEW,  # SOTA review quality
+            ModelCapability.LONG_SESSION,  # 30+ hour autonomous operation
+            ModelCapability.MULTI_FILE,  # Coherent cross-file changes
+            ModelCapability.REASONING,  # Deep logical analysis
         ],
         max_context=200000,
         relative_cost=1.0,  # $5/$25 per 1M tokens (baseline)
@@ -229,12 +224,12 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="claude",
         model_id="claude-sonnet-4-5-20250929",
         strengths=[
-            ModelCapability.MULTI_FILE,        # "Most reliable for maintaining complex systems"
-            ModelCapability.BACKEND,           # Reliable backend development
-            ModelCapability.CODE_GEN,          # Strong general code generation
-            ModelCapability.SECURITY,          # Doubled Cybench score
-            ModelCapability.CODE_REVIEW,       # Good review quality
-            ModelCapability.TEST_GEN,          # Comprehensive test suites
+            ModelCapability.MULTI_FILE,  # "Most reliable for maintaining complex systems"
+            ModelCapability.BACKEND,  # Reliable backend development
+            ModelCapability.CODE_GEN,  # Strong general code generation
+            ModelCapability.SECURITY,  # Doubled Cybench score
+            ModelCapability.CODE_REVIEW,  # Good review quality
+            ModelCapability.TEST_GEN,  # Comprehensive test suites
         ],
         max_context=200000,
         relative_cost=0.6,  # $3/$15 per 1M tokens
@@ -245,14 +240,13 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="claude",
         model_id="claude-haiku-4-5",
         strengths=[
-            ModelCapability.COST_EFFICIENCY,   # 1/3 cost of Sonnet
-            ModelCapability.CODE_GEN,          # 90% capability of Sonnet
+            ModelCapability.COST_EFFICIENCY,  # 1/3 cost of Sonnet
+            ModelCapability.CODE_GEN,  # 90% capability of Sonnet
         ],
         max_context=200000,
         relative_cost=0.2,  # $1/$5 per 1M tokens
         quality_score=0.70,
     ),
-
     # ==========================================================================
     # CODEX/OPENAI FAMILY
     # ==========================================================================
@@ -261,11 +255,11 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="codex",
         model_id="gpt-5.2-codex",
         strengths=[
-            ModelCapability.DEBUGGING,         # "Thorough context gathering catches subtle bugs"
-            ModelCapability.FRONTEND,          # 70% win rate on frontend vs o3
-            ModelCapability.CODE_GEN,          # "Production-ready code with fewer critical bugs"
-            ModelCapability.REASONING,         # 52.9% ARC-AGI-2 (best)
-            ModelCapability.MULTI_FILE,        # "Suggests refactors aligning with project architecture"
+            ModelCapability.DEBUGGING,  # "Thorough context gathering catches subtle bugs"
+            ModelCapability.FRONTEND,  # 70% win rate on frontend vs o3
+            ModelCapability.CODE_GEN,  # "Production-ready code with fewer critical bugs"
+            ModelCapability.REASONING,  # 52.9% ARC-AGI-2 (best)
+            ModelCapability.MULTI_FILE,  # "Suggests refactors aligning with project architecture"
         ],
         max_context=1000000,
         relative_cost=0.5,  # ~$2.50/$10 per 1M tokens
@@ -276,9 +270,9 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="codex",
         model_id="gpt-5.1-codex-max",
         strengths=[
-            ModelCapability.DEBUGGING,         # "Most dependable for real-world development"
-            ModelCapability.MULTI_FILE,        # Large-scale changes
-            ModelCapability.REFACTORING,       # Production-ready refactors
+            ModelCapability.DEBUGGING,  # "Most dependable for real-world development"
+            ModelCapability.MULTI_FILE,  # Large-scale changes
+            ModelCapability.REFACTORING,  # Production-ready refactors
         ],
         max_context=1000000,
         relative_cost=0.6,
@@ -289,9 +283,9 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="codex",
         model_id="o3",
         strengths=[
-            ModelCapability.REASONING,         # Strong reasoning specialist
-            ModelCapability.ALGORITHMS,        # Good at algorithmic problems
-            ModelCapability.COST_EFFICIENCY,   # Very cheap
+            ModelCapability.REASONING,  # Strong reasoning specialist
+            ModelCapability.ALGORITHMS,  # Good at algorithmic problems
+            ModelCapability.COST_EFFICIENCY,  # Very cheap
         ],
         max_context=200000,
         relative_cost=0.08,  # $0.40/$1.60 per 1M tokens
@@ -302,14 +296,13 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="codex",
         model_id="gpt-5-codex-mini",
         strengths=[
-            ModelCapability.COST_EFFICIENCY,   # Very cheap
-            ModelCapability.CODE_GEN,          # Basic code generation
+            ModelCapability.COST_EFFICIENCY,  # Very cheap
+            ModelCapability.CODE_GEN,  # Basic code generation
         ],
         max_context=128000,
         relative_cost=0.08,
         quality_score=0.65,
     ),
-
     # ==========================================================================
     # GEMINI FAMILY
     # ==========================================================================
@@ -318,11 +311,11 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="gemini",
         model_id="gemini-3-flash",
         strengths=[
-            ModelCapability.LARGE_CONTEXT,     # 1M token context
-            ModelCapability.ALGORITHMS,        # Strong on algorithmic challenges
-            ModelCapability.COST_EFFICIENCY,   # Best value: 78% at $0.50/$3
-            ModelCapability.CODE_GEN,          # Good code generation
-            ModelCapability.TEST_GEN,          # Fast test generation
+            ModelCapability.LARGE_CONTEXT,  # 1M token context
+            ModelCapability.ALGORITHMS,  # Strong on algorithmic challenges
+            ModelCapability.COST_EFFICIENCY,  # Best value: 78% at $0.50/$3
+            ModelCapability.CODE_GEN,  # Good code generation
+            ModelCapability.TEST_GEN,  # Fast test generation
         ],
         max_context=1000000,
         relative_cost=0.12,  # $0.50/$3 per 1M tokens
@@ -333,9 +326,9 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="gemini",
         model_id="gemini-3-pro",
         strengths=[
-            ModelCapability.LARGE_CONTEXT,     # 1M token context
-            ModelCapability.ALGORITHMS,        # 1500+ Elo competitive programming
-            ModelCapability.REASONING,         # Complex reasoning tasks
+            ModelCapability.LARGE_CONTEXT,  # 1M token context
+            ModelCapability.ALGORITHMS,  # 1500+ Elo competitive programming
+            ModelCapability.REASONING,  # Complex reasoning tasks
         ],
         max_context=1000000,
         relative_cost=0.25,  # $1.25/$5 per 1M tokens
@@ -346,8 +339,8 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         cli="gemini",
         model_id="gemini-2.5-pro",
         strengths=[
-            ModelCapability.LARGE_CONTEXT,     # 1M token context
-            ModelCapability.DOCUMENTATION,    # Good for docs
+            ModelCapability.LARGE_CONTEXT,  # 1M token context
+            ModelCapability.DOCUMENTATION,  # Good for docs
         ],
         max_context=1000000,
         relative_cost=0.25,
@@ -356,45 +349,36 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
 }
 
 
-
 # Role to model mapping - Quality-first (v28)
 # Based on research: thoroughness valued over speed
 ROLE_MODEL_MAP: dict[str, str] = {
     # === Planning & Architecture ===
-    "planner": "claude:opus",              # Best architecture decisions, 30+ hr sessions
-    "architect": "claude:opus",            # System design specialist
-
+    "planner": "claude:opus",  # Best architecture decisions, 30+ hr sessions
+    "architect": "claude:opus",  # System design specialist
     # === Implementation ===
-    "implementer": "claude:sonnet",        # Reliable for complex systems
-    "implementer_frontend": "codex:gpt52", # 70% win rate on frontend
-    "implementer_backend": "claude:sonnet", # Best for backend reliability
-    "implementer_algorithm": "gemini:pro3", # 1500+ Elo competitive programming
-
+    "implementer": "claude:sonnet",  # Reliable for complex systems
+    "implementer_frontend": "codex:gpt52",  # 70% win rate on frontend
+    "implementer_backend": "claude:sonnet",  # Best for backend reliability
+    "implementer_algorithm": "gemini:pro3",  # 1500+ Elo competitive programming
     # === Debugging (Quality Focus) ===
-    "debugger": "codex:gpt52",             # "Thorough context gathering catches subtle bugs"
-    "debugger_deep": "claude:opus",        # 2-day production bug fixes, concurrency
-
+    "debugger": "codex:gpt52",  # "Thorough context gathering catches subtle bugs"
+    "debugger_deep": "claude:opus",  # 2-day production bug fixes, concurrency
     # === Code Review ===
-    "reviewer": "claude:opus",             # SOTA review quality
-    "reviewer_security": "claude:opus",    # 100% detection + best fixes
-
+    "reviewer": "claude:opus",  # SOTA review quality
+    "reviewer_security": "claude:opus",  # 100% detection + best fixes
     # === Refactoring ===
-    "refactorer": "claude:opus",           # 10/10 on security refactor tests
-    "refactorer_multi_file": "claude:sonnet", # Coherent cross-file changes
-
+    "refactorer": "claude:opus",  # 10/10 on security refactor tests
+    "refactorer_multi_file": "claude:sonnet",  # Coherent cross-file changes
     # === Testing ===
-    "tester": "claude:sonnet",             # Comprehensive test suites
-
+    "tester": "claude:sonnet",  # Comprehensive test suites
     # === Security ===
-    "security_reviewer": "claude:opus",    # Best vulnerability detection
-    "security_fix": "claude:opus",         # Only model with complete fixes
-
+    "security_reviewer": "claude:opus",  # Best vulnerability detection
+    "security_fix": "claude:opus",  # Only model with complete fixes
     # === Investigation ===
-    "investigator": "gemini:flash3",       # 1M context for large codebases
-    "investigator_deep": "claude:opus",    # Long session, thorough analysis
-
+    "investigator": "gemini:flash3",  # 1M context for large codebases
+    "investigator_deep": "claude:opus",  # Long session, thorough analysis
     # === Documentation ===
-    "doc_generator": "claude:sonnet",      # Quality documentation
+    "doc_generator": "claude:sonnet",  # Quality documentation
 }
 
 
@@ -420,10 +404,7 @@ def parse_model_key(model_key: str) -> tuple[str, str]:
 
     # Unknown model key - raise error with helpful message
     available = ", ".join(sorted(MODEL_PROFILES.keys()))
-    raise ValueError(
-        f"Unknown model key '{model_key}'. "
-        f"Available models: {available}"
-    )
+    raise ValueError(f"Unknown model key '{model_key}'. " f"Available models: {available}")
 
 
 class ModelRouter:
@@ -554,9 +535,7 @@ class ModelRouter:
             if capable_models:
                 if self.prefer_cost:
                     # Cost-first with quality tiebreaker
-                    capable_models.sort(
-                        key=lambda x: (x[1].relative_cost, -x[1].quality_score)
-                    )
+                    capable_models.sort(key=lambda x: (x[1].relative_cost, -x[1].quality_score))
                 else:
                     # Quality-first - find highest quality model with required capability
                     capable_models.sort(key=lambda x: -x[1].quality_score)
@@ -600,9 +579,7 @@ class ModelRouter:
 
         # Filter by actual context size if specified
         if context_size > 0:
-            large_context_models = self._filter_by_context(
-                large_context_models, context_size
-            )
+            large_context_models = self._filter_by_context(large_context_models, context_size)
 
         if not large_context_models:
             # No 1M+ model can handle this - fall back to best model for context
@@ -611,19 +588,14 @@ class ModelRouter:
 
         # If task_type specified, prefer models with that capability
         if task_type:
-            capable = [
-                (k, p) for k, p in large_context_models
-                if task_type in p.strengths
-            ]
+            capable = [(k, p) for k, p in large_context_models if task_type in p.strengths]
             if capable:
                 large_context_models = capable
 
         # Cost-first or quality-first selection
         if self.prefer_cost:
             # Cost-first: cheapest model (with quality as tiebreaker)
-            large_context_models.sort(
-                key=lambda x: (x[1].relative_cost, -x[1].quality_score)
-            )
+            large_context_models.sort(key=lambda x: (x[1].relative_cost, -x[1].quality_score))
         else:
             # Quality-first: highest quality model
             large_context_models.sort(key=lambda x: -x[1].quality_score)
@@ -653,9 +625,7 @@ class ModelRouter:
             raise ValueError(f"context_size must be non-negative, got {context_size}")
 
         # Find all models that can handle the context
-        candidates = self._filter_by_context(
-            list(MODEL_PROFILES.items()), context_size
-        )
+        candidates = self._filter_by_context(list(MODEL_PROFILES.items()), context_size)
 
         if not candidates:
             raise ValueError(
@@ -690,9 +660,7 @@ class ModelRouter:
         if random.random() < self.adaptive_config.exploration_rate:
             logger.debug(f"Adaptive routing: Exploring random model for {role_name}")
             # Filter models that can handle the context size
-            candidates = self._filter_by_context(
-                list(MODEL_PROFILES.items()), context_size
-            )
+            candidates = self._filter_by_context(list(MODEL_PROFILES.items()), context_size)
             if not candidates:
                 return None  # Fall back to other selection methods
             if self.prefer_cost:
@@ -728,9 +696,7 @@ class ModelRouter:
             # Respect prefer_cost: skip expensive historical models in cost-first mode
             if self.prefer_cost:
                 # Find cheapest model that can handle context
-                eligible = self._filter_by_context(
-                    list(MODEL_PROFILES.items()), context_size
-                )
+                eligible = self._filter_by_context(list(MODEL_PROFILES.items()), context_size)
                 if eligible:
                     cheapest = min(eligible, key=lambda x: x[1].relative_cost)
                     if profile.relative_cost > cheapest[1].relative_cost:
@@ -739,7 +705,9 @@ class ModelRouter:
                             f"in favor of cheaper options in cost-first mode"
                         )
                         return None
-            logger.debug(f"Adaptive routing: Selected {best_model} for {role_name} (best historical)")
+            logger.debug(
+                f"Adaptive routing: Selected {best_model} for {role_name} (best historical)"
+            )
             return best_model
 
         return None
@@ -951,10 +919,7 @@ def set_role_model(role_name: str, model_key: str) -> None:
     """
     if model_key not in MODEL_PROFILES:
         available = ", ".join(sorted(MODEL_PROFILES.keys()))
-        raise ValueError(
-            f"Unknown model key '{model_key}'. "
-            f"Available models: {available}"
-        )
+        raise ValueError(f"Unknown model key '{model_key}'. " f"Available models: {available}")
     ROLE_MODEL_MAP[role_name] = model_key
 
 

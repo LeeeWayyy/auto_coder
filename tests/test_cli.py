@@ -391,7 +391,11 @@ class TestRolesCommand:
         mock_loader_instance = mock_loader.return_value
 
         # Mock available roles
-        mock_loader_instance.list_available_roles.return_value = ["planner", "implementer", "reviewer"]
+        mock_loader_instance.list_available_roles.return_value = [
+            "planner",
+            "implementer",
+            "reviewer",
+        ]
 
         # Mock load_role to return role configs
         def mock_load_role(name):

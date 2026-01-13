@@ -435,8 +435,8 @@ pytest -m "not slow"
 ### Where can I get help?
 
 - **Documentation**: See `docs/` directory
-- **GitHub Issues**: https://github.com/anthropics/supervisor/issues
-- **Discussions**: https://github.com/anthropics/supervisor/discussions
+- **GitHub Issues**: https://github.com/LeeeWayyy/auto_coder/issues
+- **Discussions**: https://github.com/LeeeWayyy/auto_coder/discussions
 
 ---
 

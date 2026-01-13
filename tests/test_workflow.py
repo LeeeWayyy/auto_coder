@@ -581,7 +581,9 @@ class TestWorkflowRollback:
         )
 
         # Mock rollback method to track calls
-        mock_rollback = mocker.patch.object(coordinator, "_rollback_worktree_changes", return_value=True)
+        mock_rollback = mocker.patch.object(
+            coordinator, "_rollback_worktree_changes", return_value=True
+        )
 
         # Mock execution to fail
         mocker.patch.object(

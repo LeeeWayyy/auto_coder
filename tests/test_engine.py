@@ -458,9 +458,7 @@ class TestExecutionEngine:
         mocker.patch.object(engine.role_loader, "load_role", return_value=mock_role)
 
         # Mock context packing
-        mocker.patch.object(
-            engine.context_packer, "pack_context", return_value="Packed context"
-        )
+        mocker.patch.object(engine.context_packer, "pack_context", return_value="Packed context")
 
         # Mock sandbox execution
         mock_sandbox = mocker.patch("supervisor.core.engine.SandboxedLLMClient")

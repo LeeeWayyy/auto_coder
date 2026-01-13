@@ -170,9 +170,7 @@ class PlannerDocsetStrategy(ContextStrategy):
                 adr_content.append(f"### {adr_file.name}\n\n{adr_file.read_text()}")
                 files_included.append(f"docs/ADRs/{adr_file.name}")
             if adr_content:
-                parts["adrs"] = (
-                    "## Architecture Decision Records\n\n" + "\n\n".join(adr_content)
-                )
+                parts["adrs"] = "## Architecture Decision Records\n\n" + "\n\n".join(adr_content)
 
         # File tree (compressed)
         # FIX (Gemini review): Add Python fallback for portability
@@ -303,9 +301,7 @@ class ImplementerTargetedStrategy(ContextStrategy):
                 if path.exists():
                     # Detect language from extension
                     lang = detect_language(tf)
-                    target_content.append(
-                        f"### {tf}\n\n```{lang}\n{path.read_text()}\n```"
-                    )
+                    target_content.append(f"### {tf}\n\n```{lang}\n{path.read_text()}\n```")
                     files_included.append(tf)
                 else:
                     target_content.append(f"### {tf}\n\n[File does not exist yet - new file]")
@@ -326,21 +322,15 @@ class ImplementerTargetedStrategy(ContextStrategy):
                         )
                         files_included.append(imp_file)
                 if import_content:
-                    parts["imports"] = (
-                        "## Imported Dependencies\n\n" + "\n\n".join(import_content)
-                    )
+                    parts["imports"] = "## Imported Dependencies\n\n" + "\n\n".join(import_content)
 
         # Git diff - FIX (Codex review): Configurable diff source
         git_diff = extra_inputs.get("git_diff") if extra_inputs else None
-        diff_source = (
-            extra_inputs.get("diff_source", "staged") if extra_inputs else "staged"
-        )
+        diff_source = extra_inputs.get("diff_source", "staged") if extra_inputs else "staged"
 
         if not git_diff:
             try:
-                diff_cmd = self.DIFF_COMMANDS.get(
-                    diff_source, self.DIFF_COMMANDS["staged"]
-                )
+                diff_cmd = self.DIFF_COMMANDS.get(diff_source, self.DIFF_COMMANDS["staged"])
                 result = subprocess.run(
                     diff_cmd,
                     cwd=repo_path,
@@ -494,9 +484,7 @@ class ReviewerDiffStrategy(ContextStrategy):
                 timeout=30,
             )
             if diff_result.returncode == 0 and diff_result.stdout.strip():
-                parts["git_diff"] = (
-                    f"## Staged Changes\n\n```diff\n{diff_result.stdout}\n```"
-                )
+                parts["git_diff"] = f"## Staged Changes\n\n```diff\n{diff_result.stdout}\n```"
         except Exception:
             pass
 
@@ -516,13 +504,11 @@ class ReviewerDiffStrategy(ContextStrategy):
                     path = repo_path / nf
                     if path.exists():
                         lang = detect_language(nf)
-                        new_content.append(
-                            f"### {nf}\n\n```{lang}\n{path.read_text()}\n```"
-                        )
+                        new_content.append(f"### {nf}\n\n```{lang}\n{path.read_text()}\n```")
                         files_included.append(nf)
                 if new_content:
-                    parts["new_files"] = (
-                        "## New Files (Full Content)\n\n" + "\n\n".join(new_content)
+                    parts["new_files"] = "## New Files (Full Content)\n\n" + "\n\n".join(
+                        new_content
                     )
         except Exception:
             pass
@@ -532,14 +518,10 @@ class ReviewerDiffStrategy(ContextStrategy):
         if standards_dir.exists():
             standards_content = []
             for std_file in sorted(standards_dir.glob("*.md"))[:3]:  # Limit to 3
-                standards_content.append(
-                    f"### {std_file.name}\n\n{std_file.read_text()}"
-                )
+                standards_content.append(f"### {std_file.name}\n\n{std_file.read_text()}")
                 files_included.append(f"docs/STANDARDS/{std_file.name}")
             if standards_content:
-                parts["standards"] = (
-                    "## Coding Standards\n\n" + "\n\n".join(standards_content)
-                )
+                parts["standards"] = "## Coding Standards\n\n" + "\n\n".join(standards_content)
 
         # Combine with budget
         combined = self._combine_with_budget(parts, self.token_budget)
@@ -590,9 +572,7 @@ def get_strategy(name: str) -> ContextStrategy:
         StrategyError: If strategy not found
     """
     if name not in STRATEGIES:
-        raise StrategyError(
-            f"Unknown strategy '{name}'. " f"Available: {list(STRATEGIES.keys())}"
-        )
+        raise StrategyError(f"Unknown strategy '{name}'. " f"Available: {list(STRATEGIES.keys())}")
     return STRATEGIES[name]()
 
 

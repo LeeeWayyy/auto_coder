@@ -149,8 +149,7 @@ class DAGScheduler:
         # FIX (Codex v4): Normalize file paths for conflict detection
         # Ensures ./a.py and a.py are detected as the same file
         self._component_files = {
-            c.id: set(self._normalize_path(f) for f in c.files)
-            for c in all_components
+            c.id: set(self._normalize_path(f) for f in c.files) for c in all_components
         }
 
         # Build component-to-phase mapping
@@ -286,9 +285,7 @@ class DAGScheduler:
 
             return ready
 
-    def get_parallel_batches(
-        self, ready: list["Component"]
-    ) -> list[list["Component"]]:
+    def get_parallel_batches(self, ready: list["Component"]) -> list[list["Component"]]:
         """Group ready components into conflict-free parallel batches.
 
         Components that modify the same files cannot run in parallel.
@@ -438,8 +435,7 @@ class DAGScheduler:
 
         with self._status_lock:
             return all(
-                comp.status == ComponentStatus.COMPLETED
-                for comp in self._components.values()
+                comp.status == ComponentStatus.COMPLETED for comp in self._components.values()
             )
 
     def get_component(self, component_id: str) -> "Component | None":
@@ -482,8 +478,7 @@ class DAGScheduler:
 
         with self._status_lock:
             return sum(
-                1 for comp in self._components.values()
-                if comp.status == ComponentStatus.COMPLETED
+                1 for comp in self._components.values() if comp.status == ComponentStatus.COMPLETED
             )
 
     def is_feature_blocked(self) -> bool:
@@ -509,16 +504,14 @@ class DAGScheduler:
 
         # Check if any components are still in progress
         has_in_progress = any(
-            comp.status == ComponentStatus.IMPLEMENTING
-            for comp in self._components.values()
+            comp.status == ComponentStatus.IMPLEMENTING for comp in self._components.values()
         )
         if has_in_progress:
             return False  # Still working, not blocked
 
         # Check if there are pending components (blocked by failed deps)
         has_pending = any(
-            comp.status == ComponentStatus.PENDING
-            for comp in self._components.values()
+            comp.status == ComponentStatus.PENDING for comp in self._components.values()
         )
 
         # FIX: If no pending and no ready and no in_progress, we're blocked

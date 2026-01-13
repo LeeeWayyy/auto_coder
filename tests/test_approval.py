@@ -117,7 +117,9 @@ class TestRiskAssessment:
 
         # Should not be critical (documentation about production, not actual production)
         # Depends on exact regex - may be medium/low
-        assert risk != "critical" or "production" in context["changes"][0]  # Allow if actually matches
+        assert (
+            risk != "critical" or "production" in context["changes"][0]
+        )  # Allow if actually matches
 
 
 # =============================================================================

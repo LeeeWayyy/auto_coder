@@ -72,7 +72,9 @@ class TestDockerAvailability:
         mock_result = Mock()
         mock_result.returncode = 1
         mock_result.stdout = b""
-        mock_result.stderr = b"permission denied while trying to connect to the Docker daemon socket"
+        mock_result.stderr = (
+            b"permission denied while trying to connect to the Docker daemon socket"
+        )
         mocker.patch("subprocess.run", return_value=mock_result)
 
         with pytest.raises(DockerNotAvailableError):

@@ -41,17 +41,46 @@ class GateLoader:
     ENV_DENYLIST_PREFIXES = ("SUPERVISOR_",)
 
     # Shell binaries that require allow_shell=true
-    SHELL_BINARY_NAMES = frozenset({
-        "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
-        "cmd", "powershell", "pwsh",
-    })
+    SHELL_BINARY_NAMES = frozenset(
+        {
+            "bash",
+            "sh",
+            "zsh",
+            "fish",
+            "dash",
+            "ksh",
+            "csh",
+            "tcsh",
+            "cmd",
+            "powershell",
+            "pwsh",
+        }
+    )
 
     # Command wrappers that may wrap shell invocations
-    COMMAND_WRAPPERS = frozenset({
-        "env", "command", "exec", "xargs", "nice", "nohup", "timeout",
-        "stdbuf", "ionice", "chrt", "taskset", "numactl", "time",
-        "chronic", "unbuffer", "sudo", "doas", "su", "runuser",
-    })
+    COMMAND_WRAPPERS = frozenset(
+        {
+            "env",
+            "command",
+            "exec",
+            "xargs",
+            "nice",
+            "nohup",
+            "timeout",
+            "stdbuf",
+            "ionice",
+            "chrt",
+            "taskset",
+            "numactl",
+            "time",
+            "chronic",
+            "unbuffer",
+            "sudo",
+            "doas",
+            "su",
+            "runuser",
+        }
+    )
 
     # env flags that take a following argument (must be handled specially)
     ENV_FLAGS_WITH_ARGS = frozenset({"-C", "-u", "--chdir", "--unset"})
@@ -102,9 +131,7 @@ class GateLoader:
         self._basic_validate(config, source_path)
 
     # Static validation helpers (extracted for testability and reuse)
-    _GATE_NAME_PATTERN = re.compile(
-        r"^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$"
-    )
+    _GATE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
     _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     _VALID_SEVERITIES = frozenset({"error", "warning", "info"})
     _BOOL_FIELDS = (
@@ -289,9 +316,7 @@ class GateLoader:
     ) -> None:
         """Validate a list of path patterns (allowed_writes or cache_inputs)."""
         if not isinstance(patterns, list):
-            raise GateConfigError(
-                f"Gate '{gate_name}' {field_name} must be list in {source_path}"
-            )
+            raise GateConfigError(f"Gate '{gate_name}' {field_name} must be list in {source_path}")
         for i, pattern in enumerate(patterns):
             if not isinstance(pattern, str):
                 raise GateConfigError(
@@ -334,13 +359,9 @@ class GateLoader:
                 'Use: command: ["pytest", "-v"] instead of command: "pytest -v"'
             )
         if not isinstance(cmd, list):
-            raise GateConfigError(
-                f"Gate '{gate_name}' command must be a list in {source_path}"
-            )
+            raise GateConfigError(f"Gate '{gate_name}' command must be a list in {source_path}")
         if len(cmd) == 0:
-            raise GateConfigError(
-                f"Gate '{gate_name}' command cannot be empty in {source_path}"
-            )
+            raise GateConfigError(f"Gate '{gate_name}' command cannot be empty in {source_path}")
         if not all(isinstance(c, str) for c in cmd):
             raise GateConfigError(
                 f"Gate '{gate_name}' command items must all be strings in {source_path}"
@@ -371,14 +392,10 @@ class GateLoader:
                 "cannot be overridden, including via wrappers."
             )
 
-    def _validate_env(
-        self, env: object, gate_name: str, source_path: Path
-    ) -> None:
+    def _validate_env(self, env: object, gate_name: str, source_path: Path) -> None:
         """Validate gate environment configuration."""
         if not isinstance(env, dict):
-            raise GateConfigError(
-                f"Gate '{gate_name}' env must be dict in {source_path}"
-            )
+            raise GateConfigError(f"Gate '{gate_name}' env must be dict in {source_path}")
         for k, v in env.items():
             if not isinstance(k, str):
                 raise GateConfigError(
@@ -401,9 +418,7 @@ class GateLoader:
                     f"in {source_path}"
                 )
 
-    def _validate_single_gate(
-        self, gate_name: str, gate_config: dict, source_path: Path
-    ) -> None:
+    def _validate_single_gate(self, gate_name: str, gate_config: dict, source_path: Path) -> None:
         """Validate a single gate configuration."""
         if not isinstance(gate_name, str):
             raise GateConfigError(f"Invalid gate name in {source_path}: {gate_name}")
@@ -417,29 +432,19 @@ class GateLoader:
             )
 
         if not isinstance(gate_config, dict):
-            raise GateConfigError(
-                f"Invalid config for gate '{gate_name}' in {source_path}"
-            )
+            raise GateConfigError(f"Invalid config for gate '{gate_name}' in {source_path}")
 
         if "command" not in gate_config:
-            raise GateConfigError(
-                f"Gate '{gate_name}' missing required 'command' in {source_path}"
-            )
+            raise GateConfigError(f"Gate '{gate_name}' missing required 'command' in {source_path}")
 
-        self._validate_command(
-            gate_config["command"], gate_name, gate_config, source_path
-        )
+        self._validate_command(gate_config["command"], gate_name, gate_config, source_path)
 
         if "timeout" in gate_config:
             timeout = gate_config["timeout"]
             if not isinstance(timeout, int):
-                raise GateConfigError(
-                    f"Gate '{gate_name}' timeout must be int in {source_path}"
-                )
+                raise GateConfigError(f"Gate '{gate_name}' timeout must be int in {source_path}")
             if timeout <= 0:
-                raise GateConfigError(
-                    f"Gate '{gate_name}' timeout must be > 0 in {source_path}"
-                )
+                raise GateConfigError(f"Gate '{gate_name}' timeout must be > 0 in {source_path}")
             if timeout > 3600:
                 raise GateConfigError(
                     f"Gate '{gate_name}' timeout must be <= 3600 (1 hour) in {source_path}"
@@ -470,12 +475,8 @@ class GateLoader:
                     f"Gate '{gate_name}' {field} must be boolean in {source_path}"
                 )
 
-        if "working_dir" in gate_config and not isinstance(
-            gate_config["working_dir"], str
-        ):
-            raise GateConfigError(
-                f"Gate '{gate_name}' working_dir must be string in {source_path}"
-            )
+        if "working_dir" in gate_config and not isinstance(gate_config["working_dir"], str):
+            raise GateConfigError(f"Gate '{gate_name}' working_dir must be string in {source_path}")
 
         if "env" in gate_config:
             self._validate_env(gate_config["env"], gate_name, source_path)
@@ -530,9 +531,7 @@ class GateLoader:
                         if "severity" in filtered_dict:
                             severity_str = filtered_dict["severity"]
                             try:
-                                filtered_dict["severity"] = GateSeverity(
-                                    severity_str.lower()
-                                )
+                                filtered_dict["severity"] = GateSeverity(severity_str.lower())
                             except ValueError:
                                 raise GateConfigError(
                                     f"Invalid severity '{severity_str}' for gate '{name}' in {path}. "

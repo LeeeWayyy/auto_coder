@@ -232,7 +232,9 @@ class TestWorktreeCreation:
 class TestExecuteStep:
     """Tests for execute_step complete workflow."""
 
-    def test_execute_step_success_no_gates(self, repo_with_git, test_db, mock_sandbox_executor, sample_step):
+    def test_execute_step_success_no_gates(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step
+    ):
         """execute_step runs worker and records events without gates."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -254,7 +256,9 @@ class TestExecuteStep:
         assert EventType.STEP_STARTED in event_types
         assert EventType.STEP_COMPLETED in event_types
 
-    def test_execute_step_with_passing_gates(self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker):
+    def test_execute_step_with_passing_gates(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker
+    ):
         """execute_step runs gates and applies changes when they pass."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -276,7 +280,9 @@ class TestExecuteStep:
         gate_passed = [e for e in events if e.event_type == EventType.GATE_PASSED]
         assert len(gate_passed) == 2  # Both gates passed
 
-    def test_execute_step_gate_failure(self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker):
+    def test_execute_step_gate_failure(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker
+    ):
         """execute_step raises GateFailedError when gate fails."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -297,7 +303,9 @@ class TestExecuteStep:
         assert EventType.GATE_FAILED in event_types
         assert EventType.STEP_FAILED in event_types
 
-    def test_execute_step_worker_exception(self, repo_with_git, test_db, mock_sandbox_executor, sample_step):
+    def test_execute_step_worker_exception(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step
+    ):
         """execute_step propagates worker exceptions and records STEP_FAILED."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -314,7 +322,9 @@ class TestExecuteStep:
         failed = [e for e in events if e.event_type == EventType.STEP_FAILED]
         assert len(failed) == 1
 
-    def test_execute_step_worktree_creation_failure(self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker):
+    def test_execute_step_worktree_creation_failure(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker
+    ):
         """execute_step records STEP_FAILED when worktree creation fails."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -347,6 +357,7 @@ class TestGateExecution:
 
         # Mock executor to return success
         from supervisor.sandbox.executor import ExecutionResult
+
         mock_sandbox_executor.execute.return_value = ExecutionResult(
             returncode=0, stdout="All tests passed", stderr="", timed_out=False
         )
@@ -362,6 +373,7 @@ class TestGateExecution:
         worktree_path = workspace._create_worktree("step-gate-fail")
 
         from supervisor.sandbox.executor import ExecutionResult
+
         mock_sandbox_executor.execute.return_value = ExecutionResult(
             returncode=1, stdout="", stderr="Test failed: 3 errors", timed_out=False
         )
@@ -380,8 +392,11 @@ class TestGateExecution:
         (worktree_path / "worktree_only.txt").write_text("test")
 
         from supervisor.sandbox.executor import ExecutionResult
+
         # Gate command should see worktree files
-        mock_sandbox_executor.execute.return_value = ExecutionResult(returncode=0, stdout="", stderr="", timed_out=False)
+        mock_sandbox_executor.execute.return_value = ExecutionResult(
+            returncode=0, stdout="", stderr="", timed_out=False
+        )
 
         workspace._run_gate("test", worktree_path)
 
@@ -394,7 +409,9 @@ class TestGateExecution:
 class TestAtomicApply:
     """Tests for atomic change application with file locking."""
 
-    def test_apply_uses_file_lock(self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker):
+    def test_apply_uses_file_lock(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker
+    ):
         """_apply_changes_atomic uses file lock to prevent race conditions."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -411,7 +428,9 @@ class TestAtomicApply:
         # Verify lock was acquired
         lock_spy.assert_called()
 
-    def test_apply_head_conflict_detection(self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker):
+    def test_apply_head_conflict_detection(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker
+    ):
         """Apply detects HEAD conflicts and raises ApplyError."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -433,7 +452,9 @@ class TestAtomicApply:
 class TestSecurityValidation:
     """Tests for security validation in workspace operations."""
 
-    def test_symlink_rejection_in_apply(self, repo_with_git, test_db, mock_sandbox_executor, sample_step):
+    def test_symlink_rejection_in_apply(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step
+    ):
         """Symlinks in worktree changes are rejected during apply."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -448,7 +469,9 @@ class TestSecurityValidation:
         with pytest.raises(WorktreeError, match="Symlinks not allowed"):
             workspace.execute_step(sample_step, worker_fn, gates=[])
 
-    def test_path_traversal_prevention_in_step_id(self, repo_with_git, test_db, mock_sandbox_executor):
+    def test_path_traversal_prevention_in_step_id(
+        self, repo_with_git, test_db, mock_sandbox_executor
+    ):
         """Step IDs with path traversal are sanitized."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -494,7 +517,9 @@ class TestWorktreeCleanup:
         # Active worktree should still exist
         assert worktree_path.exists()
 
-    def test_cleanup_uses_lock_to_prevent_races(self, repo_with_git, test_db, mock_sandbox_executor, mocker):
+    def test_cleanup_uses_lock_to_prevent_races(
+        self, repo_with_git, test_db, mock_sandbox_executor, mocker
+    ):
         """Cleanup uses lock to prevent concurrent cleanup races."""
         # Spy on FileLock to verify cleanup lock is used
         with patch("supervisor.core.workspace.FileLock") as mock_filelock_class:
@@ -511,7 +536,9 @@ class TestWorktreeCleanup:
 class TestEventSourcing:
     """Tests for event sourcing patterns in workspace operations."""
 
-    def test_step_started_event_recorded(self, repo_with_git, test_db, mock_sandbox_executor, sample_step):
+    def test_step_started_event_recorded(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step
+    ):
         """STEP_STARTED event is recorded at beginning of execution."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -526,7 +553,9 @@ class TestEventSourcing:
         assert len(started) == 1
         assert started[0].step_id == sample_step.id
 
-    def test_step_completed_event_recorded(self, repo_with_git, test_db, mock_sandbox_executor, sample_step):
+    def test_step_completed_event_recorded(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step
+    ):
         """STEP_COMPLETED event is recorded after successful execution."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -540,7 +569,9 @@ class TestEventSourcing:
         completed = [e for e in events if e.event_type == EventType.STEP_COMPLETED]
         assert len(completed) == 1
 
-    def test_gate_events_recorded_in_order(self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker):
+    def test_gate_events_recorded_in_order(
+        self, repo_with_git, test_db, mock_sandbox_executor, sample_step, mocker
+    ):
         """Gate events are recorded in execution order."""
         workspace = IsolatedWorkspace(repo_with_git, mock_sandbox_executor, test_db)
 
@@ -557,7 +588,9 @@ class TestEventSourcing:
             workspace.execute_step(sample_step, worker_fn)
 
         events = test_db.get_events(sample_step.workflow_id)
-        gate_events = [e for e in events if e.event_type in (EventType.GATE_PASSED, EventType.GATE_FAILED)]
+        gate_events = [
+            e for e in events if e.event_type in (EventType.GATE_PASSED, EventType.GATE_FAILED)
+        ]
 
         assert len(gate_events) == 2
         assert gate_events[0].event_type == EventType.GATE_PASSED  # lint passed

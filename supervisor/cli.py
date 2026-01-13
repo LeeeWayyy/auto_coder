@@ -87,19 +87,22 @@ git:
     # Phase 5: Create timeout/limits config
     limits_yaml = supervisor_dir / "limits.yaml"
     if not limits_yaml.exists():
-        limits_yaml.write_text("""# Timeout and resource limits configuration
+        limits_yaml.write_text(
+            """# Timeout and resource limits configuration
 workflow_timeout: 3600  # Total workflow timeout (seconds)
 component_timeout: 300  # Per-component timeout (seconds)
 role_timeouts:
   planner: 600
   implementer: 300
   reviewer: 180
-""")
+"""
+        )
 
     # Phase 5: Create adaptive config
     adaptive_yaml = supervisor_dir / "adaptive.yaml"
     if not adaptive_yaml.exists():
-        adaptive_yaml.write_text("""# Adaptive model selection configuration
+        adaptive_yaml.write_text(
+            """# Adaptive model selection configuration
 adaptive:
   enabled: true
   min_samples_before_adapt: 10
@@ -108,19 +111,22 @@ adaptive:
   score_weights:
     success_rate: 0.6
     avg_duration: 0.4
-""")
+"""
+        )
 
     # Phase 5: Create approval policy config
     approval_yaml = supervisor_dir / "approval.yaml"
     if not approval_yaml.exists():
-        approval_yaml.write_text("""# Approval policy configuration
+        approval_yaml.write_text(
+            """# Approval policy configuration
 approval:
   auto_approve_low_risk: true
   risk_threshold: medium  # low, medium, high, critical
   require_approval_for:
     - deploy
     - commit
-""")
+"""
+        )
 
     # Initialize database
     db = Database(supervisor_dir / "state.db")
@@ -176,8 +182,7 @@ def plan(task: str, workflow_id: str | None, dry_run: bool) -> None:
 
             for phase in result.phases:
                 components = ", ".join(
-                    c.get("title", c.get("id", "?"))
-                    for c in phase.get("components", [])
+                    c.get("title", c.get("id", "?")) for c in phase.get("components", [])
                 )
                 table.add_row(phase.get("title", phase.get("id", "?")), components)
 
@@ -290,7 +295,12 @@ def _load_limits_config(repo_path: Path) -> tuple[dict[str, float], float, float
 @click.argument("feature_id")
 @click.option("--tui", is_flag=True, help="Run with interactive TUI")
 @click.option("--parallel/--sequential", default=True, help="Parallel or sequential execution")
-@click.option("--timeout", type=int, default=None, help="Workflow timeout in seconds (default: from limits.yaml or 3600)")
+@click.option(
+    "--timeout",
+    type=int,
+    default=None,
+    help="Workflow timeout in seconds (default: from limits.yaml or 3600)",
+)
 def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int | None) -> None:
     """Execute a feature workflow (Phase 5).
 
@@ -347,6 +357,7 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int | None) ->
 
         if tui:
             from supervisor.tui.app import SupervisorTUI
+
             tui_app = SupervisorTUI(db, bridge=bridge)
             tui_app.run_with_workflow(
                 workflow_fn=lambda: coordinator.run_implementation(feature_id, parallel=parallel),
@@ -430,11 +441,12 @@ def status(workflow_id: str | None) -> None:
     db = Database(db_path)
 
     # For now, just show that the database exists
-    console.print(Panel(
-        f"Database: {db_path}\n"
-        f"Workflow ID filter: {workflow_id or 'All'}",
-        title="Supervisor Status",
-    ))
+    console.print(
+        Panel(
+            f"Database: {db_path}\n" f"Workflow ID filter: {workflow_id or 'All'}",
+            title="Supervisor Status",
+        )
+    )
 
 
 @main.command()

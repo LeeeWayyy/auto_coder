@@ -255,7 +255,9 @@ class TestGateResult:
 class TestGateExecution:
     """Basic tests for gate execution."""
 
-    def test_run_gate_invalid_working_dir(self, mock_sandbox_executor, mock_gate_loader, test_db, temp_repo):
+    def test_run_gate_invalid_working_dir(
+        self, mock_sandbox_executor, mock_gate_loader, test_db, temp_repo
+    ):
         """Gate execution fails for invalid working directory."""
         executor = GateExecutor(mock_sandbox_executor, mock_gate_loader, test_db)
 
@@ -272,7 +274,9 @@ class TestGateExecution:
         # Should fail due to path traversal prevention
         assert result.status == GateStatus.FAILED
 
-    def test_run_gate_path_traversal_prevention(self, mock_sandbox_executor, mock_gate_loader, test_db, temp_repo):
+    def test_run_gate_path_traversal_prevention(
+        self, mock_sandbox_executor, mock_gate_loader, test_db, temp_repo
+    ):
         """Gate execution prevents path traversal."""
         executor = GateExecutor(mock_sandbox_executor, mock_gate_loader, test_db)
 

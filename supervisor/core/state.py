@@ -286,10 +286,16 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    role, cli, task_type, workflow_id,
-                    success, duration_seconds, retry_count,
-                    token_usage, error_category,
-                )
+                    role,
+                    cli,
+                    task_type,
+                    workflow_id,
+                    success,
+                    duration_seconds,
+                    retry_count,
+                    token_usage,
+                    error_category,
+                ),
             )
             # commit handled by context manager
 
@@ -353,6 +359,7 @@ class Database:
             # If projections are behind, log a warning
             if max_projection_id < max_event:
                 import sys
+
                 print(
                     f"WARNING: Projection sync mismatch detected. "
                     f"Events: {max_event}, Projections: {max_projection_id}. "
@@ -442,6 +449,7 @@ class Database:
         except Exception as e:
             # Log projection failure but don't lose the event
             import sys
+
             print(
                 f"WARNING: Projection update failed for event {event_id} "
                 f"({event.event_type.value}): {e}. "
@@ -451,9 +459,7 @@ class Database:
 
         return event_id  # type: ignore
 
-    def _update_projections(
-        self, conn: sqlite3.Connection, event: Event, event_id: int
-    ) -> None:
+    def _update_projections(self, conn: sqlite3.Connection, event: Event, event_id: int) -> None:
         """Update read models based on event.
 
         RACE CONDITION FIX: Uses updated_by_event_id ordering guard.
@@ -862,9 +868,7 @@ class Database:
         Uses ordering guard to prevent stale completion updates from
         overwriting newer state changes.
         """
-        row = conn.execute(
-            "SELECT feature_id FROM phases WHERE id = ?", (phase_id,)
-        ).fetchone()
+        row = conn.execute("SELECT feature_id FROM phases WHERE id = ?", (phase_id,)).fetchone()
         if not row:
             return
 
@@ -949,9 +953,7 @@ class Database:
         A feature is marked FAILED when all phases are terminal (COMPLETED/FAILED)
         and at least one is FAILED.
         """
-        row = conn.execute(
-            "SELECT feature_id FROM phases WHERE id = ?", (phase_id,)
-        ).fetchone()
+        row = conn.execute("SELECT feature_id FROM phases WHERE id = ?", (phase_id,)).fetchone()
         if not row:
             return
 
@@ -1060,6 +1062,7 @@ class Database:
         without recording an event (e.g., during migration/recovery).
         """
         import warnings
+
         warnings.warn(
             "update_step bypasses event-sourcing. Use append_event() instead.",
             DeprecationWarning,
@@ -1083,9 +1086,7 @@ class Database:
     def get_feature(self, feature_id: str) -> Feature | None:
         """Get a feature by ID."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM features WHERE id = ?", (feature_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM features WHERE id = ?", (feature_id,)).fetchone()
             if not row:
                 return None
             return Feature(
@@ -1095,9 +1096,7 @@ class Database:
                 status=FeatureStatus(row["status"]),
                 created_at=datetime.fromisoformat(row["created_at"]),
                 completed_at=(
-                    datetime.fromisoformat(row["completed_at"])
-                    if row["completed_at"]
-                    else None
+                    datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
                 ),
             )
 
@@ -1145,9 +1144,7 @@ class Database:
     def get_component(self, component_id: str) -> Component | None:
         """Get a component by ID."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM components WHERE id = ?", (component_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM components WHERE id = ?", (component_id,)).fetchone()
             if not row:
                 return None
             return self._row_to_component(row)
@@ -1186,6 +1183,7 @@ class Database:
         without recording an event (e.g., during migration/recovery).
         """
         import warnings
+
         warnings.warn(
             "update_component bypasses event-sourcing. Use append_event() instead.",
             DeprecationWarning,
@@ -1314,9 +1312,7 @@ class Database:
     def get_phase(self, phase_id: str) -> Phase | None:
         """Get a phase by ID."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM phases WHERE id = ?", (phase_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM phases WHERE id = ?", (phase_id,)).fetchone()
             if not row:
                 return None
             return Phase(

@@ -32,9 +32,7 @@ def temp_repo():
         (repo / "README.md").write_text("# Test Project\n\nA test project.")
         (repo / "src").mkdir()
         (repo / "src" / "main.py").write_text("def main():\n    print('Hello')")
-        (repo / "src" / "utils.py").write_text(
-            "import os\n\ndef helper():\n    pass"
-        )
+        (repo / "src" / "utils.py").write_text("import os\n\ndef helper():\n    pass")
 
         # Create docs structure
         (repo / "docs").mkdir()
@@ -231,13 +229,9 @@ class TestStrategyRegistry:
     def test_get_strategy_for_role(self):
         """Test getting strategy by role name."""
         assert isinstance(get_strategy_for_role("planner"), PlannerDocsetStrategy)
-        assert isinstance(
-            get_strategy_for_role("implementer"), ImplementerTargetedStrategy
-        )
+        assert isinstance(get_strategy_for_role("implementer"), ImplementerTargetedStrategy)
         assert isinstance(get_strategy_for_role("reviewer"), ReviewerDiffStrategy)
-        assert isinstance(
-            get_strategy_for_role("reviewer_gemini"), ReviewerDiffStrategy
-        )
+        assert isinstance(get_strategy_for_role("reviewer_gemini"), ReviewerDiffStrategy)
 
     def test_get_strategy_for_unknown_role_returns_none(self):
         """Test that unknown role returns None."""

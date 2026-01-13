@@ -87,9 +87,7 @@ testpaths = ["tests"]
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
-    (git_dir / "config").write_text(
-        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n"
-    )
+    (git_dir / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n")
 
     return tmp_path
 
@@ -127,6 +125,7 @@ def repo_with_git(temp_repo: Path) -> Path:
     """
     # Remove fake .git directory first
     import shutil
+
     fake_git = temp_repo / ".git"
     if fake_git.exists():
         shutil.rmtree(fake_git)
@@ -589,7 +588,9 @@ def sample_event_sequence() -> list[dict[str, Any]]:
 
 def pytest_configure(config):
     """Configure pytest with custom markers."""
-    config.addinivalue_line("markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')")
+    config.addinivalue_line(
+        "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+    )
     config.addinivalue_line("markers", "docker: marks tests requiring Docker")
     config.addinivalue_line("markers", "integration: marks integration tests")
     config.addinivalue_line("markers", "git: marks tests requiring git")

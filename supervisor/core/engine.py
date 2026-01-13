@@ -46,7 +46,12 @@ from supervisor.core.parser import (
 from supervisor.core.roles import RoleConfig, RoleLoader
 from supervisor.core.routing import _infer_task_type, get_cli_and_model_id
 from supervisor.core.state import Database, Event, EventType
-from supervisor.core.workspace import ApplyError, GateFailedError, IsolatedWorkspace, _truncate_output
+from supervisor.core.workspace import (
+    ApplyError,
+    GateFailedError,
+    IsolatedWorkspace,
+    _truncate_output,
+)
 from supervisor.sandbox.executor import (
     DockerNotAvailableError,
     ExecutionResult,
@@ -132,7 +137,8 @@ class CircuitBreaker:
         """
         # First pass: remove keys with no recent failures
         stale_keys = [
-            key for key, timestamps in self._failures.items()
+            key
+            for key, timestamps in self._failures.items()
             if not timestamps or all(now - t >= self.reset_timeout for t in timestamps)
         ]
         for key in stale_keys:
@@ -143,7 +149,7 @@ class CircuitBreaker:
             # Sort by most recent failure timestamp (ascending = oldest first)
             sorted_keys = sorted(
                 self._failures.keys(),
-                key=lambda k: max(self._failures[k]) if self._failures[k] else 0.0
+                key=lambda k: max(self._failures[k]) if self._failures[k] else 0.0,
             )
             # Evict oldest keys until under limit
             evict_count = len(self._failures) - self.max_keys
@@ -232,9 +238,7 @@ class EnhancedCircuitBreaker:
         self._half_open_start: dict[str, float] = {}  # Track when HALF_OPEN started
 
         # DRY: Check persistence capability once at init
-        self._persistence_enabled = (
-            self.db is not None and hasattr(self.db, "transaction")
-        )
+        self._persistence_enabled = self.db is not None and hasattr(self.db, "transaction")
 
         if self._persistence_enabled:
             self._ensure_table()
@@ -549,9 +553,7 @@ class ExecutionEngine:
         else:
             # If user provided config, add worktrees to allowed roots if not set
             if not sandbox_config.allowed_workdir_roots:
-                sandbox_config.allowed_workdir_roots = [
-                    str(self.repo_path / ".worktrees")
-                ]
+                sandbox_config.allowed_workdir_roots = [str(self.repo_path / ".worktrees")]
             self.sandbox_config = sandbox_config
 
         # Validate Docker is available at startup
@@ -640,12 +642,18 @@ class ExecutionEngine:
         template_name = self._get_template_for_role(role)
         if template_name:
             prompt = self.context_packer.build_full_prompt(
-                template_name, role, task_description, target_files, extra_context,
+                template_name,
+                role,
+                task_description,
+                target_files,
+                extra_context,
             )
         else:
             prompt = self.context_packer.pack_context(
-                role=role, task_description=task_description,
-                target_files=target_files, extra_context=extra_context,
+                role=role,
+                task_description=task_description,
+                target_files=target_files,
+                extra_context=extra_context,
             )
 
         return step_id, retry_policy, gates, circuit_key, role, prompt
@@ -746,9 +754,7 @@ class ExecutionEngine:
                         f"Step '{step_id}' cancelled after acquiring apply lock. "
                         "Changes not applied."
                     )
-                changed_files = self.workspace._apply_changes(
-                    ctx.worktree_path, ctx.original_head
-                )
+                changed_files = self.workspace._apply_changes(ctx.worktree_path, ctx.original_head)
         except CancellationError:
             raise
         except Exception as apply_err:
@@ -771,6 +777,7 @@ class ExecutionEngine:
             )
         except Exception as db_error:
             import sys
+
             print(
                 f"CRITICAL: Step {step_id} applied changes but DB update failed: {db_error}. "
                 f"Changed files: {changed_files}. Manual remediation may be required.",
@@ -837,11 +844,12 @@ class ExecutionEngine:
             CancellationError: Operation was cancelled before applying changes
         """
         import time
+
         start_time = time.time()
         success = False
         error_category = None
         attempt_count = 0
-        
+
         # Load role configuration upfront for metrics
         try:
             role_config = self.role_loader.load_role(role_name)
@@ -852,8 +860,14 @@ class ExecutionEngine:
         try:
             # FIX (v27 - Gemini PR review): Use helper method for setup
             step_id, retry_policy, gates, circuit_key, role, prompt = self._setup_role_execution(
-                role_name, task_description, workflow_id, step_id,
-                target_files, extra_context, retry_policy, gates,
+                role_name,
+                task_description,
+                workflow_id,
+                step_id,
+                target_files,
+                extra_context,
+                retry_policy,
+                gates,
             )
 
             # Record step started
@@ -880,7 +894,9 @@ class ExecutionEngine:
 
                     # Execute CLI in ISOLATED worktree
                     with self.workspace.isolated_execution(step_id) as ctx:
-                        result = self._execute_cli(role, effective_prompt, ctx.worktree_path, cli_override)
+                        result = self._execute_cli(
+                            role, effective_prompt, ctx.worktree_path, cli_override
+                        )
 
                         if result.returncode != 0 and not result.timed_out:
                             raise EngineError(
@@ -901,7 +917,9 @@ class ExecutionEngine:
 
                         # Run gates IN THE WORKTREE using GateExecutor
                         # FIX (v27 - Gemini PR review): Use helper for gate setup
-                        worktree_gate_loader = GateLoader(ctx.worktree_path, allow_project_gates=True)
+                        worktree_gate_loader = GateLoader(
+                            ctx.worktree_path, allow_project_gates=True
+                        )
                         worktree_gate_executor = GateExecutor(
                             executor=self.executor,
                             gate_loader=worktree_gate_loader,
@@ -909,7 +927,9 @@ class ExecutionEngine:
                         )
 
                         # Build effective overrides using helper method
-                        effective_overrides = self._build_gate_overrides(gates, role, worktree_gate_loader)
+                        effective_overrides = self._build_gate_overrides(
+                            gates, role, worktree_gate_loader
+                        )
 
                         gate_results = worktree_gate_executor.run_gates(
                             gate_names=gates,
@@ -935,7 +955,12 @@ class ExecutionEngine:
 
                         # FIX (v27 - Gemini PR review): Use helper for apply and finalize
                         changed_files = self._apply_and_finalize_step(
-                            workflow_id, step_id, role_name, output, ctx, cancellation_check,
+                            workflow_id,
+                            step_id,
+                            role_name,
+                            output,
+                            ctx,
+                            cancellation_check,
                         )
 
                     self.circuit_breaker.reset(circuit_key)
@@ -956,9 +981,7 @@ class ExecutionEngine:
                             duration_seconds=0.0,  # Not tracked at this level
                         )
                         feedback_gen = StructuredFeedbackGenerator()
-                        feedback = feedback_gen.generate(
-                            gate_result, context=task_description
-                        )
+                        feedback = feedback_gen.generate(gate_result, context=task_description)
                         last_error = e
                         self.circuit_breaker.record_failure(circuit_key)
 
@@ -1049,7 +1072,7 @@ class ExecutionEngine:
                     payload={"error": str(last_error)},
                 )
             )
-            
+
             error_category = type(last_error).__name__ if last_error else "RetryExhausted"
             raise RetryExhaustedError(
                 f"Role '{role_name}' failed after {retry_policy.max_attempts} attempts: {last_error}"
@@ -1060,7 +1083,7 @@ class ExecutionEngine:
             raise e
 
         finally:
-            if hasattr(self, 'db') and self.db is not None:
+            if hasattr(self, "db") and self.db is not None:
                 duration = time.time() - start_time
                 task_type = _infer_task_type(role_name)
                 try:
@@ -1165,7 +1188,7 @@ class ExecutionEngine:
             return (
                 f"Your previous output failed to parse:\n{error}\n\n"
                 f"REQUIRED: End your response with a JSON code block:\n"
-                f"```json\n{{\n  \"status\": \"...\",\n  ...\n}}\n```"
+                f'```json\n{{\n  "status": "...",\n  ...\n}}\n```'
                 f"{worktree_warning}"
             )
         elif isinstance(error, InvalidOutputError):
@@ -1212,7 +1235,7 @@ class ExecutionEngine:
         workflow_timeout: float = 3600.0,
         checkpoint_on_timeout: bool = True,
         role_timeouts: dict[str, float] | None = None,
-        approval_gate: Any = None, # Type hint looser to avoid cyclic import
+        approval_gate: Any = None,  # Type hint looser to avoid cyclic import
         interaction_bridge: Any = None,
         adaptive_config: dict[str, Any] | None = None,
     ) -> "WorkflowCoordinator":
@@ -1290,6 +1313,7 @@ class ExecutionEngine:
             WorkflowBlockedError: If no progress can be made
         """
         from supervisor.core.models import Feature
+
         coordinator = self.create_workflow_coordinator(
             max_parallel_workers=max_parallel_workers,
             prefer_cost=prefer_cost,

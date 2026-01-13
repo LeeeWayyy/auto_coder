@@ -18,6 +18,7 @@ class ApprovalPolicy:
     The original *_conditions schema from SUPERVISOR_ORCHESTRATOR.md is complex;
     this simpler schema suffices for MVP approval gates.
     """
+
     # Auto-approve low-risk changes without prompting
     auto_approve_low_risk: bool = True
 
@@ -81,12 +82,19 @@ class ApprovalGate:
         Returns: "low", "medium", "high", or "critical"
         """
         import re
+
         changes = context.get("changes", [])
         file_count = len(changes)
 
         # Check critical conditions - use word boundaries to avoid false positives
         # e.g., "production" shouldn't match "documentation/production_notes.md"
-        critical_patterns = [r"\bencrypt", r"\bkey\b", r"\bsecret", r"\bcredential", r"\bproduction\b"]
+        critical_patterns = [
+            r"\bencrypt",
+            r"\bkey\b",
+            r"\bsecret",
+            r"\bcredential",
+            r"\bproduction\b",
+        ]
         for change in changes:
             change_lower = change.lower()
             for pattern in critical_patterns:

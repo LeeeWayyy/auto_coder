@@ -239,12 +239,8 @@ class TestModelRouterCostEstimation:
         """Test cost estimation with cheaper model."""
         router = ModelRouter()
 
-        cost_opus = router.estimate_cost(
-            "claude:opus", input_tokens=1000, output_tokens=500
-        )
-        cost_flash = router.estimate_cost(
-            "gemini:flash3", input_tokens=1000, output_tokens=500
-        )
+        cost_opus = router.estimate_cost("claude:opus", input_tokens=1000, output_tokens=500)
+        cost_flash = router.estimate_cost("gemini:flash3", input_tokens=1000, output_tokens=500)
 
         # Flash should be much cheaper
         assert cost_flash < cost_opus

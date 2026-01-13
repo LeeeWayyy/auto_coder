@@ -384,12 +384,8 @@ class TestEventSourcingPatterns:
         assert len(all_events) == 5
 
         # Verify we can reconstruct the workflow state from events
-        workflow_started = any(
-            e.event_type == EventType.WORKFLOW_STARTED for e in all_events
-        )
-        workflow_completed = any(
-            e.event_type == EventType.WORKFLOW_COMPLETED for e in all_events
-        )
+        workflow_started = any(e.event_type == EventType.WORKFLOW_STARTED for e in all_events)
+        workflow_completed = any(e.event_type == EventType.WORKFLOW_COMPLETED for e in all_events)
 
         assert workflow_started
         assert workflow_completed
@@ -425,9 +421,7 @@ class TestEventSourcingPatterns:
 
         # Check that we have 3 events (not deduplicated)
         events = test_db.get_events(feature_id)
-        completion_events = [
-            e for e in events if e.event_type == EventType.FEATURE_COMPLETED
-        ]
+        completion_events = [e for e in events if e.event_type == EventType.FEATURE_COMPLETED]
         assert len(completion_events) == 3
 
         # The projection should handle this gracefully
@@ -512,7 +506,9 @@ class TestTransactionSafety:
 
         threads = []
         for i in range(4):
-            t = threading.Thread(target=write_events, args=("wf-concurrent", 10), name=f"thread-{i}")
+            t = threading.Thread(
+                target=write_events, args=("wf-concurrent", 10), name=f"thread-{i}"
+            )
             threads.append(t)
             t.start()
 
@@ -535,9 +531,7 @@ class TestTransactionSafety:
 
         # Verify event was created
         events = test_db.get_events(feature_id)
-        feature_created_events = [
-            e for e in events if e.event_type == EventType.FEATURE_CREATED
-        ]
+        feature_created_events = [e for e in events if e.event_type == EventType.FEATURE_CREATED]
         assert len(feature_created_events) >= 1
 
         # Verify projection matches
@@ -732,12 +726,18 @@ class TestDatabaseIntegrity:
         """Database schema is created correctly."""
         # Query table names
         with test_db._connect() as conn:
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            )
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             tables = {row[0] for row in cursor.fetchall()}
 
-        expected_tables = {"events", "workflows", "steps", "features", "phases", "components", "metrics"}
+        expected_tables = {
+            "events",
+            "workflows",
+            "steps",
+            "features",
+            "phases",
+            "components",
+            "metrics",
+        }
         assert expected_tables.issubset(tables)
 
     def test_wal_mode_enabled(self, test_db):

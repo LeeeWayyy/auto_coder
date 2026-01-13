@@ -577,7 +577,7 @@ jobs:
 ## Getting Help
 
 - **Documentation**: See `docs/` directory
-- **Issues**: Report bugs at [GitHub Issues](https://github.com/auto-coder/supervisor/issues)
+- **Issues**: Report bugs at [GitHub Issues](https://github.com/LeeeWayyy/auto_coder/issues)
 - **Examples**: Check `examples/` for complete workflows
 - **Architecture**: Read `docs/ARCHITECTURE.md` for deep dive
 

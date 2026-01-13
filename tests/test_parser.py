@@ -283,10 +283,12 @@ class TestGeminiAdapter:
 
     def test_extract_from_json_envelope(self):
         """Extract model text from Gemini JSON envelope."""
-        stdout = json.dumps({
-            "output": "```json\n{\"status\": \"SUCCESS\", \"action_taken\": \"Done\"}\n```",
-            "tokens_used": 100,
-        })
+        stdout = json.dumps(
+            {
+                "output": '```json\n{"status": "SUCCESS", "action_taken": "Done"}\n```',
+                "tokens_used": 100,
+            }
+        )
         adapter = GeminiAdapter()
         result = adapter.parse_output(stdout, ImplementationOutput)
         assert result.status == "SUCCESS"

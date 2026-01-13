@@ -194,9 +194,7 @@ class TestParallelReviewer:
         engine.role_loader.load_role.return_value = MockRoleConfig("claude")
 
         # Mock run_role to return approved output
-        engine.run_role.return_value = MockReviewOutput(
-            status="APPROVED", review_status="APPROVED"
-        )
+        engine.run_role.return_value = MockReviewOutput(status="APPROVED", review_status="APPROVED")
 
         return engine
 

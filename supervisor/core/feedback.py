@@ -58,7 +58,9 @@ class StructuredFeedbackGenerator:
 
         if "pytest" in lowered or "failed" in lowered and "collected" in lowered:
             return "pytest"
-        if "ruff" in lowered or re.search(rf"^{self._WIN_PATH_RE}:\d+:\d+:\s*[A-Z]\d+\s+", output, re.M):
+        if "ruff" in lowered or re.search(
+            rf"^{self._WIN_PATH_RE}:\d+:\d+:\s*[A-Z]\d+\s+", output, re.M
+        ):
             return "ruff"
         if "mypy" in lowered or re.search(rf"^{self._WIN_PATH_RE}:\d+:\s*error:", output, re.M):
             return "mypy"
@@ -164,7 +166,9 @@ class StructuredFeedbackGenerator:
         issues: list[dict[str, str]] = []
         # Bandit text format blocks
         issue_re = re.compile(r"^Issue:\s*(?P<issue>.+)$", re.M)
-        severity_re = re.compile(r"^Severity:\s*(?P<severity>\w+)\s+Confidence:\s*(?P<confidence>\w+)", re.M)
+        severity_re = re.compile(
+            r"^Severity:\s*(?P<severity>\w+)\s+Confidence:\s*(?P<confidence>\w+)", re.M
+        )
         # For bandit location, use [^:]+ instead of [^:\n]+ since format is single-line
         bandit_path_re = self._WIN_PATH_RE.replace("[^:\n]+", "[^:]+")
         location_re = re.compile(rf"^Location:\s*(?P<file>{bandit_path_re}):(?P<line>\d+)", re.M)
