@@ -242,6 +242,59 @@ class Database:
 
     CREATE INDEX IF NOT EXISTS idx_metrics_role_cli ON metrics(role, cli);
     CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp);
+
+    -- Graph workflow definitions (stored as JSON)
+    CREATE TABLE IF NOT EXISTS graph_workflows (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        definition JSON NOT NULL,
+        version TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Graph workflow execution instances
+    CREATE TABLE IF NOT EXISTS graph_executions (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        graph_id TEXT NOT NULL,
+        status TEXT CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP,
+        error TEXT,
+        FOREIGN KEY (graph_id) REFERENCES graph_workflows(id)
+    );
+
+    -- Individual node execution states
+    CREATE TABLE IF NOT EXISTS node_executions (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT NOT NULL,
+        status TEXT CHECK(status IN ('pending', 'ready', 'running', 'completed', 'failed', 'skipped')),
+        input_data JSON,
+        output_data JSON,
+        error TEXT,
+        version INTEGER DEFAULT 0,  -- For optimistic locking
+        started_at TIMESTAMP,
+        completed_at TIMESTAMP,
+        UNIQUE(execution_id, node_id),
+        FOREIGN KEY (execution_id) REFERENCES graph_executions(id)
+    );
+
+    -- Loop iteration counters (prevent infinite loops)
+    CREATE TABLE IF NOT EXISTS loop_counters (
+        execution_id TEXT NOT NULL,
+        loop_key TEXT NOT NULL,
+        iteration_count INTEGER DEFAULT 0,
+        PRIMARY KEY (execution_id, loop_key),
+        FOREIGN KEY (execution_id) REFERENCES graph_executions(id)
+    );
+
+    -- Indexes for graph execution queries
+    CREATE INDEX IF NOT EXISTS idx_node_exec_status ON node_executions(execution_id, status);
+    CREATE INDEX IF NOT EXISTS idx_node_ready ON node_executions(execution_id, status) WHERE status = 'ready';
+    CREATE INDEX IF NOT EXISTS idx_graph_exec_status ON graph_executions(workflow_id, status);
     """
 
     def __init__(self, db_path: str | Path = ".supervisor/state.db"):

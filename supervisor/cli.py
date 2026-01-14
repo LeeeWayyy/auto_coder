@@ -456,6 +456,64 @@ def status(workflow_id: str | None) -> None:
 
 
 @main.command()
+@click.argument("workflow_file", type=click.Path(exists=True))
+@click.option("--workflow-id", required=True, help="Unique workflow execution ID")
+@click.option("--validate-only", is_flag=True, help="Only validate, don't execute")
+def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None:
+    """Execute a declarative workflow graph from YAML."""
+    import asyncio
+
+    from supervisor.core.graph_engine import GraphOrchestrator
+    from supervisor.core.graph_schema import WorkflowGraph
+    from supervisor.core.worker import WorkflowWorker
+
+    # Load workflow YAML
+    with open(workflow_file) as f:
+        workflow_dict = yaml.safe_load(f)
+        workflow = WorkflowGraph(**workflow_dict)
+
+    # Validate
+    errors = workflow.validate_graph()
+    if errors:
+        console.print("[red]Validation errors:[/red]")
+        for error in errors:
+            console.print(f"  - {error}")
+        sys.exit(1)
+
+    console.print("[green]Workflow validation passed[/green]")
+    console.print(f"  Nodes: {len(workflow.nodes)}")
+    console.print(f"  Edges: {len(workflow.edges)}")
+
+    if validate_only:
+        return
+
+    # Initialize components
+    repo_path = get_repo_path()
+    db_path = repo_path / ".supervisor" / "state.db"
+    db = Database(db_path)
+    engine = ExecutionEngine(repo_path)
+    orchestrator = GraphOrchestrator(
+        db, engine, engine.gate_executor, engine.gate_loader
+    )
+
+    # Start and run workflow
+    async def run():
+        exec_id = await orchestrator.start_workflow(workflow, workflow_id)
+        console.print(f"[blue]Started execution: {exec_id}[/blue]")
+
+        worker = WorkflowWorker(orchestrator)
+        return await worker.run_until_complete(exec_id)
+
+    status = asyncio.run(run())
+
+    if status == "completed":
+        console.print("[green]Workflow completed successfully[/green]")
+    else:
+        console.print(f"[red]Workflow {status}[/red]")
+        sys.exit(1)
+
+
+@main.command()
 def version() -> None:
     """Show version information."""
     from supervisor import __version__
