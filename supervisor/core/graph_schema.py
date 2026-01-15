@@ -56,8 +56,16 @@ class TransitionCondition(BaseModel):
     @field_validator('field')
     @classmethod
     def validate_field(cls, v):
-        """Ensure field names are safe (alphanumeric + underscore + dots)"""
-        if not v.replace('_', '').replace('.', '').isalnum():
+        """Ensure field names are safe dot-separated identifiers.
+
+        Valid: "status", "node_1.result", "a.b.c"
+        Invalid: "..", "a..b", ".foo", "foo.", "a-b"
+        """
+        import re
+        # Pattern: identifier (letter/underscore + alphanumeric/underscore) optionally
+        # followed by .identifier sequences
+        pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$'
+        if not re.match(pattern, v):
             raise ValueError(f"Invalid field name: {v}")
         return v
 

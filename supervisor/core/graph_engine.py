@@ -535,7 +535,9 @@ class GraphOrchestrator:
                     execution_id, workflow, node, input_data
                 )
             elif node.type == NodeType.MERGE:
-                output = self._execute_merge(execution_id, workflow, node)
+                output = await asyncio.to_thread(
+                    self._execute_merge, execution_id, workflow, node
+                )
             elif node.type == NodeType.PARALLEL:
                 output = await self._execute_parallel(execution_id, workflow, node)
             elif node.type == NodeType.HUMAN:
@@ -641,11 +643,10 @@ class GraphOrchestrator:
                     for target_key, source_key in edge.data_mapping.items()
                 }
 
-            # Store both namespaced and un-namespaced versions
+            # Store namespaced keys only to prevent non-deterministic overwrites
             if isinstance(output, dict):
                 for k, v in output.items():
-                    merged[f"{edge.source}.{k}"] = v  # Namespaced
-                    merged[k] = v  # Also un-namespaced for convenience
+                    merged[f"{edge.source}.{k}"] = v  # Namespaced only
             else:
                 merged[edge.source] = output
 
@@ -665,6 +666,7 @@ class GraphOrchestrator:
         Key Features:
         - Evaluates edge conditions
         - Handles BRANCH routing via on_true/on_false
+        - Marks non-selected branch targets as SKIPPED
         - Handles loop re-execution
         - Respects wait_for_incoming policy
         - Uses same transaction for reads/writes to prevent race conditions
@@ -674,30 +676,44 @@ class GraphOrchestrator:
             (n for n in workflow.nodes if n.id == completed_id), None
         )
 
+        # Track which target was selected by BRANCH (for skip propagation)
+        branch_allowed_target = None
+
+        # First pass: determine allowed target for BRANCH nodes
+        if (
+            completed_node
+            and completed_node.type == NodeType.BRANCH
+            and completed_node.branch_config
+        ):
+            branch_config = completed_node.branch_config
+            branch_outcome = output.get("branch_outcome") if isinstance(output, dict) else None
+
+            # Determine allowed target based on branch outcome
+            if branch_outcome == BranchOutcome.TRUE.value:
+                branch_allowed_target = branch_config.on_true
+            elif branch_outcome == BranchOutcome.FALSE.value:
+                branch_allowed_target = branch_config.on_false
+            elif branch_outcome == BranchOutcome.MAX_ITERATIONS.value:
+                # Use selected_target from output (determined by is_loop_edge)
+                branch_allowed_target = output.get("selected_target", branch_config.on_false)
+
+            # Mark non-selected branch target as SKIPPED to prevent hanging
+            if branch_allowed_target:
+                non_selected = (
+                    branch_config.on_false if branch_allowed_target == branch_config.on_true
+                    else branch_config.on_true
+                )
+                current_status = self._get_node_status_in_txn(conn, execution_id, non_selected)
+                if current_status == NodeStatus.PENDING.value:
+                    self._set_node_status_guarded(
+                        conn, execution_id, non_selected, NodeStatus.SKIPPED,
+                        expected_status=NodeStatus.PENDING
+                    )
+
         for edge in [e for e in workflow.edges if e.source == completed_id]:
-            # BRANCH ROUTING: Enforce on_true/on_false target selection
-            if (
-                completed_node
-                and completed_node.type == NodeType.BRANCH
-                and completed_node.branch_config
-            ):
-                branch_config = completed_node.branch_config
-                branch_outcome = output.get("branch_outcome") if isinstance(output, dict) else None
-
-                # Determine allowed target based on branch outcome
-                if branch_outcome == BranchOutcome.TRUE.value:
-                    allowed_target = branch_config.on_true
-                elif branch_outcome == BranchOutcome.FALSE.value:
-                    allowed_target = branch_config.on_false
-                elif branch_outcome == BranchOutcome.MAX_ITERATIONS.value:
-                    # On max iterations, take the non-loop path (on_false)
-                    allowed_target = branch_config.on_false
-                else:
-                    allowed_target = None
-
-                # Skip edges that don't match the branch decision
-                if allowed_target and edge.target != allowed_target:
-                    continue
+            # BRANCH ROUTING: Skip edges that don't match the branch decision
+            if branch_allowed_target and edge.target != branch_allowed_target:
+                continue
 
             # Check edge condition (for non-BRANCH nodes or additional filtering)
             if edge.condition:
@@ -729,37 +745,6 @@ class GraphOrchestrator:
                     conn, execution_id, edge.target, NodeStatus.READY,
                     expected_status=NodeStatus.PENDING
                 )
-
-    def _is_node_ready(
-        self, execution_id: str, workflow: WorkflowGraph, node_id: str, node: Node
-    ) -> bool:
-        """Check if node is ready based on wait_for_incoming policy."""
-        incoming = [e for e in workflow.edges if e.target == node_id]
-        if not incoming:
-            return True
-
-        completed_count = 0
-        for edge in incoming:
-            src_status = self._get_node_status_single(execution_id, edge.source)
-            if src_status == NodeStatus.COMPLETED.value:
-                # Check edge condition if present
-                if edge.condition:
-                    output = self._get_node_output(execution_id, edge.source)
-                    if self._eval_condition(edge.condition, output):
-                        completed_count += 1
-                else:
-                    completed_count += 1
-
-        # MERGE nodes use merge_config.wait_for, others use node.wait_for_incoming
-        if node.type == NodeType.MERGE and node.merge_config:
-            wait_policy = node.merge_config.wait_for
-        else:
-            wait_policy = node.wait_for_incoming
-
-        if wait_policy == "all":
-            return completed_count == len(incoming)
-        else:  # "any"
-            return completed_count > 0
 
     def _is_node_ready_in_txn(
         self, conn, execution_id: str, workflow: WorkflowGraph, node_id: str, node: Node
@@ -899,7 +884,9 @@ class GraphOrchestrator:
                         is_edge_unreachable = True
                     elif src_status == NodeStatus.COMPLETED.value:
                         if edge.condition:
-                            output = self._get_node_output(execution_id, edge.source)
+                            output = await asyncio.to_thread(
+                                self._get_node_output, execution_id, edge.source
+                            )
                             if not self._eval_condition(edge.condition, output):
                                 is_edge_unreachable = True
 
@@ -946,8 +933,8 @@ class GraphOrchestrator:
             input=json.dumps(input_data, indent=2), **input_data
         )
 
-        # Get workflow_id
-        workflow_id = self._get_workflow_id(execution_id)
+        # Get workflow_id (wrap in to_thread to avoid blocking)
+        workflow_id = await asyncio.to_thread(self._get_workflow_id, execution_id)
 
         # Use worktree_id if specified to allow context sharing, otherwise node.id
         step_id = config.worktree_id or node.id
@@ -1010,15 +997,28 @@ class GraphOrchestrator:
             (e for e in workflow.edges if e.source == node.id and e.is_loop_edge), None
         )
         loop_key = f"loop_{loop_edge.id if loop_edge else node.id}"
-        iteration = self._get_loop_counter(execution_id, loop_key)
+        iteration = await asyncio.to_thread(
+            self._get_loop_counter, execution_id, loop_key
+        )
 
-        # Check max iterations
+        # Check max iterations - route to non-loop edge
         if iteration >= config.condition.max_iterations:
             # Reset counter for potential re-entry later
-            self._reset_loop_counter(execution_id, loop_key)
+            await asyncio.to_thread(
+                self._reset_loop_counter, execution_id, loop_key
+            )
+            # Determine non-loop target using is_loop_edge marker
+            if loop_edge:
+                non_loop_target = (
+                    config.on_false if loop_edge.target == config.on_true
+                    else config.on_true
+                )
+            else:
+                non_loop_target = config.on_false
             return {
                 "branch_outcome": BranchOutcome.MAX_ITERATIONS.value,
                 "iterations": iteration,
+                "selected_target": non_loop_target,
             }
 
         # Evaluate condition
@@ -1030,10 +1030,14 @@ class GraphOrchestrator:
             target = config.on_true if result else config.on_false
             if loop_edge.target == target:
                 # Taking the loop edge - increment counter
-                self._increment_loop_counter(execution_id, loop_key)
+                await asyncio.to_thread(
+                    self._increment_loop_counter, execution_id, loop_key
+                )
             else:
                 # Exiting the loop - reset counter for potential re-entry
-                self._reset_loop_counter(execution_id, loop_key)
+                await asyncio.to_thread(
+                    self._reset_loop_counter, execution_id, loop_key
+                )
 
         return {
             "branch_outcome": outcome,
