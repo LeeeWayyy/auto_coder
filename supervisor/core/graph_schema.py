@@ -310,7 +310,7 @@ class WorkflowGraph(BaseModel):
                 )
                 if not has_loop_control:
                     errors.append(f"Cycle without loop control: {' -> '.join(cycle)}")
-        except Exception as e:
+        except nx.NetworkXError as e:
             errors.append(f"Could not perform cycle detection: {e}")
 
         # Validate MERGE nodes have multiple incoming edges

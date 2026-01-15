@@ -613,6 +613,12 @@ class GraphOrchestrator:
             if output is None:
                 continue
 
+            # Check edge condition before including output
+            if edge.condition:
+                if not self._eval_condition(edge.condition, output):
+                    # Skip this edge - condition not met
+                    continue
+
             # Apply data mapping if specified
             if edge.data_mapping:
                 output = {
@@ -673,6 +679,7 @@ class GraphOrchestrator:
                 branch_allowed_target = output.get("selected_target", branch_config.on_false)
 
             # Mark non-selected branch target as SKIPPED to prevent hanging
+            # BUT only if the target doesn't have other valid incoming edges
             if branch_allowed_target:
                 non_selected = (
                     branch_config.on_false
@@ -681,13 +688,29 @@ class GraphOrchestrator:
                 )
                 current_status = self._get_node_status_in_txn(conn, execution_id, non_selected)
                 if current_status == NodeStatus.PENDING.value:
-                    self._set_node_status_guarded(
-                        conn,
-                        execution_id,
-                        non_selected,
-                        NodeStatus.SKIPPED,
-                        expected_status=NodeStatus.PENDING,
+                    # Check if non-selected target has other incoming edges
+                    non_selected_node = next(
+                        (n for n in workflow.nodes if n.id == non_selected), None
                     )
+                    other_incoming = [
+                        e
+                        for e in workflow.edges
+                        if e.target == non_selected and e.source != completed_id
+                    ]
+                    # Only skip if:
+                    # 1. No other incoming edges, OR
+                    # 2. Node requires all inputs (wait_for_incoming="all")
+                    should_skip = not other_incoming or (
+                        non_selected_node and non_selected_node.wait_for_incoming == "all"
+                    )
+                    if should_skip:
+                        self._set_node_status_guarded(
+                            conn,
+                            execution_id,
+                            non_selected,
+                            NodeStatus.SKIPPED,
+                            expected_status=NodeStatus.PENDING,
+                        )
 
         for edge in [e for e in workflow.edges if e.source == completed_id]:
             # BRANCH ROUTING: Skip edges that don't match the branch decision
@@ -844,8 +867,18 @@ class GraphOrchestrator:
         Respects wait_for_incoming policy ("all" vs "any").
         """
         statuses = await asyncio.to_thread(self._get_all_statuses, execution_id)
-        changed = True
 
+        # Pre-fetch all outputs for completed nodes to avoid N+1 queries
+        completed_nodes = [
+            nid for nid, status in statuses.items() if status == NodeStatus.COMPLETED.value
+        ]
+        outputs_cache: dict[str, Any] = {}
+        for node_id in completed_nodes:
+            outputs_cache[node_id] = await asyncio.to_thread(
+                self._get_node_output, execution_id, node_id
+            )
+
+        changed = True
         while changed:
             changed = False
             for node in workflow.nodes:
@@ -865,9 +898,7 @@ class GraphOrchestrator:
                         is_edge_unreachable = True
                     elif src_status == NodeStatus.COMPLETED.value:
                         if edge.condition:
-                            output = await asyncio.to_thread(
-                                self._get_node_output, execution_id, edge.source
-                            )
+                            output = outputs_cache.get(edge.source)
                             if not self._eval_condition(edge.condition, output):
                                 is_edge_unreachable = True
 
