@@ -797,14 +797,25 @@ class GraphOrchestrator:
         Evaluate a transition condition safely.
 
         Type mismatches and invalid comparisons return False instead of raising.
+        Supports both namespaced (source.field) and un-namespaced field lookups.
         """
         if not isinstance(data, dict):
             return False
 
         # Extract field value (supports dotted notation)
         value = data.get(condition.field)
+
+        # If not found and field doesn't have dots, try finding it in namespaced keys
+        # This allows conditions like "test_status" to match "gate_node.test_status"
+        if value is None and "." not in condition.field:
+            suffix = f".{condition.field}"
+            for key in data:
+                if key.endswith(suffix):
+                    value = data[key]
+                    break  # Use first match
+
         if value is None and "." in condition.field:
-            # Try dotted notation
+            # Try dotted notation for nested dict access
             parts = condition.field.split(".")
             value = data
             for part in parts:

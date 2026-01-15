@@ -169,6 +169,20 @@ class Node(BaseModel):
 
     id: str
     type: NodeType
+
+    @field_validator("id")
+    @classmethod
+    def validate_node_id(cls, v):
+        """Ensure node ID is a valid Python identifier.
+
+        This is required because node IDs are used as format string keywords
+        in task template formatting. IDs with hyphens or special characters
+        would cause formatting errors.
+        """
+        if not v.isidentifier():
+            raise ValueError(f"Invalid node ID: '{v}'. Must be a valid Python identifier.")
+        return v
+
     label: str | None = None
     description: str | None = None
 
