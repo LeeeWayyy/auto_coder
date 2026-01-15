@@ -6,7 +6,6 @@ and process them incrementally. Supports both single-execution and daemon modes.
 
 import asyncio
 import logging
-from typing import Optional
 
 from supervisor.core.graph_engine import GraphOrchestrator
 
@@ -73,7 +72,5 @@ class WorkflowWorker:
     def _get_active_executions(self) -> list[str]:
         """Get list of active execution IDs from database."""
         with self.orchestrator.db._connect() as conn:
-            rows = conn.execute(
-                "SELECT id FROM graph_executions WHERE status='running'"
-            ).fetchall()
+            rows = conn.execute("SELECT id FROM graph_executions WHERE status='running'").fetchall()
             return [row[0] for row in rows]

@@ -10,35 +10,39 @@ Security-first design:
 - Comprehensive validation before execution
 """
 
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import List, Dict, Optional, Literal, Union, Set
 from enum import Enum
+from typing import Literal
+
 import networkx as nx
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class NodeType(str, Enum):
     """Supported node types in workflow graphs"""
-    TASK = "task"              # Execute a role (planner, implementer, reviewer, etc.)
-    GATE = "gate"              # Verification gate (test, lint, security, etc.)
-    BRANCH = "branch"          # Conditional branching with loop support
-    MERGE = "merge"            # Synchronization point for parallel branches
-    PARALLEL = "parallel"      # Split into parallel execution branches
-    SUBGRAPH = "subgraph"      # Nested workflow execution
-    HUMAN = "human"            # Human approval/intervention point
+
+    TASK = "task"  # Execute a role (planner, implementer, reviewer, etc.)
+    GATE = "gate"  # Verification gate (test, lint, security, etc.)
+    BRANCH = "branch"  # Conditional branching with loop support
+    MERGE = "merge"  # Synchronization point for parallel branches
+    PARALLEL = "parallel"  # Split into parallel execution branches
+    SUBGRAPH = "subgraph"  # Nested workflow execution
+    HUMAN = "human"  # Human approval/intervention point
 
 
 class NodeStatus(str, Enum):
     """Execution status for nodes"""
-    PENDING = "pending"        # Not yet ready (dependencies not met)
-    READY = "ready"            # Ready to execute (all dependencies satisfied)
-    RUNNING = "running"        # Currently executing
-    COMPLETED = "completed"    # Successfully completed
-    FAILED = "failed"          # Execution failed
-    SKIPPED = "skipped"        # Skipped due to branch conditions
+
+    PENDING = "pending"  # Not yet ready (dependencies not met)
+    READY = "ready"  # Ready to execute (all dependencies satisfied)
+    RUNNING = "running"  # Currently executing
+    COMPLETED = "completed"  # Successfully completed
+    FAILED = "failed"  # Execution failed
+    SKIPPED = "skipped"  # Skipped due to branch conditions
 
 
 class BranchOutcome(str, Enum):
     """Possible outcomes from BRANCH nodes"""
+
     TRUE = "on_true"
     FALSE = "on_false"
     MAX_ITERATIONS = "max_iterations_reached"
@@ -49,11 +53,14 @@ class TransitionCondition(BaseModel):
     Safe, declarative condition evaluation for edges.
     NO arbitrary code execution - only structured operators.
     """
-    field: str                 # Supports dotted notation: "source_node.field_name"
-    operator: Literal["==", "!=", ">", "<", ">=", "<=", "in", "not_in", "contains", "starts_with", "ends_with"]
-    value: Union[str, int, float, bool, List[Union[str, int, float, bool]]]
 
-    @field_validator('field')
+    field: str  # Supports dotted notation: "source_node.field_name"
+    operator: Literal[
+        "==", "!=", ">", "<", ">=", "<=", "in", "not_in", "contains", "starts_with", "ends_with"
+    ]
+    value: str | int | float | bool | list[str | int | float | bool]
+
+    @field_validator("field")
     @classmethod
     def validate_field(cls, v):
         """Ensure field names are safe dot-separated identifiers.
@@ -62,9 +69,10 @@ class TransitionCondition(BaseModel):
         Invalid: "..", "a..b", ".foo", "foo.", "a-b"
         """
         import re
+
         # Pattern: identifier (letter/underscore + alphanumeric/underscore) optionally
         # followed by .identifier sequences
-        pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$'
+        pattern = r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$"
         if not re.match(pattern, v):
             raise ValueError(f"Invalid field name: {v}")
         return v
@@ -75,35 +83,39 @@ class LoopCondition(BaseModel):
     Safe loop condition for BRANCH nodes.
     Replaces unsafe string evaluation with structured conditions.
     """
-    field: str                 # Field to evaluate from previous node output
+
+    field: str  # Field to evaluate from previous node output
     operator: Literal["==", "!=", ">", "<", ">=", "<=", "in", "not_in"]
-    value: Union[str, int, float, bool, List[Union[str, int, float, bool]]]
-    max_iterations: int = 10   # CRITICAL: Prevent infinite loops
+    value: str | int | float | bool | list[str | int | float | bool]
+    max_iterations: int = 10  # CRITICAL: Prevent infinite loops
 
 
 class Edge(BaseModel):
     """Directed edge between nodes with optional conditions and data mapping"""
+
     id: str
-    source: str                # Source node ID
-    target: str                # Target node ID
-    condition: Optional[TransitionCondition] = None  # For conditional edges
-    data_mapping: Optional[Dict[str, str]] = None    # Map outputs to inputs
+    source: str  # Source node ID
+    target: str  # Target node ID
+    condition: TransitionCondition | None = None  # For conditional edges
+    data_mapping: dict[str, str] | None = None  # Map outputs to inputs
     is_loop_edge: bool = False  # Marks edges that form loops (for re-execution)
 
 
 class TaskNodeConfig(BaseModel):
     """Configuration for TASK nodes - execute a role"""
-    role: str                  # Role name (planner, implementer, reviewer, debugger, etc.)
+
+    role: str  # Role name (planner, implementer, reviewer, debugger, etc.)
     task_template: str = "{input}"  # Template for task description formatting
-    timeout: Optional[int] = None   # Execution timeout in seconds
-    gates: List[str] = []      # Gates to run after task (pre-apply safety)
-    worktree_id: Optional[str] = None  # Optional worktree for isolation
+    timeout: int | None = None  # Execution timeout in seconds
+    gates: list[str] = []  # Gates to run after task (pre-apply safety)
+    worktree_id: str | None = None  # Optional worktree for isolation
 
 
 class GateNodeConfig(BaseModel):
     """Configuration for GATE nodes - verification gates"""
-    gate_type: str             # Gate name from gates.yaml (test_gate, lint_gate, etc.)
-    auto_approve: bool = False # Skip human approval if gate passes
+
+    gate_type: str  # Gate name from gates.yaml (test_gate, lint_gate, etc.)
+    auto_approve: bool = False  # Skip human approval if gate passes
     requires_worktree: bool = True  # Whether gate needs worktree context
 
 
@@ -112,15 +124,17 @@ class BranchNodeConfig(BaseModel):
     Configuration for BRANCH nodes.
     Uses declarative LoopCondition instead of unsafe string evaluation.
     """
-    condition: LoopCondition   # Safe, structured condition
-    on_true: str               # Target node ID if condition is true
-    on_false: str              # Target node ID if condition is false
+
+    condition: LoopCondition  # Safe, structured condition
+    on_true: str  # Target node ID if condition is true
+    on_false: str  # Target node ID if condition is false
 
 
 class MergeNodeConfig(BaseModel):
     """
     Configuration for MERGE nodes - synchronization points.
     """
+
     wait_for: Literal["all", "any"] = "all"  # Wait for all/any incoming edges
     merge_strategy: Literal["union", "intersection", "first"] = "union"
     # union: merge all inputs (later overwrites earlier)
@@ -130,56 +144,60 @@ class MergeNodeConfig(BaseModel):
 
 class ParallelNodeConfig(BaseModel):
     """Configuration for PARALLEL nodes - fan-out execution"""
-    branches: List[str]        # List of node IDs to execute in parallel
+
+    branches: list[str]  # List of node IDs to execute in parallel
     wait_for: Literal["all", "any", "first"] = "all"
 
 
 class SubgraphNodeConfig(BaseModel):
     """Configuration for SUBGRAPH nodes - nested workflows"""
-    workflow_name: str         # Name of nested workflow to execute
-    input_mapping: Dict[str, str] = {}   # Map parent inputs to child inputs
-    output_mapping: Dict[str, str] = {}  # Map child outputs to parent outputs
+
+    workflow_name: str  # Name of nested workflow to execute
+    input_mapping: dict[str, str] = {}  # Map parent inputs to child inputs
+    output_mapping: dict[str, str] = {}  # Map child outputs to parent outputs
 
 
 class HumanNodeConfig(BaseModel):
     """Configuration for HUMAN nodes - approval points"""
-    title: str                 # Title shown in approval UI
-    description: Optional[str] = None  # Additional context
+
+    title: str  # Title shown in approval UI
+    description: str | None = None  # Additional context
 
 
 class Node(BaseModel):
     """Generic graph node with type-specific configuration"""
+
     id: str
     type: NodeType
-    label: Optional[str] = None
-    description: Optional[str] = None
+    label: str | None = None
+    description: str | None = None
 
     # Type-specific configuration (only one should be set based on type)
-    task_config: Optional[TaskNodeConfig] = None
-    gate_config: Optional[GateNodeConfig] = None
-    branch_config: Optional[BranchNodeConfig] = None
-    merge_config: Optional[MergeNodeConfig] = None
-    parallel_config: Optional[ParallelNodeConfig] = None
-    subgraph_config: Optional[SubgraphNodeConfig] = None
-    human_config: Optional[HumanNodeConfig] = None
+    task_config: TaskNodeConfig | None = None
+    gate_config: GateNodeConfig | None = None
+    branch_config: BranchNodeConfig | None = None
+    merge_config: MergeNodeConfig | None = None
+    parallel_config: ParallelNodeConfig | None = None
+    subgraph_config: SubgraphNodeConfig | None = None
+    human_config: HumanNodeConfig | None = None
 
     # UI metadata (position, styling) for visual editor
-    ui_metadata: Optional[Dict] = None
+    ui_metadata: dict | None = None
 
     # Readiness policy for nodes with multiple incoming edges
     wait_for_incoming: Literal["all", "any"] = "any"
 
-    @model_validator(mode='after')
-    def validate_config_for_type(self) -> 'Node':
+    @model_validator(mode="after")
+    def validate_config_for_type(self) -> "Node":
         """Ensure the correct config is present for the node type."""
         config_map = {
-            NodeType.TASK: ('task_config', self.task_config),
-            NodeType.GATE: ('gate_config', self.gate_config),
-            NodeType.BRANCH: ('branch_config', self.branch_config),
-            NodeType.MERGE: ('merge_config', self.merge_config),
-            NodeType.PARALLEL: ('parallel_config', self.parallel_config),
-            NodeType.SUBGRAPH: ('subgraph_config', self.subgraph_config),
-            NodeType.HUMAN: ('human_config', self.human_config),
+            NodeType.TASK: ("task_config", self.task_config),
+            NodeType.GATE: ("gate_config", self.gate_config),
+            NodeType.BRANCH: ("branch_config", self.branch_config),
+            NodeType.MERGE: ("merge_config", self.merge_config),
+            NodeType.PARALLEL: ("parallel_config", self.parallel_config),
+            NodeType.SUBGRAPH: ("subgraph_config", self.subgraph_config),
+            NodeType.HUMAN: ("human_config", self.human_config),
         }
 
         expected_config_name, expected_config = config_map.get(self.type, (None, None))
@@ -202,24 +220,27 @@ class Node(BaseModel):
 
 class WorkflowGraph(BaseModel):
     """Complete workflow definition"""
+
     id: str
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     version: str = "1.0.0"
 
-    nodes: List[Node]
-    edges: List[Edge]
+    nodes: list[Node]
+    edges: list[Edge]
 
-    entry_point: str           # Starting node ID
-    exit_points: List[str] = []  # Terminal node IDs (auto-detected if empty)
+    entry_point: str  # Starting node ID
+    exit_points: list[str] = []  # Terminal node IDs (auto-detected if empty)
 
     # Global configuration
-    config: Dict = Field(default_factory=lambda: {
-        "max_parallel_nodes": 4,      # Limit concurrent execution
-        "fail_fast": True             # Stop on first failure
-    })
+    config: dict = Field(
+        default_factory=lambda: {
+            "max_parallel_nodes": 4,  # Limit concurrent execution
+            "fail_fast": True,  # Stop on first failure
+        }
+    )
 
-    def validate_graph(self) -> List[str]:
+    def validate_graph(self) -> list[str]:
         """
         Validate graph structure using NetworkX.
         Returns list of validation errors.
@@ -274,10 +295,12 @@ class WorkflowGraph(BaseModel):
             cycles = list(nx.simple_cycles(G))
             for cycle in cycles:
                 has_loop_control = any(
-                    n.type == NodeType.BRANCH and n.branch_config and
-                    n.branch_config.condition.max_iterations > 0 and
-                    any(e.is_loop_edge for e in self.edges if e.source in cycle)
-                    for n in self.nodes if n.id in cycle
+                    n.type == NodeType.BRANCH
+                    and n.branch_config
+                    and n.branch_config.condition.max_iterations > 0
+                    and any(e.is_loop_edge for e in self.edges if e.source in cycle)
+                    for n in self.nodes
+                    if n.id in cycle
                 )
                 if not has_loop_control:
                     errors.append(f"Cycle without loop control: {' -> '.join(cycle)}")
@@ -311,12 +334,12 @@ class WorkflowGraph(BaseModel):
             G.add_edge(edge.source, edge.target)
         return G
 
-    def get_terminal_nodes(self) -> Set[str]:
+    def get_terminal_nodes(self) -> set[str]:
         """Find nodes with no outgoing edges"""
         G = self._to_networkx()
         return {n for n in G.nodes() if G.out_degree(n) == 0}
 
-    def analyze_parallelism(self) -> List[List[str]]:
+    def analyze_parallelism(self) -> list[list[str]]:
         """Find nodes that can execute in parallel (topological levels)"""
         G = self._to_networkx()
         try:
@@ -324,7 +347,7 @@ class WorkflowGraph(BaseModel):
         except nx.NetworkXError:
             return []  # Has cycles
 
-    def find_critical_path(self) -> List[str]:
+    def find_critical_path(self) -> list[str]:
         """Find longest path through graph"""
         G = self._to_networkx()
         try:

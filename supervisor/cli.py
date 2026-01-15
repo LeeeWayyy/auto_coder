@@ -492,9 +492,7 @@ def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None
     db_path = repo_path / ".supervisor" / "state.db"
     db = Database(db_path)
     engine = ExecutionEngine(repo_path)
-    orchestrator = GraphOrchestrator(
-        db, engine, engine.gate_executor, engine.gate_loader
-    )
+    orchestrator = GraphOrchestrator(db, engine, engine.gate_executor, engine.gate_loader)
 
     # Start and run workflow
     async def run():

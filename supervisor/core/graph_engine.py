@@ -11,18 +11,14 @@ import asyncio
 import json
 import logging
 import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from supervisor.core.approval import ApprovalGate
 from supervisor.core.gate_executor import GateExecutor
 from supervisor.core.gate_loader import GateLoader
 from supervisor.core.gate_models import GateStatus
 from supervisor.core.graph_schema import (
-    BranchNodeConfig,
     BranchOutcome,
-    Edge,
-    LoopCondition,
     Node,
     NodeStatus,
     NodeType,
@@ -95,9 +91,7 @@ class GraphOrchestrator:
             (workflow.id, workflow.name, workflow.model_dump_json(), workflow.version),
         )
 
-    def _create_execution(
-        self, conn, execution_id: str, workflow_id: str, graph_id: str
-    ):
+    def _create_execution(self, conn, execution_id: str, workflow_id: str, graph_id: str):
         """Create a new execution record."""
         conn.execute(
             """
@@ -239,7 +233,7 @@ class GraphOrchestrator:
             ).fetchone()
             return row[0] if row else "unknown"
 
-    def _get_all_statuses(self, execution_id: str) -> Dict[str, str]:
+    def _get_all_statuses(self, execution_id: str) -> dict[str, str]:
         """Get all node statuses for an execution."""
         with self.db._connect() as conn:
             rows = conn.execute(
@@ -293,7 +287,7 @@ class GraphOrchestrator:
         """Public accessor for execution status."""
         return self._get_execution_status(execution_id)
 
-    def get_all_node_statuses(self, execution_id: str) -> Dict[str, str]:
+    def get_all_node_statuses(self, execution_id: str) -> dict[str, str]:
         """Public accessor for all node statuses."""
         with self.db._connect() as conn:
             rows = conn.execute(
@@ -317,7 +311,7 @@ class GraphOrchestrator:
         self,
         workflow: WorkflowGraph,
         workflow_id: str,
-        initial_inputs: Optional[Dict[str, Any]] = None,
+        initial_inputs: dict[str, Any] | None = None,
     ) -> str:
         """
         Start a new workflow execution.
@@ -342,9 +336,7 @@ class GraphOrchestrator:
             self._save_workflow(conn, wf)
             self._create_execution(conn, exec_id, wf_id, wf.id)
             for node in wf.nodes:
-                self._set_node_status(
-                    conn, exec_id, node.id, NodeStatus.PENDING, node.type.value
-                )
+                self._set_node_status(conn, exec_id, node.id, NodeStatus.PENDING, node.type.value)
             self._set_node_status(conn, exec_id, wf.entry_point, NodeStatus.READY)
 
             # Seed entry point with initial inputs (if provided)
@@ -357,7 +349,11 @@ class GraphOrchestrator:
         # Wrap in to_thread to avoid blocking the event loop
         await asyncio.to_thread(
             self._run_in_transaction,
-            init_workflow, execution_id, workflow_id, workflow, initial_inputs
+            init_workflow,
+            execution_id,
+            workflow_id,
+            workflow,
+            initial_inputs,
         )
 
         return execution_id
@@ -392,16 +388,13 @@ class GraphOrchestrator:
 
         # Execute batch in parallel
         results = await asyncio.gather(
-            *[
-                self._execute_node(execution_id, workflow, nid)
-                for nid in ready_nodes
-            ],
+            *[self._execute_node(execution_id, workflow, nid) for nid in ready_nodes],
             return_exceptions=True,
         )
 
         return sum(1 for r in results if not isinstance(r, Exception))
 
-    async def _claim_ready_nodes(self, execution_id: str, limit: int) -> List[str]:
+    async def _claim_ready_nodes(self, execution_id: str, limit: int) -> list[str]:
         """
         Atomically claim READY nodes to prevent duplicate execution.
         Uses optimistic locking via version field.
@@ -448,27 +441,21 @@ class GraphOrchestrator:
 
         return await asyncio.to_thread(claim_nodes, self.db, execution_id, limit)
 
-    async def _check_workflow_state(
-        self, execution_id: str, workflow: WorkflowGraph
-    ):
+    async def _check_workflow_state(self, execution_id: str, workflow: WorkflowGraph):
         """Check if workflow should complete or mark skipped nodes."""
         # Propagate skips first
         await self._propagate_skips(execution_id, workflow)
 
         # Check if all terminal
         statuses = self._get_all_statuses(execution_id)
-        all_terminal = all(
-            s in ["completed", "failed", "skipped"] for s in statuses.values()
-        )
+        all_terminal = all(s in ["completed", "failed", "skipped"] for s in statuses.values())
 
         if all_terminal:
             # Check if any nodes failed
             any_failed = any(s == "failed" for s in statuses.values())
 
             # Check if any exit point reached successfully
-            any_exit_completed = any(
-                statuses.get(ep) == "completed" for ep in workflow.exit_points
-            )
+            any_exit_completed = any(statuses.get(ep) == "completed" for ep in workflow.exit_points)
 
             if any_failed:
                 # If any node failed, workflow failed (even if exit reached)
@@ -505,9 +492,7 @@ class GraphOrchestrator:
 
     # ========== Node Execution ==========
 
-    async def _execute_node(
-        self, execution_id: str, workflow: WorkflowGraph, node_id: str
-    ) -> bool:
+    async def _execute_node(self, execution_id: str, workflow: WorkflowGraph, node_id: str) -> bool:
         """
         Execute a single node as an atomic transaction.
 
@@ -521,9 +506,7 @@ class GraphOrchestrator:
 
         try:
             # Collect inputs from completed upstream nodes
-            input_data = await asyncio.to_thread(
-                self._collect_inputs, execution_id, workflow, node
-            )
+            input_data = await asyncio.to_thread(self._collect_inputs, execution_id, workflow, node)
 
             # Execute based on node type
             if node.type == NodeType.TASK:
@@ -531,13 +514,9 @@ class GraphOrchestrator:
             elif node.type == NodeType.GATE:
                 output = await self._execute_gate(execution_id, node, input_data)
             elif node.type == NodeType.BRANCH:
-                output = await self._execute_branch(
-                    execution_id, workflow, node, input_data
-                )
+                output = await self._execute_branch(execution_id, workflow, node, input_data)
             elif node.type == NodeType.MERGE:
-                output = await asyncio.to_thread(
-                    self._execute_merge, execution_id, workflow, node
-                )
+                output = await asyncio.to_thread(self._execute_merge, execution_id, workflow, node)
             elif node.type == NodeType.PARALLEL:
                 output = await self._execute_parallel(execution_id, workflow, node)
             elif node.type == NodeType.HUMAN:
@@ -612,7 +591,7 @@ class GraphOrchestrator:
 
     def _collect_inputs(
         self, execution_id: str, workflow: WorkflowGraph, node: Node
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Collect inputs from completed upstream nodes.
 
@@ -637,9 +616,7 @@ class GraphOrchestrator:
             # Apply data mapping if specified
             if edge.data_mapping:
                 output = {
-                    target_key: output.get(source_key)
-                    if isinstance(output, dict)
-                    else output
+                    target_key: output.get(source_key) if isinstance(output, dict) else output
                     for target_key, source_key in edge.data_mapping.items()
                 }
 
@@ -672,9 +649,7 @@ class GraphOrchestrator:
         - Uses same transaction for reads/writes to prevent race conditions
         """
         # Get the completed node to check if it's a BRANCH
-        completed_node = next(
-            (n for n in workflow.nodes if n.id == completed_id), None
-        )
+        completed_node = next((n for n in workflow.nodes if n.id == completed_id), None)
 
         # Track which target was selected by BRANCH (for skip propagation)
         branch_allowed_target = None
@@ -700,14 +675,18 @@ class GraphOrchestrator:
             # Mark non-selected branch target as SKIPPED to prevent hanging
             if branch_allowed_target:
                 non_selected = (
-                    branch_config.on_false if branch_allowed_target == branch_config.on_true
+                    branch_config.on_false
+                    if branch_allowed_target == branch_config.on_true
                     else branch_config.on_true
                 )
                 current_status = self._get_node_status_in_txn(conn, execution_id, non_selected)
                 if current_status == NodeStatus.PENDING.value:
                     self._set_node_status_guarded(
-                        conn, execution_id, non_selected, NodeStatus.SKIPPED,
-                        expected_status=NodeStatus.PENDING
+                        conn,
+                        execution_id,
+                        non_selected,
+                        NodeStatus.SKIPPED,
+                        expected_status=NodeStatus.PENDING,
                     )
 
         for edge in [e for e in workflow.edges if e.source == completed_id]:
@@ -728,8 +707,11 @@ class GraphOrchestrator:
             if edge.is_loop_edge and current == NodeStatus.COMPLETED.value:
                 # Guard with expected status to prevent regression
                 self._set_node_status_guarded(
-                    conn, execution_id, edge.target, NodeStatus.READY,
-                    expected_status=NodeStatus.COMPLETED
+                    conn,
+                    execution_id,
+                    edge.target,
+                    NodeStatus.READY,
+                    expected_status=NodeStatus.COMPLETED,
                 )
                 self._clear_node_output(conn, execution_id, edge.target)
                 continue
@@ -742,8 +724,11 @@ class GraphOrchestrator:
             if self._is_node_ready_in_txn(conn, execution_id, workflow, edge.target, target):
                 # Guard with expected status to prevent race
                 self._set_node_status_guarded(
-                    conn, execution_id, edge.target, NodeStatus.READY,
-                    expected_status=NodeStatus.PENDING
+                    conn,
+                    execution_id,
+                    edge.target,
+                    NodeStatus.READY,
+                    expected_status=NodeStatus.PENDING,
                 )
 
     def _is_node_ready_in_txn(
@@ -784,9 +769,7 @@ class GraphOrchestrator:
         else:  # "any"
             return completed_count > 0
 
-    def _eval_condition(
-        self, condition: TransitionCondition, data: Any
-    ) -> bool:
+    def _eval_condition(self, condition: TransitionCondition, data: Any) -> bool:
         """
         Evaluate a transition condition safely.
 
@@ -842,9 +825,7 @@ class GraphOrchestrator:
                 return value not in condition.value
             elif condition.operator == "contains":
                 # Support str, list, and dict (check for key)
-                if isinstance(value, dict):
-                    return condition.value in value
-                elif isinstance(value, (str, list)):
+                if isinstance(value, (dict, str, list)):
                     return condition.value in value
                 return False
             elif condition.operator == "starts_with":
@@ -922,9 +903,7 @@ class GraphOrchestrator:
 
     # ========== Node Type Implementations ==========
 
-    async def _execute_task(
-        self, execution_id: str, node: Node, input_data: Dict
-    ) -> Any:
+    async def _execute_task(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute a role-based task with pre-apply gate safety."""
         config = node.task_config
 
@@ -961,16 +940,12 @@ class GraphOrchestrator:
 
         return result
 
-    async def _execute_gate(
-        self, execution_id: str, node: Node, input_data: Dict
-    ) -> Any:
+    async def _execute_gate(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute a verification gate in isolated worktree."""
         config = node.gate_config
 
         def run_gate_isolated():
-            with self.engine.workspace.isolated_execution(
-                f"gate_{execution_id}_{node.id}"
-            ) as ctx:
+            with self.engine.workspace.isolated_execution(f"gate_{execution_id}_{node.id}") as ctx:
                 gate_config = self.gate_loader.get_gate(config.gate_type)
                 result = self.gate_executor.run_gate(
                     gate_config, ctx.worktree_path, execution_id, node.id
@@ -987,7 +962,7 @@ class GraphOrchestrator:
         }
 
     async def _execute_branch(
-        self, execution_id: str, workflow: WorkflowGraph, node: Node, input_data: Dict
+        self, execution_id: str, workflow: WorkflowGraph, node: Node, input_data: dict
     ) -> Any:
         """Execute branch logic with loop control."""
         config = node.branch_config
@@ -997,21 +972,16 @@ class GraphOrchestrator:
             (e for e in workflow.edges if e.source == node.id and e.is_loop_edge), None
         )
         loop_key = f"loop_{loop_edge.id if loop_edge else node.id}"
-        iteration = await asyncio.to_thread(
-            self._get_loop_counter, execution_id, loop_key
-        )
+        iteration = await asyncio.to_thread(self._get_loop_counter, execution_id, loop_key)
 
         # Check max iterations - route to non-loop edge
         if iteration >= config.condition.max_iterations:
             # Reset counter for potential re-entry later
-            await asyncio.to_thread(
-                self._reset_loop_counter, execution_id, loop_key
-            )
+            await asyncio.to_thread(self._reset_loop_counter, execution_id, loop_key)
             # Determine non-loop target using is_loop_edge marker
             if loop_edge:
                 non_loop_target = (
-                    config.on_false if loop_edge.target == config.on_true
-                    else config.on_true
+                    config.on_false if loop_edge.target == config.on_true else config.on_true
                 )
             else:
                 non_loop_target = config.on_false
@@ -1030,14 +1000,10 @@ class GraphOrchestrator:
             target = config.on_true if result else config.on_false
             if loop_edge.target == target:
                 # Taking the loop edge - increment counter
-                await asyncio.to_thread(
-                    self._increment_loop_counter, execution_id, loop_key
-                )
+                await asyncio.to_thread(self._increment_loop_counter, execution_id, loop_key)
             else:
                 # Exiting the loop - reset counter for potential re-entry
-                await asyncio.to_thread(
-                    self._reset_loop_counter, execution_id, loop_key
-                )
+                await asyncio.to_thread(self._reset_loop_counter, execution_id, loop_key)
 
         return {
             "branch_outcome": outcome,
@@ -1045,9 +1011,7 @@ class GraphOrchestrator:
             "iterations": iteration,
         }
 
-    def _execute_merge(
-        self, execution_id: str, workflow: WorkflowGraph, node: Node
-    ) -> Any:
+    def _execute_merge(self, execution_id: str, workflow: WorkflowGraph, node: Node) -> Any:
         """Execute merge logic - combine inputs from multiple branches."""
         config = node.merge_config
         incoming = [e for e in workflow.edges if e.target == node.id]
@@ -1076,9 +1040,7 @@ class GraphOrchestrator:
         # The actual parallel execution happens in execute_next_batch
         return {"parallel_started": True}
 
-    async def _execute_human(
-        self, execution_id: str, node: Node, input_data: Dict
-    ) -> Any:
+    async def _execute_human(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute human approval node."""
         config = node.human_config
 
@@ -1104,9 +1066,7 @@ class GraphOrchestrator:
 
         return {"approved": decision == ApprovalDecision.APPROVE}
 
-    async def _execute_subgraph(
-        self, execution_id: str, node: Node, input_data: Dict
-    ) -> Any:
+    async def _execute_subgraph(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute nested workflow (not yet implemented)."""
         config = node.subgraph_config
         if not config:
