@@ -686,8 +686,14 @@ class GraphOrchestrator:
                     if branch_allowed_target == branch_config.on_true
                     else branch_config.on_true
                 )
-                current_status = self._get_node_status_in_txn(conn, execution_id, non_selected)
-                if current_status == NodeStatus.PENDING.value:
+                # Guard: only skip if non_selected is different from the allowed target
+                # (handles case where on_true == on_false, e.g., do-while loops)
+                if non_selected == branch_allowed_target:
+                    pass  # Same node - don't skip the target we're about to execute
+                elif (
+                    self._get_node_status_in_txn(conn, execution_id, non_selected)
+                    == NodeStatus.PENDING.value
+                ):
                     # Check if non-selected target has other incoming edges
                     non_selected_node = next(
                         (n for n in workflow.nodes if n.id == non_selected), None
@@ -728,15 +734,20 @@ class GraphOrchestrator:
 
             # LOOP RE-EXECUTION
             if edge.is_loop_edge and current == NodeStatus.COMPLETED.value:
-                # Guard with expected status to prevent regression
-                self._set_node_status_guarded(
-                    conn,
-                    execution_id,
-                    edge.target,
-                    NodeStatus.READY,
-                    expected_status=NodeStatus.COMPLETED,
-                )
-                self._clear_node_output(conn, execution_id, edge.target)
+                # Reset all nodes in the loop cycle, not just the loop target
+                # Find all nodes between loop target and this BRANCH node
+                loop_nodes = self._find_loop_cycle_nodes(workflow, edge.target, completed_id)
+                for loop_node_id in loop_nodes:
+                    loop_status = self._get_node_status_in_txn(conn, execution_id, loop_node_id)
+                    if loop_status == NodeStatus.COMPLETED.value:
+                        self._set_node_status_guarded(
+                            conn,
+                            execution_id,
+                            loop_node_id,
+                            NodeStatus.READY,
+                            expected_status=NodeStatus.COMPLETED,
+                        )
+                        self._clear_node_output(conn, execution_id, loop_node_id)
                 continue
 
             # Skip if already processed
@@ -753,6 +764,46 @@ class GraphOrchestrator:
                     NodeStatus.READY,
                     expected_status=NodeStatus.PENDING,
                 )
+
+    def _find_loop_cycle_nodes(
+        self, workflow: WorkflowGraph, start_node: str, end_node: str
+    ) -> list[str]:
+        """
+        Find all nodes in the loop cycle from start_node back to end_node.
+
+        Uses BFS to find all nodes reachable from start_node that lead to end_node.
+        Returns list including start_node but excluding end_node (the BRANCH).
+        """
+        # Build adjacency list
+        adj: dict[str, list[str]] = {}
+        for edge in workflow.edges:
+            if edge.source not in adj:
+                adj[edge.source] = []
+            adj[edge.source].append(edge.target)
+
+        # BFS to find all nodes in the path from start to end
+        visited = set()
+        queue = [start_node]
+        loop_nodes = []
+
+        while queue:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+
+            if node == end_node:
+                # Don't include the BRANCH node itself, but we found the path
+                continue
+
+            loop_nodes.append(node)
+
+            # Add neighbors to queue
+            for neighbor in adj.get(node, []):
+                if neighbor not in visited:
+                    queue.append(neighbor)
+
+        return loop_nodes
 
     def _is_node_ready_in_txn(
         self, conn, execution_id: str, workflow: WorkflowGraph, node_id: str, node: Node
@@ -802,27 +853,37 @@ class GraphOrchestrator:
         if not isinstance(data, dict):
             return False
 
-        # Extract field value (supports dotted notation)
-        value = data.get(condition.field)
+        # Extract field value with proper precedence:
+        # 1. Direct key match (including explicit None values)
+        # 2. Dotted notation for nested dict access
+        # 3. Un-namespaced convenience match (e.g., "field" matches "source.field")
+        value = None
+        found = False
 
-        # If not found and field doesn't have dots, try finding it in namespaced keys
-        # This allows conditions like "test_status" to match "gate_node.test_status"
-        if value is None and "." not in condition.field:
+        # 1. Direct key match
+        if condition.field in data:
+            value = data[condition.field]
+            found = True
+
+        # 2. Dotted notation for nested dict access
+        if not found and "." in condition.field:
+            parts = condition.field.split(".")
+            temp_val = data
+            try:
+                for part in parts:
+                    temp_val = temp_val[part]
+                value = temp_val
+                found = True
+            except (KeyError, TypeError):
+                pass  # Not found via nested access
+
+        # 3. Un-namespaced convenience match
+        if not found and "." not in condition.field:
             suffix = f".{condition.field}"
             for key in data:
                 if key.endswith(suffix):
                     value = data[key]
-                    break  # Use first match
-
-        if value is None and "." in condition.field:
-            # Try dotted notation for nested dict access
-            parts = condition.field.split(".")
-            value = data
-            for part in parts:
-                if isinstance(value, dict):
-                    value = value.get(part)
-                else:
-                    value = None
+                    found = True
                     break
 
         # Evaluate operator with type safety
