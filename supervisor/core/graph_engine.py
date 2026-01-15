@@ -908,8 +908,10 @@ class GraphOrchestrator:
         config = node.task_config
 
         # Format task description
+        # Filter out 'input' key to avoid TypeError from duplicate keyword argument
+        format_data = {k: v for k, v in input_data.items() if k != "input"}
         task_description = config.task_template.format(
-            input=json.dumps(input_data, indent=2), **input_data
+            input=json.dumps(input_data, indent=2), **format_data
         )
 
         # Get workflow_id (wrap in to_thread to avoid blocking)
@@ -1018,7 +1020,16 @@ class GraphOrchestrator:
 
         merged = {}
         for edge in incoming:
-            output = self._get_node_output(execution_id, edge.source)
+            # Check edge condition before including output
+            if edge.condition:
+                source_output = self._get_node_output(execution_id, edge.source)
+                if not self._eval_condition(edge.condition, source_output):
+                    # Skip this edge - condition not met
+                    continue
+                output = source_output
+            else:
+                output = self._get_node_output(execution_id, edge.source)
+
             if output and isinstance(output, dict):
                 if config.merge_strategy == "union":
                     merged.update(output)

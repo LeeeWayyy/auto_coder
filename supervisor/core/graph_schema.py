@@ -294,18 +294,24 @@ class WorkflowGraph(BaseModel):
         try:
             cycles = list(nx.simple_cycles(G))
             for cycle in cycles:
+                # A cycle has proper loop control if:
+                # 1. There's a BRANCH node in the cycle
+                # 2. That BRANCH node has max_iterations > 0
+                # 3. The loop edge originates from that BRANCH node and connects back into the cycle
                 has_loop_control = any(
                     n.type == NodeType.BRANCH
                     and n.branch_config
                     and n.branch_config.condition.max_iterations > 0
-                    and any(e.is_loop_edge for e in self.edges if e.source in cycle)
+                    and any(
+                        e.is_loop_edge and e.target in cycle for e in self.edges if e.source == n.id
+                    )
                     for n in self.nodes
                     if n.id in cycle
                 )
                 if not has_loop_control:
                     errors.append(f"Cycle without loop control: {' -> '.join(cycle)}")
-        except Exception:
-            pass  # Graph may have issues preventing cycle detection
+        except Exception as e:
+            errors.append(f"Could not perform cycle detection: {e}")
 
         # Validate MERGE nodes have multiple incoming edges
         for node in self.nodes:
