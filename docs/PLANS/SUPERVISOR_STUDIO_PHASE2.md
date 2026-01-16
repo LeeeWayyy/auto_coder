@@ -478,6 +478,15 @@ class NodeInspector:
         self.db = db
         self.console = Console()
 
+    def _get_statuses(self, execution_id: str) -> Dict[str, str]:
+        """Get all node statuses for display."""
+        with self.db._connect() as conn:
+            rows = conn.execute(
+                "SELECT node_id, status FROM node_executions WHERE execution_id=?",
+                (execution_id,)
+            ).fetchall()
+            return {row[0]: row[1] for row in rows}
+
     def inspect(self, execution_id: str, workflow: WorkflowGraph):
         """
         Interactive inspection loop.

@@ -41,6 +41,9 @@ Phase 3 delivers a full web-based Supervisor Studio with:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+> **Note:** The MVP implementation uses an in-memory `ConnectionManager` for WebSocket
+> pub/sub. Redis can be added later for horizontal scaling of backend servers.
+
 ---
 
 ## 3.3 Backend API Server
@@ -977,7 +980,7 @@ function WorkflowCanvasInner({ workflowId, onNodeSelect, onEdgeSelect, execution
       // Add default config based on type
       ...(nodeType === 'task' && { task_config: { role: 'implementer', task_template: '{input}' } }),
       ...(nodeType === 'gate' && { gate_config: { gate_type: 'test_gate' } }),
-      ...(nodeType === 'branch' && { branch_config: { condition: { field: 'status', operator: '==', value: 'success', max_iterations: 10 }, on_true: '', on_false: '' } }),
+      ...(nodeType === 'branch' && { branch_config: { condition: { field: 'status', operator: '==', value: 'success', max_iterations: 10 }, on_true: null, on_false: null } }),
       ...(nodeType === 'merge' && { merge_config: { wait_for: 'all', merge_strategy: 'union' } }),
       ...(nodeType === 'parallel' && { parallel_config: { branches: [], wait_for: 'all' } }),
       ...(nodeType === 'human' && { human_config: { title: 'Approval Required' } }),
