@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -405,7 +406,8 @@ class GraphOrchestrator:
             self._set_node_status(conn, exec_id, wf.entry_point, NodeStatus.READY)
 
             # Seed entry point with initial inputs (if provided)
-            if inputs:
+            # Use 'is not None' to allow falsy values like 0, False, "", []
+            if inputs is not None:
                 conn.execute(
                     "UPDATE node_executions SET input_data=? WHERE execution_id=? AND node_id=?",
                     (json.dumps(inputs), exec_id, wf.entry_point),
@@ -443,7 +445,7 @@ class GraphOrchestrator:
 
         # Claim READY nodes atomically (prevents duplicate execution)
         ready_nodes = await self._claim_ready_nodes(
-            execution_id, workflow.config.get("max_parallel_nodes", 4)
+            execution_id, workflow.config.max_parallel_nodes
         )
 
         if not ready_nodes:
@@ -606,16 +608,20 @@ class GraphOrchestrator:
             ):
 
                 def persist_gate_failure(conn, exec_id, n_id, out):
-                    self._set_node_output(conn, exec_id, n_id, out)
-                    self._set_node_status(
-                        conn,
-                        exec_id,
-                        n_id,
-                        NodeStatus.FAILED,
-                        error=f"Gate failed: {out.get('output', 'unknown')}",
+                    # Use guarded update to handle race with loop resets
+                    updated = self._set_node_status_guarded(
+                        conn, exec_id, n_id, NodeStatus.FAILED, expected_status=NodeStatus.RUNNING
                     )
+                    if updated:
+                        self._set_node_output(conn, exec_id, n_id, out)
+                        # Store error message in a separate update since guarded doesn't take error
+                        conn.execute(
+                            "UPDATE node_executions SET error=? WHERE execution_id=? AND node_id=?",
+                            (f"Gate failed: {out.get('output', 'unknown')}", exec_id, n_id),
+                        )
+                    return updated
 
-                await asyncio.to_thread(
+                failed = await asyncio.to_thread(
                     self._run_in_transaction,
                     persist_gate_failure,
                     execution_id,
@@ -623,17 +629,25 @@ class GraphOrchestrator:
                     output,
                 )
 
-                if workflow.config.get("fail_fast", True):
+                if failed and workflow.config.fail_fast:
                     await self._fail_workflow(execution_id, f"Gate '{node_id}' failed")
                 return False
 
             # Persist output and update dependents atomically
+            # Use guarded status update to handle race condition where node was
+            # reset to PENDING (e.g., by loop restart) while this task was running.
             def persist_completion(conn, exec_id, n_id, out, wf):
-                self._set_node_output(conn, exec_id, n_id, out)
-                self._set_node_status(conn, exec_id, n_id, NodeStatus.COMPLETED)
-                self._update_dependents(conn, exec_id, wf, n_id, out)
+                # Guarded update: only complete if still RUNNING
+                # This prevents stale completions from overwriting loop resets
+                updated = self._set_node_status_guarded(
+                    conn, exec_id, n_id, NodeStatus.COMPLETED, expected_status=NodeStatus.RUNNING
+                )
+                if updated:
+                    self._set_node_output(conn, exec_id, n_id, out)
+                    self._update_dependents(conn, exec_id, wf, n_id, out)
+                return updated
 
-            await asyncio.to_thread(
+            completed = await asyncio.to_thread(
                 self._run_in_transaction,
                 persist_completion,
                 execution_id,
@@ -641,19 +655,31 @@ class GraphOrchestrator:
                 output,
                 workflow,
             )
-            return True
+            if not completed:
+                # Node was reset (e.g., by loop restart) - don't count as success
+                logger.info(f"Node {node_id} completion discarded (status changed during execution)")
+            return completed
 
         except Exception as e:
             logger.error(f"Node {node_id} failed: {e}")
 
             def persist_failure(conn, exec_id, n_id, err):
-                self._set_node_status(conn, exec_id, n_id, NodeStatus.FAILED, error=err)
+                # Use guarded update to handle race with loop resets
+                updated = self._set_node_status_guarded(
+                    conn, exec_id, n_id, NodeStatus.FAILED, expected_status=NodeStatus.RUNNING
+                )
+                if updated:
+                    conn.execute(
+                        "UPDATE node_executions SET error=? WHERE execution_id=? AND node_id=?",
+                        (err, exec_id, n_id),
+                    )
+                return updated
 
-            await asyncio.to_thread(
+            failed = await asyncio.to_thread(
                 self._run_in_transaction, persist_failure, execution_id, node_id, str(e)
             )
 
-            if workflow.config.get("fail_fast", True):
+            if failed and workflow.config.fail_fast:
                 await self._fail_workflow(execution_id, str(e))
             raise
 
@@ -668,8 +694,9 @@ class GraphOrchestrator:
         merged = {}
 
         # Check for seeded input_data
+        # Use 'is not None' to allow falsy values like 0, False, "", []
         seeded_input = self._get_seeded_input(execution_id, node.id)
-        if seeded_input:
+        if seeded_input is not None:
             if isinstance(seeded_input, dict):
                 merged.update(seeded_input)
             else:
@@ -810,10 +837,16 @@ class GraphOrchestrator:
                 loop_nodes = self._find_loop_cycle_nodes(workflow, edge.target, completed_id)
                 for loop_node_id in loop_nodes:
                     loop_status = self._get_node_status_in_txn(conn, execution_id, loop_node_id)
-                    # Reset both COMPLETED and SKIPPED nodes on loop re-entry
-                    # SKIPPED nodes may need to run on subsequent iterations if branch
-                    # conditions change (e.g., alternating paths in loop body)
-                    if loop_status in (NodeStatus.COMPLETED.value, NodeStatus.SKIPPED.value):
+                    # Reset COMPLETED, SKIPPED, and RUNNING nodes on loop re-entry
+                    # - COMPLETED/SKIPPED: Need to re-execute in the next iteration
+                    # - RUNNING: Parallel execution race - task may still be running but
+                    #   we need to mark it for re-execution. The running task's completion
+                    #   will use guarded status update which will fail (status != RUNNING).
+                    if loop_status in (
+                        NodeStatus.COMPLETED.value,
+                        NodeStatus.SKIPPED.value,
+                        NodeStatus.RUNNING.value,
+                    ):
                         # Reset to PENDING (not READY) to preserve dependency ordering
                         # Only the loop entry node will be marked READY below
                         self._set_node_status_guarded(
@@ -894,10 +927,11 @@ class GraphOrchestrator:
             rev_adj[edge.target].append(edge.source)
 
         # Step 1: Find all nodes that can reach end_node (reverse BFS)
+        # Use deque for O(1) popleft operations instead of list.pop(0) which is O(n)
         can_reach_end: set[str] = set()
-        queue = [end_node]
+        queue: deque[str] = deque([end_node])
         while queue:
-            node = queue.pop(0)
+            node = queue.popleft()
             if node in can_reach_end:
                 continue
             can_reach_end.add(node)
@@ -907,11 +941,11 @@ class GraphOrchestrator:
 
         # Step 2: Forward BFS from start_node, only including nodes that can reach end
         visited: set[str] = set()
-        queue = [start_node]
+        queue = deque([start_node])
         loop_nodes: list[str] = []
 
         while queue:
-            node = queue.pop(0)
+            node = queue.popleft()
             if node in visited:
                 continue
             visited.add(node)
@@ -1217,8 +1251,14 @@ class GraphOrchestrator:
                 try:
                     result = await asyncio.wait_for(coro, timeout=config.timeout)
                 except TimeoutError:
-                    # Re-raise with context - the thread may still be running
-                    # but no result will be saved (node marked FAILED by caller)
+                    # Log a warning about the zombie task - the thread may still be running
+                    # and could modify files even though this execution is marked as failed
+                    logger.warning(
+                        f"ZOMBIE TASK WARNING: Task '{node.id}' timed out after {config.timeout}s. "
+                        f"The underlying thread (step_id={step_id}) may still be running in the "
+                        f"background and could modify files. Consider using isolated worktrees."
+                    )
+                    # Re-raise with context
                     raise TimeoutError(
                         f"Task '{node.id}' timed out after {config.timeout}s. "
                         f"Note: The underlying thread may still be running."

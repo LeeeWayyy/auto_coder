@@ -66,14 +66,19 @@ class TransitionCondition(BaseModel):
     def validate_field(cls, v):
         """Ensure field names are safe dot-separated identifiers.
 
-        Valid: "status", "node_1.result", "a.b.c"
-        Invalid: "..", "a..b", ".foo", "foo.", "a-b"
+        Valid: "status", "node_1.result", "a.b.c", "content-type", "a.b-c.d"
+        Invalid: "..", "a..b", ".foo", "foo.", "-foo", "foo-"
         """
-        # Pattern: identifier (letter/underscore + alphanumeric/underscore) optionally
-        # followed by .identifier sequences
-        pattern = r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$"
+        # Pattern: identifier (letter/underscore + alphanumeric/underscore/hyphen) optionally
+        # followed by .identifier sequences. Hyphens allowed within segments but not at
+        # start/end of segments (to support external system field names like "content-type").
+        pattern = r"^[a-zA-Z_][a-zA-Z0-9_-]*(\.[a-zA-Z_][a-zA-Z0-9_-]*)*$"
         if not re.match(pattern, v):
             raise ValueError(f"Invalid field name: {v}")
+        # Additional check: no segment should end with hyphen
+        for segment in v.split("."):
+            if segment.endswith("-"):
+                raise ValueError(f"Invalid field name: {v} (segment cannot end with hyphen)")
         return v
 
     @model_validator(mode="after")
@@ -101,6 +106,23 @@ class LoopCondition(BaseModel):
     value: str | int | float | bool | list[str | int | float | bool]
     max_iterations: int = 10  # CRITICAL: Prevent infinite loops
 
+    @field_validator("field")
+    @classmethod
+    def validate_field(cls, v):
+        """Ensure field names are safe dot-separated identifiers.
+
+        Same validation as TransitionCondition.field for consistency.
+        Valid: "status", "node_1.result", "a.b.c", "content-type"
+        Invalid: "..", "a..b", ".foo", "foo.", "-foo", "foo-"
+        """
+        pattern = r"^[a-zA-Z_][a-zA-Z0-9_-]*(\.[a-zA-Z_][a-zA-Z0-9_-]*)*$"
+        if not re.match(pattern, v):
+            raise ValueError(f"Invalid field name: {v}")
+        for segment in v.split("."):
+            if segment.endswith("-"):
+                raise ValueError(f"Invalid field name: {v} (segment cannot end with hyphen)")
+        return v
+
 
 class Edge(BaseModel):
     """Directed edge between nodes with optional conditions and data mapping"""
@@ -124,11 +146,20 @@ class TaskNodeConfig(BaseModel):
 
 
 class GateNodeConfig(BaseModel):
-    """Configuration for GATE nodes - verification gates"""
+    """Configuration for GATE nodes - verification gates.
+
+    Note on reserved fields:
+    - auto_approve: Reserved for future integration with HUMAN approval nodes.
+      When implemented, if auto_approve=True and gate passes, downstream HUMAN
+      nodes could be auto-approved. Currently not enforced by the engine.
+    - requires_worktree: Reserved for future optimization. When False, gates
+      could run without creating an isolated worktree. Currently all gates
+      run in isolated worktrees for safety.
+    """
 
     gate_type: str  # Gate name from gates.yaml (test_gate, lint_gate, etc.)
-    auto_approve: bool = False  # Skip human approval if gate passes
-    requires_worktree: bool = True  # Whether gate needs worktree context
+    auto_approve: bool = False  # Reserved: Skip human approval if gate passes
+    requires_worktree: bool = True  # Reserved: Whether gate needs worktree context
 
 
 class BranchNodeConfig(BaseModel):
@@ -182,6 +213,13 @@ class HumanNodeConfig(BaseModel):
 
     title: str  # Title shown in approval UI
     description: str | None = None  # Additional context
+
+
+class WorkflowConfig(BaseModel):
+    """Configuration for workflow execution behavior."""
+
+    max_parallel_nodes: int = 4  # Limit concurrent node execution
+    fail_fast: bool = True  # Stop workflow on first node failure
 
 
 class Node(BaseModel):
@@ -269,13 +307,8 @@ class WorkflowGraph(BaseModel):
     entry_point: str  # Starting node ID
     exit_points: list[str] = Field(default_factory=list)  # Terminal node IDs (auto-detected)
 
-    # Global configuration
-    config: dict = Field(
-        default_factory=lambda: {
-            "max_parallel_nodes": 4,  # Limit concurrent execution
-            "fail_fast": True,  # Stop on first failure
-        }
-    )
+    # Global configuration with type safety and validation
+    config: WorkflowConfig = Field(default_factory=WorkflowConfig)
 
     def validate_graph(self) -> list[str]:
         """
@@ -310,6 +343,12 @@ class WorkflowGraph(BaseModel):
         # Check entry point exists
         if self.entry_point not in node_ids:
             errors.append(f"Entry point '{self.entry_point}' not found")
+
+        # Validate user-specified exit_points reference valid node IDs
+        # (before auto-detection which may override them)
+        for ep in self.exit_points:
+            if ep not in node_ids:
+                errors.append(f"Exit point '{ep}' not found in nodes")
 
         # Check all edge endpoints exist
         for edge in self.edges:
