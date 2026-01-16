@@ -10,12 +10,15 @@ Security-first design:
 - Comprehensive validation before execution
 """
 
+import logging
 import re
 from enum import Enum
 from typing import Literal
 
 import networkx as nx
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class NodeType(str, Enum):
@@ -408,11 +411,13 @@ class WorkflowGraph(BaseModel):
             if len(self.nodes) > MAX_NODES_FOR_FULL_CYCLE_CHECK:
                 # For large graphs, we can only detect if ANY cycle exists, not enumerate all.
                 # nx.find_cycle() returns only one cycle, so we can't guarantee other
-                # uncontrolled cycles don't exist. Warn the user to manually verify.
+                # uncontrolled cycles don't exist. Log a warning but don't block execution.
                 try:
                     nx.find_cycle(G)
                     # A cycle exists - warn user since we can't validate all cycles
-                    errors.append(
+                    # NOTE: This is a non-blocking warning. Large graphs with cycles
+                    # are allowed to run but user should manually verify loop control.
+                    logger.warning(
                         f"Cycle detected in large graph (>{MAX_NODES_FOR_FULL_CYCLE_CHECK} nodes). "
                         f"Full cycle validation is skipped for performance. "
                         f"Please manually verify all cycles have proper loop control "

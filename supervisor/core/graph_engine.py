@@ -481,22 +481,41 @@ class GraphOrchestrator:
                 claimed = []
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    # First, requeue stale RUNNING nodes (crash recovery)
-                    # Nodes that have been RUNNING longer than stale_timeout are reset
-                    stale_requeued = conn.execute(
+                    # First, mark stale RUNNING nodes as FAILED (crash recovery)
+                    # Instead of requeueing (which risks duplicate execution if a node
+                    # is legitimately long-running), we mark them failed with a clear
+                    # error. Operators can investigate and manually retry if needed.
+                    # TODO(Phase2): Respect per-node timeouts (task_config.timeout)
+                    stale_rows = conn.execute(
                         """
-                        UPDATE node_executions
-                        SET status='ready', version=version+1, started_at=NULL
+                        SELECT node_id FROM node_executions
                         WHERE execution_id=? AND status='running'
                         AND started_at IS NOT NULL
                         AND (julianday('now') - julianday(started_at)) * 86400 > ?
                         """,
                         (exec_id, stale_timeout),
-                    ).rowcount
-                    if stale_requeued > 0:
+                    ).fetchall()
+                    for (stale_node_id,) in stale_rows:
+                        conn.execute(
+                            """
+                            UPDATE node_executions
+                            SET status='failed', version=version+1,
+                                error=?, completed_at=CURRENT_TIMESTAMP
+                            WHERE execution_id=? AND node_id=? AND status='running'
+                            """,
+                            (
+                                f"Node exceeded crash recovery timeout ({stale_timeout}s). "
+                                f"May have crashed or is legitimately long-running. "
+                                f"Check logs and manually retry if needed.",
+                                exec_id,
+                                stale_node_id,
+                            ),
+                        )
+                    if stale_rows:
                         logger.warning(
-                            f"Requeued {stale_requeued} stale RUNNING node(s) for execution "
-                            f"{exec_id} (exceeded {stale_timeout}s timeout)"
+                            f"Marked {len(stale_rows)} stale RUNNING node(s) as FAILED for "
+                            f"execution {exec_id} (exceeded {stale_timeout}s timeout). "
+                            f"Nodes: {[r[0] for r in stale_rows]}"
                         )
 
                     # Count currently running nodes to enforce global parallelism limit
