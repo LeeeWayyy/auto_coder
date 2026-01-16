@@ -626,10 +626,13 @@ class GraphOrchestrator:
                     for target_key, source_key in edge.data_mapping.items()
                 }
 
-            # Store namespaced keys only to prevent non-deterministic overwrites
+            # Store both namespaced keys and the full output under node ID
+            # Namespaced keys (source.field) prevent collisions between nodes
+            # Full output under node ID enables {node_id} template references
             if isinstance(output, dict):
                 for k, v in output.items():
-                    merged[f"{edge.source}.{k}"] = v  # Namespaced only
+                    merged[f"{edge.source}.{k}"] = v  # Namespaced keys
+                merged[edge.source] = output  # Full dict for {node_id} templates
             else:
                 merged[edge.source] = output
 
@@ -774,20 +777,43 @@ class GraphOrchestrator:
         """
         Find all nodes in the loop cycle from start_node back to end_node.
 
-        Uses BFS to find all nodes reachable from start_node that lead to end_node.
+        Only includes nodes that are BOTH:
+        1. Reachable from start_node (forward direction)
+        2. Can reach end_node (backward direction)
+
+        This excludes side branches that don't lead back to the loop exit.
         Returns list including start_node but excluding end_node (the BRANCH).
         """
-        # Build adjacency list
+        # Build forward adjacency list
         adj: dict[str, list[str]] = {}
         for edge in workflow.edges:
             if edge.source not in adj:
                 adj[edge.source] = []
             adj[edge.source].append(edge.target)
 
-        # BFS to find all nodes in the path from start to end
-        visited = set()
+        # Build reverse adjacency list
+        rev_adj: dict[str, list[str]] = {}
+        for edge in workflow.edges:
+            if edge.target not in rev_adj:
+                rev_adj[edge.target] = []
+            rev_adj[edge.target].append(edge.source)
+
+        # Step 1: Find all nodes that can reach end_node (reverse BFS)
+        can_reach_end: set[str] = set()
+        queue = [end_node]
+        while queue:
+            node = queue.pop(0)
+            if node in can_reach_end:
+                continue
+            can_reach_end.add(node)
+            for pred in rev_adj.get(node, []):
+                if pred not in can_reach_end:
+                    queue.append(pred)
+
+        # Step 2: Forward BFS from start_node, only including nodes that can reach end
+        visited: set[str] = set()
         queue = [start_node]
-        loop_nodes = []
+        loop_nodes: list[str] = []
 
         while queue:
             node = queue.pop(0)
@@ -796,14 +822,16 @@ class GraphOrchestrator:
             visited.add(node)
 
             if node == end_node:
-                # Don't include the BRANCH node itself, but we found the path
+                # Don't include the BRANCH node itself
                 continue
 
-            loop_nodes.append(node)
+            # Only include if this node can reach end_node
+            if node in can_reach_end:
+                loop_nodes.append(node)
 
-            # Add neighbors to queue
+            # Only explore neighbors that can reach end_node
             for neighbor in adj.get(node, []):
-                if neighbor not in visited:
+                if neighbor not in visited and neighbor in can_reach_end:
                     queue.append(neighbor)
 
         return loop_nodes
@@ -890,10 +918,13 @@ class GraphOrchestrator:
                 value = data[field_part]
                 found = True
 
-        # 3. Un-namespaced convenience match
+        # 3. Un-namespaced convenience match (deterministic via sorted keys)
+        # NOTE: If multiple upstream nodes provide the same field name, the first
+        # alphabetically sorted namespaced key wins. For explicit control, use
+        # fully-qualified field names like "node_id.field".
         if not found and "." not in condition.field:
             suffix = f".{condition.field}"
-            for key in data:
+            for key in sorted(data.keys()):  # Sort for deterministic matching
                 if key.endswith(suffix):
                     value = data[key]
                     found = True
@@ -1083,7 +1114,14 @@ class GraphOrchestrator:
     async def _execute_branch(
         self, execution_id: str, workflow: WorkflowGraph, node: Node, input_data: dict
     ) -> Any:
-        """Execute branch logic with loop control."""
+        """
+        Execute branch logic with loop control.
+
+        Limitation: This implementation assumes at most ONE outgoing edge from a
+        BRANCH node is marked as is_loop_edge=True. If both on_true and on_false
+        paths are loop edges (complex multi-loop structures), the behavior is
+        undefined. For such cases, use separate BRANCH nodes for each loop.
+        """
         config = node.branch_config
 
         # Find loop edge
@@ -1163,10 +1201,24 @@ class GraphOrchestrator:
     async def _execute_parallel(
         self, execution_id: str, workflow: WorkflowGraph, node: Node
     ) -> Any:
-        """Execute parallel node - fan-out to multiple branches."""
-        # PARALLEL nodes just mark their target branches as ready
+        """
+        Execute parallel node - fan-out to multiple branches.
+
+        Design Note: PARALLEL acts as a FORK node that completes immediately,
+        allowing all outgoing edges to be followed concurrently. It does NOT
+        wait for branches to complete - that's the responsibility of a
+        downstream MERGE node.
+
+        The fan-out is determined by outgoing edges in the graph, not the
+        branches list in ParallelNodeConfig (which is reserved for future use).
+
+        Pattern: PARALLEL -> [branch1, branch2, ...] -> MERGE
+        - PARALLEL: Starts branches (completes immediately)
+        - MERGE: Synchronizes branches (waits per merge_config.wait_for)
+        """
+        # PARALLEL nodes complete immediately - downstream MERGE handles sync
         # The actual parallel execution happens in execute_next_batch
-        return {"parallel_started": True}
+        return {"parallel_started": True, "branches": node.parallel_config.branches}
 
     async def _execute_human(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute human approval node."""

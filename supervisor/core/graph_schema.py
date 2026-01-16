@@ -143,10 +143,18 @@ class MergeNodeConfig(BaseModel):
 
 
 class ParallelNodeConfig(BaseModel):
-    """Configuration for PARALLEL nodes - fan-out execution"""
+    """
+    Configuration for PARALLEL nodes - fan-out execution.
 
-    branches: list[str]  # List of node IDs to execute in parallel
-    wait_for: Literal["all", "any", "first"] = "all"
+    Design: PARALLEL acts as a FORK that completes immediately, allowing
+    concurrent execution of downstream branches. Synchronization is handled
+    by a downstream MERGE node, not by PARALLEL itself.
+
+    The actual fan-out is determined by outgoing edges in the graph definition.
+    """
+
+    branches: list[str] = []  # Reserved: explicit branch list (use graph edges for now)
+    wait_for: Literal["all", "any", "first"] = "all"  # Reserved: sync handled by MERGE
 
 
 class SubgraphNodeConfig(BaseModel):
