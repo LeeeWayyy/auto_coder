@@ -275,7 +275,7 @@ class Database:
         input_data JSON,
         output_data JSON,
         error TEXT,
-        version INTEGER DEFAULT 0,  -- For optimistic locking
+        version INTEGER DEFAULT 0,  -- Tracks state changes (incremented on each status update)
         started_at TIMESTAMP,
         completed_at TIMESTAMP,
         UNIQUE(execution_id, node_id),

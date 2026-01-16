@@ -266,17 +266,22 @@ class Node(BaseModel):
     @field_validator("id")
     @classmethod
     def validate_node_id(cls, v):
-        """Ensure node ID is a valid Python identifier.
+        """Ensure node ID is a valid identifier.
+
+        Allows alphanumeric characters, underscores, and hyphens for consistency
+        with field validation rules (TransitionCondition.field). Cannot start or
+        end with a hyphen to prevent ambiguous names.
 
         This validation ensures node IDs are clean, consistent keys that work
-        reliably across the system. While format_map doesn't strictly require
-        identifiers, this constraint:
-        - Ensures compatibility with format(**kwargs) if ever needed
-        - Prevents edge cases with special characters in dict keys
-        - Maintains consistency with dot-notation field references
+        reliably across the system with format_map() for template substitution.
         """
-        if not v.isidentifier():
-            raise ValueError(f"Invalid node ID: '{v}'. Must be a valid Python identifier.")
+        # Pattern allows hyphens but not at start/end, single char IDs must be alphanumeric/_
+        pattern = r"^[a-zA-Z_][a-zA-Z0-9_-]*[a-zA-Z0-9_]$|^[a-zA-Z_][a-zA-Z0-9_]*$"
+        if not re.match(pattern, v):
+            raise ValueError(
+                f"Invalid node ID: '{v}'. Must start with letter/underscore, "
+                f"contain only alphanumeric/underscore/hyphen, and not end with hyphen."
+            )
         return v
 
     label: str | None = None
