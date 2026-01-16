@@ -487,11 +487,11 @@ def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None
     if validate_only:
         return
 
-    # Initialize components
+    # Initialize components with shared database instance
     repo_path = get_repo_path()
     db_path = repo_path / ".supervisor" / "state.db"
     db = Database(db_path)
-    engine = ExecutionEngine(repo_path)
+    engine = ExecutionEngine(repo_path, db=db)
     orchestrator = GraphOrchestrator(db, engine, engine.gate_executor, engine.gate_loader)
 
     # Start and run workflow

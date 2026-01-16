@@ -195,9 +195,12 @@ class Node(BaseModel):
     def validate_node_id(cls, v):
         """Ensure node ID is a valid Python identifier.
 
-        This is required because node IDs are used as format string keywords
-        in task template formatting. IDs with hyphens or special characters
-        would cause formatting errors.
+        This validation ensures node IDs are clean, consistent keys that work
+        reliably across the system. While format_map doesn't strictly require
+        identifiers, this constraint:
+        - Ensures compatibility with format(**kwargs) if ever needed
+        - Prevents edge cases with special characters in dict keys
+        - Maintains consistency with dot-notation field references
         """
         if not v.isidentifier():
             raise ValueError(f"Invalid node ID: '{v}'. Must be a valid Python identifier.")

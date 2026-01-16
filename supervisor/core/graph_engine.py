@@ -1125,22 +1125,32 @@ class GraphOrchestrator:
         """
         Execute a role-based task with pre-apply gate safety.
 
-        Timeout Limitation:
+        Timeout Limitation (Known Issue):
             When a timeout is configured, asyncio.wait_for cancels the coroutine
             but cannot forcefully stop the underlying thread. The blocking run_role
-            call may continue executing in the background. To mitigate this:
-            - The node is immediately marked as FAILED (no result saved)
-            - A clear TimeoutError is raised with node context
-            - The ExecutionEngine should check for task validity before applying changes
+            call may continue executing in the background.
 
-            For strict timeout enforcement, consider running tasks in isolated
-            subprocesses with process-level timeouts.
+            Current mitigations:
+            - The node is immediately marked as FAILED (no result saved to graph state)
+            - A clear TimeoutError is raised with node context
+            - The workflow proceeds without waiting for the orphaned thread
+
+            Potential side effects:
+            - The timed-out task may still write to files in the working tree
+            - This can leave the working tree inconsistent with graph state
+            - Downstream nodes may see partial/unexpected file changes
+
+            Recommended solutions (not yet implemented):
+            - Use subprocess isolation with SIGKILL for strict timeout enforcement
+            - Pass a cancellation token to run_role for cooperative cancellation
+            - Run tasks in isolated worktrees that can be discarded on timeout
         """
         config = node.task_config
 
-        # Format task description using SafeFormatDict for attribute-style access
-        # This enables templates like {node_id.field} by wrapping nested dicts
-        # in attribute-accessible objects.
+        # Format task description using a dictionary that supports dot-notation keys.
+        # The `_collect_inputs` method creates flattened keys like "node_id.field"
+        # which are then used by `format_map`. The `_SafeFormatDict` handles missing
+        # keys gracefully by returning a placeholder instead of raising KeyError.
         format_mapping = _SafeFormatDict(input_data)
         format_mapping["input"] = json.dumps(input_data, indent=2)
         task_description = config.task_template.format_map(format_mapping)
@@ -1148,8 +1158,11 @@ class GraphOrchestrator:
         # Get workflow_id (wrap in to_thread to avoid blocking)
         workflow_id = await asyncio.to_thread(self._get_workflow_id, execution_id)
 
-        # Use worktree_id if specified to allow context sharing, otherwise node.id
-        step_id = config.worktree_id or node.id
+        # Namespace step_id with execution_id to avoid cross-run state corruption.
+        # Without namespacing, rerunning the same workflow would overwrite prior
+        # step data in the database (steps.id is the primary key).
+        base_step_id = config.worktree_id or node.id
+        step_id = f"{execution_id}_{base_step_id}"
 
         async with self.semaphore:
             coro = asyncio.to_thread(
@@ -1284,12 +1297,23 @@ class GraphOrchestrator:
             return [row[0] for row in rows]
 
     def _execute_merge(self, execution_id: str, workflow: WorkflowGraph, node: Node) -> Any:
-        """Execute merge logic - combine inputs from multiple branches."""
+        """
+        Execute merge logic - combine inputs from multiple branches.
+
+        merge_strategy behavior:
+        - "union": Merge all outputs, later values overwrite earlier
+        - "first": First branch to complete with non-empty output wins
+        - "intersection": Only keys present in all outputs are kept
+
+        Note: Empty outputs ({}) are skipped for all strategies. For "first",
+        this means the first branch with actual data wins, not just the first
+        to complete. This prevents empty/failed branches from blocking results.
+        """
         config = node.merge_config
         incoming = [e for e in workflow.edges if e.target == node.id]
 
         # For merge_strategy=first, sort edges by actual completion timestamp
-        # so the first branch to complete chronologically wins
+        # so the first branch to complete (with non-empty output) wins
         if config.merge_strategy == "first":
             source_ids = [e.source for e in incoming]
             completion_order = self._get_completion_order(execution_id, source_ids)
