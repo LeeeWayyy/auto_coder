@@ -274,11 +274,12 @@ class Node(BaseModel):
         with field validation rules (TransitionCondition.field). Cannot start or
         end with a hyphen to prevent ambiguous names.
 
-        This validation ensures node IDs are clean, consistent keys that work
-        reliably across the system with format_map() for template substitution.
+        Note: Hyphenated node IDs cannot be referenced in task templates via
+        format_map() (e.g., {my-node.result} is invalid Python format syntax).
+        Use underscores for nodes that need template references.
         """
-        # Pattern allows hyphens but not at start/end, single char IDs must be alphanumeric/_
-        pattern = r"^[a-zA-Z_][a-zA-Z0-9_-]*[a-zA-Z0-9_]$|^[a-zA-Z_][a-zA-Z0-9_]*$"
+        # Pattern allows hyphens but not at start/end; uses optional non-capturing group
+        pattern = r"^[a-zA-Z_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?$"
         if not re.match(pattern, v):
             raise ValueError(
                 f"Invalid node ID: '{v}'. Must start with letter/underscore, "
