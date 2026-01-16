@@ -465,10 +465,25 @@ def status(workflow_id: str | None) -> None:
 @click.option("--validate-only", is_flag=True, help="Only validate, don't execute")
 def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None:
     """Execute a declarative workflow graph from YAML."""
-    # Load workflow YAML
-    with open(workflow_file) as f:
-        workflow_dict = yaml.safe_load(f)
-        workflow = WorkflowGraph(**workflow_dict)
+    # Load workflow YAML with proper error handling
+    try:
+        with open(workflow_file) as f:
+            workflow_dict = yaml.safe_load(f)
+            if not isinstance(workflow_dict, dict):
+                console.print(
+                    f"[red]Error: Invalid YAML content in '{workflow_file}'. "
+                    f"Expected a dictionary, got {type(workflow_dict).__name__}.[/red]"
+                )
+                sys.exit(1)
+            workflow = WorkflowGraph(**workflow_dict)
+    except yaml.YAMLError as e:
+        console.print(f"[red]Error parsing YAML file '{workflow_file}':[/red]")
+        console.print(f"  {e}")
+        sys.exit(1)
+    except ValueError as e:
+        console.print("[red]Error validating workflow schema:[/red]")
+        console.print(f"  {e}")
+        sys.exit(1)
 
     # Validate
     errors = workflow.validate_graph()

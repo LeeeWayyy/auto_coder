@@ -37,18 +37,47 @@ from supervisor.core.state import Database
 logger = logging.getLogger(__name__)
 
 
-class _AttrDict:
-    """Wrapper to provide attribute-style access to dict values for format strings."""
+class _MissingPlaceholder:
+    """
+    Placeholder object for missing template keys.
 
-    def __init__(self, data: dict):
-        self._data = data
+    Supports attribute access so that dotted templates like {plan.summary}
+    don't raise AttributeError when 'plan' is missing. Instead, returns
+    a nested placeholder that renders as <missing:plan.summary>.
+    """
+
+    def __init__(self, path: str):
+        self._path = path
 
     def __getattr__(self, name: str):
         if name.startswith("_"):
             raise AttributeError(name)
-        value = self._data.get(name, f"<missing:{name}>")
+        return _MissingPlaceholder(f"{self._path}.{name}")
+
+    def __str__(self):
+        return f"<missing:{self._path}>"
+
+    def __repr__(self):
+        return f"<missing:{self._path}>"
+
+
+class _AttrDict:
+    """Wrapper to provide attribute-style access to dict values for format strings."""
+
+    def __init__(self, data: dict, path: str = ""):
+        self._data = data
+        self._path = path
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name not in self._data:
+            nested_path = f"{self._path}.{name}" if self._path else name
+            return _MissingPlaceholder(nested_path)
+        value = self._data[name]
         if isinstance(value, dict):
-            return _AttrDict(value)
+            nested_path = f"{self._path}.{name}" if self._path else name
+            return _AttrDict(value, nested_path)
         return value
 
     def __str__(self):
@@ -60,20 +89,22 @@ class _SafeFormatDict(dict):
     Dict subclass that wraps nested dicts in _AttrDict for attribute-style access.
 
     This enables format strings like {node_id.field} where node_id is a dict output
-    stored by _collect_inputs. Missing keys return a placeholder instead of raising.
+    stored by _collect_inputs. Missing keys return a _MissingPlaceholder instead of
+    raising, allowing dotted access like {plan.summary} to safely render as
+    <missing:plan.summary> when 'plan' is absent.
     """
 
     def __getitem__(self, key: str):
         try:
             value = super().__getitem__(key)
             if isinstance(value, dict):
-                return _AttrDict(value)
+                return _AttrDict(value, key)
             return value
         except KeyError:
-            return f"<missing:{key}>"
+            return _MissingPlaceholder(key)
 
     def __missing__(self, key: str):
-        return f"<missing:{key}>"
+        return _MissingPlaceholder(key)
 
 
 class GraphOrchestrator:
@@ -447,9 +478,19 @@ class GraphOrchestrator:
         workflow = self._get_workflow(execution_id)
 
         # Claim READY nodes atomically (prevents duplicate execution)
-        ready_nodes = await self._claim_ready_nodes(
+        ready_nodes, stale_failed_nodes = await self._claim_ready_nodes(
             execution_id, workflow.config.max_parallel_nodes
         )
+
+        # Honor fail_fast: if stale nodes were marked failed and fail_fast is enabled,
+        # fail the workflow immediately without executing additional nodes
+        if stale_failed_nodes and workflow.config.fail_fast:
+            await self._fail_workflow(
+                execution_id,
+                f"Stale node(s) marked failed: {', '.join(stale_failed_nodes)} "
+                f"(fail_fast enabled)",
+            )
+            return 0
 
         if not ready_nodes:
             # No ready nodes - check if workflow should complete
@@ -466,7 +507,7 @@ class GraphOrchestrator:
 
     async def _claim_ready_nodes(
         self, execution_id: str, limit: int, stale_timeout_seconds: int = 300
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         """
         Atomically claim READY nodes to prevent duplicate execution.
         Uses BEGIN IMMEDIATE for atomic claim within the transaction.
@@ -476,11 +517,16 @@ class GraphOrchestrator:
         marked as FAILED (not requeued) to prevent duplicate execution of
         legitimately long-running tasks. Operators should investigate and
         manually retry if needed.
+
+        Returns:
+            Tuple of (claimed_node_ids, stale_failed_node_ids).
+            Caller should check stale_failed_node_ids with fail_fast config.
         """
 
         def claim_nodes(db, exec_id, max_limit, stale_timeout):
             with db._connect() as conn:
                 claimed = []
+                stale_failed = []
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     # First, mark stale RUNNING nodes as FAILED (crash recovery)
@@ -513,11 +559,12 @@ class GraphOrchestrator:
                                 stale_node_id,
                             ),
                         )
-                    if stale_rows:
+                        stale_failed.append(stale_node_id)
+                    if stale_failed:
                         logger.warning(
-                            f"Marked {len(stale_rows)} stale RUNNING node(s) as FAILED for "
+                            f"Marked {len(stale_failed)} stale RUNNING node(s) as FAILED for "
                             f"execution {exec_id} (exceeded {stale_timeout}s timeout). "
-                            f"Nodes: {[r[0] for r in stale_rows]}"
+                            f"Nodes: {stale_failed}"
                         )
 
                     # Count currently running nodes to enforce global parallelism limit
@@ -531,7 +578,7 @@ class GraphOrchestrator:
                     effective_limit = max(0, max_limit - running_count)
                     if effective_limit == 0:
                         conn.commit()
-                        return claimed
+                        return claimed, stale_failed
 
                     rows = conn.execute(
                         "SELECT node_id FROM node_executions "
@@ -556,7 +603,7 @@ class GraphOrchestrator:
                 except Exception:
                     conn.rollback()
                     raise
-                return claimed
+                return claimed, stale_failed
 
         return await asyncio.to_thread(
             claim_nodes, self.db, execution_id, limit, stale_timeout_seconds
