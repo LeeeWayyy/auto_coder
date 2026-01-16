@@ -60,8 +60,14 @@ class TransitionCondition(BaseModel):
     @field_validator('field')
     @classmethod
     def validate_field(cls, v):
-        """Ensure field names are safe (alphanumeric + underscore + dots)"""
-        if not v.replace('_', '').replace('.', '').isalnum():
+        """Ensure field names are safe dot-separated identifiers.
+
+        Valid: "status", "node_1.result", "a.b.c"
+        Invalid: "..", "a..b", ".foo", "foo.", "a-b"
+        """
+        import re
+        pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$'
+        if not re.match(pattern, v):
             raise ValueError(f"Invalid field name: {v}")
         return v
 
@@ -241,15 +247,29 @@ class WorkflowGraph(BaseModel):
                 errors.append("No exit points found (no terminal nodes)")
 
         # Check for cycles without loop control
-        for cycle in nx.simple_cycles(G):
-            has_loop_control = any(
-                n.type == NodeType.BRANCH and n.branch_config and
-                n.branch_config.condition.max_iterations > 0 and
-                any(e.is_loop_edge for e in self.edges if e.source in cycle)
-                for n in self.nodes if n.id in cycle
-            )
-            if not has_loop_control:
-                errors.append(f"Cycle without loop control: {' -> '.join(cycle)}")
+        try:
+            cycles = list(nx.simple_cycles(G))
+            for cycle in cycles:
+                # A cycle has proper loop control if:
+                # 1. There's a BRANCH node in the cycle
+                # 2. That BRANCH node has max_iterations > 0
+                # 3. The loop edge originates from that BRANCH node and connects back into the cycle
+                has_loop_control = any(
+                    n.type == NodeType.BRANCH
+                    and n.branch_config
+                    and n.branch_config.condition.max_iterations > 0
+                    and any(
+                        e.is_loop_edge and e.target in cycle
+                        for e in self.edges
+                        if e.source == n.id
+                    )
+                    for n in self.nodes
+                    if n.id in cycle
+                )
+                if not has_loop_control:
+                    errors.append(f"Cycle without loop control: {' -> '.join(cycle)}")
+        except nx.NetworkXError as e:
+            errors.append(f"Could not perform cycle detection: {e}")
 
         # Validate MERGE nodes have multiple incoming edges
         for node in self.nodes:
@@ -378,7 +398,7 @@ class GraphOrchestrator:
                 result = func(conn, *args)
                 conn.commit()
                 return result
-            except:
+            except Exception:
                 conn.rollback()
                 raise
 
@@ -577,7 +597,7 @@ class GraphOrchestrator:
                             claimed.append(node_id)
 
                     conn.commit()
-                except:
+                except Exception:
                     conn.rollback()
                     raise
                 return claimed
