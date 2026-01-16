@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+import pydantic
 import yaml
 from rich.console import Console
 from rich.panel import Panel
@@ -480,8 +481,14 @@ def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None
         console.print(f"[red]Error parsing YAML file '{workflow_file}':[/red]")
         console.print(f"  {e}")
         sys.exit(1)
-    except ValueError as e:
+    except pydantic.ValidationError as e:
         console.print("[red]Error validating workflow schema:[/red]")
+        for err in e.errors():
+            loc = ".".join(str(x) for x in err["loc"])
+            console.print(f"  - {loc}: {err['msg']}")
+        sys.exit(1)
+    except (ValueError, TypeError) as e:
+        console.print("[red]Error validating workflow:[/red]")
         console.print(f"  {e}")
         sys.exit(1)
 

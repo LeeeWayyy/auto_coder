@@ -478,12 +478,15 @@ class GraphOrchestrator:
         workflow = self._get_workflow(execution_id)
 
         # Claim READY nodes atomically (prevents duplicate execution)
+        # Pass fail_fast to prevent claiming new nodes when stale failures are detected
         ready_nodes, stale_failed_nodes = await self._claim_ready_nodes(
-            execution_id, workflow.config.max_parallel_nodes
+            execution_id,
+            workflow.config.max_parallel_nodes,
+            fail_fast=workflow.config.fail_fast,
         )
 
         # Honor fail_fast: if stale nodes were marked failed and fail_fast is enabled,
-        # fail the workflow immediately without executing additional nodes
+        # fail the workflow immediately (no new nodes were claimed in this case)
         if stale_failed_nodes and workflow.config.fail_fast:
             await self._fail_workflow(
                 execution_id,
@@ -506,7 +509,11 @@ class GraphOrchestrator:
         return sum(1 for r in results if not isinstance(r, Exception))
 
     async def _claim_ready_nodes(
-        self, execution_id: str, limit: int, stale_timeout_seconds: int = 300
+        self,
+        execution_id: str,
+        limit: int,
+        stale_timeout_seconds: int = 300,
+        fail_fast: bool = False,
     ) -> tuple[list[str], list[str]]:
         """
         Atomically claim READY nodes to prevent duplicate execution.
@@ -518,12 +525,19 @@ class GraphOrchestrator:
         legitimately long-running tasks. Operators should investigate and
         manually retry if needed.
 
+        Args:
+            execution_id: The execution to claim nodes for
+            limit: Maximum number of nodes to claim
+            stale_timeout_seconds: Timeout for marking RUNNING nodes as stale
+            fail_fast: If True and stale nodes are detected, skip claiming
+                new nodes to avoid orphaned RUNNING nodes when workflow fails
+
         Returns:
             Tuple of (claimed_node_ids, stale_failed_node_ids).
             Caller should check stale_failed_node_ids with fail_fast config.
         """
 
-        def claim_nodes(db, exec_id, max_limit, stale_timeout):
+        def claim_nodes(db, exec_id, max_limit, stale_timeout, should_fail_fast):
             with db._connect() as conn:
                 claimed = []
                 stale_failed = []
@@ -566,6 +580,11 @@ class GraphOrchestrator:
                             f"execution {exec_id} (exceeded {stale_timeout}s timeout). "
                             f"Nodes: {stale_failed}"
                         )
+                        # If fail_fast is enabled, don't claim new nodes - this prevents
+                        # orphaned RUNNING nodes that would never be executed
+                        if should_fail_fast:
+                            conn.commit()
+                            return [], stale_failed
 
                     # Count currently running nodes to enforce global parallelism limit
                     running_count = conn.execute(
@@ -606,7 +625,7 @@ class GraphOrchestrator:
                 return claimed, stale_failed
 
         return await asyncio.to_thread(
-            claim_nodes, self.db, execution_id, limit, stale_timeout_seconds
+            claim_nodes, self.db, execution_id, limit, stale_timeout_seconds, fail_fast
         )
 
     async def _check_workflow_state(self, execution_id: str, workflow: WorkflowGraph):
