@@ -321,11 +321,12 @@ class WorkflowGraph(BaseModel):
         # Build NetworkX graph for advanced validation
         G = self._to_networkx()
 
-        # Auto-detect exit points if not specified (compute but don't mutate self)
-        exit_points = self.exit_points
-        if not exit_points:
-            exit_points = [n for n in node_ids if G.out_degree(n) == 0]
-            if not exit_points:
+        # Auto-detect exit points if not specified
+        # Note: This mutates self.exit_points as a normalization step.
+        # The engine relies on workflow.exit_points being populated.
+        if not self.exit_points:
+            self.exit_points = [n for n in node_ids if G.out_degree(n) == 0]
+            if not self.exit_points:
                 errors.append("No exit points found (no terminal nodes)")
 
         # Check for cycles without loop control
