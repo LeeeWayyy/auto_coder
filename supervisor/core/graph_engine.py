@@ -208,6 +208,18 @@ class GraphOrchestrator:
             ).fetchone()
             return json.loads(row[0]) if row and row[0] else None
 
+    def _get_all_outputs(self, execution_id: str) -> dict[str, Any]:
+        """Batch fetch all node outputs for an execution (avoids N+1 queries)."""
+        with self.db._connect() as conn:
+            rows = conn.execute(
+                "SELECT node_id, output_data FROM node_executions WHERE execution_id=?",
+                (execution_id,),
+            ).fetchall()
+            return {
+                row[0]: json.loads(row[1]) if row[1] else None
+                for row in rows
+            }
+
     def _get_node_status_single(self, execution_id: str, node_id: str) -> str:
         """Get status of a single node."""
         with self.db._connect() as conn:
@@ -812,6 +824,21 @@ class GraphOrchestrator:
                             expected_status=NodeStatus(loop_status),
                         )
                         self._clear_node_output(conn, execution_id, loop_node_id)
+
+                # CRITICAL: Also reset the BRANCH node itself so it can be re-evaluated
+                # on subsequent iterations. Without this, the BRANCH stays COMPLETED
+                # and loops only execute once.
+                branch_status = self._get_node_status_in_txn(conn, execution_id, completed_id)
+                if branch_status == NodeStatus.COMPLETED.value:
+                    self._set_node_status_guarded(
+                        conn,
+                        execution_id,
+                        completed_id,
+                        NodeStatus.PENDING,
+                        expected_status=NodeStatus.COMPLETED,
+                    )
+                    self._clear_node_output(conn, execution_id, completed_id)
+
                 # Mark only the loop entry node as READY to start the iteration
                 entry_status = self._get_node_status_in_txn(conn, execution_id, edge.target)
                 if entry_status == NodeStatus.PENDING.value:
@@ -998,6 +1025,11 @@ class GraphOrchestrator:
                     f"{sorted(matching_keys)}. Use a fully-qualified field name like 'source_node.field'."
                 )
             if len(matching_keys) == 1:
+                # Warn about implicit suffix matching - could break if upstream changes
+                logger.warning(
+                    f"Condition field '{condition.field}' matched via suffix to "
+                    f"'{matching_keys[0]}'. Consider using fully-qualified name for stability."
+                )
                 value = data[matching_keys[0]]
                 found = True
 
@@ -1061,15 +1093,8 @@ class GraphOrchestrator:
         """
         statuses = await asyncio.to_thread(self._get_all_statuses, execution_id)
 
-        # Pre-fetch all outputs for completed nodes to avoid N+1 queries
-        completed_nodes = [
-            nid for nid, status in statuses.items() if status == NodeStatus.COMPLETED.value
-        ]
-        outputs_cache: dict[str, Any] = {}
-        for node_id in completed_nodes:
-            outputs_cache[node_id] = await asyncio.to_thread(
-                self._get_node_output, execution_id, node_id
-            )
+        # Batch fetch all outputs in a single query (avoids N+1)
+        outputs_cache = await asyncio.to_thread(self._get_all_outputs, execution_id)
 
         changed = True
         while changed:
@@ -1164,11 +1189,14 @@ class GraphOrchestrator:
         # Get workflow_id (wrap in to_thread to avoid blocking)
         workflow_id = await asyncio.to_thread(self._get_workflow_id, execution_id)
 
-        # Namespace step_id with execution_id to avoid cross-run state corruption.
-        # Without namespacing, rerunning the same workflow would overwrite prior
-        # step data in the database (steps.id is the primary key).
+        # Namespace step_id with execution_id AND a unique suffix to avoid:
+        # 1. Cross-run state corruption (rerunning same workflow)
+        # 2. Zombie task collision (timed-out task vs. re-execution in loop)
+        # The UUID ensures each task execution has isolated workspace even if
+        # the same node is re-executed while a timed-out thread is still running.
         base_step_id = config.worktree_id or node.id
-        step_id = f"{execution_id}_{base_step_id}"
+        unique_suffix = str(uuid.uuid4())[:8]
+        step_id = f"{execution_id}_{base_step_id}_{unique_suffix}"
 
         async with self.semaphore:
             coro = asyncio.to_thread(

@@ -119,7 +119,7 @@ class TaskNodeConfig(BaseModel):
     role: str  # Role name (planner, implementer, reviewer, debugger, etc.)
     task_template: str = "{input}"  # Template for task description formatting
     timeout: int | None = None  # Execution timeout in seconds
-    gates: list[str] = []  # Gates to run after task (pre-apply safety)
+    gates: list[str] = Field(default_factory=list)  # Gates to run after task (pre-apply safety)
     worktree_id: str | None = None  # Optional worktree for isolation
 
 
@@ -165,7 +165,7 @@ class ParallelNodeConfig(BaseModel):
     The actual fan-out is determined by outgoing edges in the graph definition.
     """
 
-    branches: list[str] = []  # Reserved: explicit branch list (use graph edges for now)
+    branches: list[str] = Field(default_factory=list)  # Reserved: explicit branch list
     wait_for: Literal["all", "any", "first"] = "all"  # Reserved: sync handled by MERGE
 
 
@@ -173,8 +173,8 @@ class SubgraphNodeConfig(BaseModel):
     """Configuration for SUBGRAPH nodes - nested workflows"""
 
     workflow_name: str  # Name of nested workflow to execute
-    input_mapping: dict[str, str] = {}  # Map parent inputs to child inputs
-    output_mapping: dict[str, str] = {}  # Map child outputs to parent outputs
+    input_mapping: dict[str, str] = Field(default_factory=dict)  # Map parent inputs to child
+    output_mapping: dict[str, str] = Field(default_factory=dict)  # Map child outputs to parent
 
 
 class HumanNodeConfig(BaseModel):
@@ -267,7 +267,7 @@ class WorkflowGraph(BaseModel):
     edges: list[Edge]
 
     entry_point: str  # Starting node ID
-    exit_points: list[str] = []  # Terminal node IDs (auto-detected if empty)
+    exit_points: list[str] = Field(default_factory=list)  # Terminal node IDs (auto-detected)
 
     # Global configuration
     config: dict = Field(
@@ -321,34 +321,92 @@ class WorkflowGraph(BaseModel):
         # Build NetworkX graph for advanced validation
         G = self._to_networkx()
 
-        # Auto-detect exit points if not specified
-        if not self.exit_points:
-            self.exit_points = [n for n in node_ids if G.out_degree(n) == 0]
-            if not self.exit_points:
+        # Auto-detect exit points if not specified (compute but don't mutate self)
+        exit_points = self.exit_points
+        if not exit_points:
+            exit_points = [n for n in node_ids if G.out_degree(n) == 0]
+            if not exit_points:
                 errors.append("No exit points found (no terminal nodes)")
 
         # Check for cycles without loop control
+        # Limit cycle enumeration to prevent DoS on complex graphs
+        MAX_CYCLES_TO_CHECK = 100
+        MAX_NODES_FOR_FULL_CYCLE_CHECK = 50
         try:
-            cycles = list(nx.simple_cycles(G))
-            for cycle in cycles:
-                # A cycle has proper loop control if:
-                # 1. There's a BRANCH node in the cycle
-                # 2. That BRANCH node has max_iterations > 0
-                # 3. The loop edge originates from that BRANCH node and connects back into the cycle
-                has_loop_control = any(
-                    n.type == NodeType.BRANCH
-                    and n.branch_config
-                    and n.branch_config.condition.max_iterations > 0
-                    and any(
-                        e.is_loop_edge and e.target in cycle for e in self.edges if e.source == n.id
+            if len(self.nodes) > MAX_NODES_FOR_FULL_CYCLE_CHECK:
+                # For large graphs, just check if any cycle exists
+                try:
+                    cycle = nx.find_cycle(G)
+                    # Found a cycle - check if ANY branch node has loop control
+                    has_any_loop_control = any(
+                        n.type == NodeType.BRANCH
+                        and n.branch_config
+                        and n.branch_config.condition.max_iterations > 0
+                        and any(e.is_loop_edge for e in self.edges if e.source == n.id)
+                        for n in self.nodes
                     )
-                    for n in self.nodes
-                    if n.id in cycle
-                )
-                if not has_loop_control:
-                    errors.append(f"Cycle without loop control: {' -> '.join(cycle)}")
+                    if not has_any_loop_control:
+                        cycle_path = " -> ".join(edge[0] for edge in cycle)
+                        errors.append(
+                            f"Cycle detected without loop control: {cycle_path}... "
+                            f"(graph too large for full cycle analysis)"
+                        )
+                except nx.NetworkXNoCycle:
+                    pass  # No cycles - OK
+            else:
+                # For small graphs, enumerate all cycles
+                for cycle_count, cycle in enumerate(nx.simple_cycles(G), start=1):
+                    if cycle_count > MAX_CYCLES_TO_CHECK:
+                        errors.append(
+                            f"Too many cycles to validate (>{MAX_CYCLES_TO_CHECK}). "
+                            f"Simplify graph structure."
+                        )
+                        break
+                    # A cycle has proper loop control if:
+                    # 1. There's a BRANCH node in the cycle
+                    # 2. That BRANCH node has max_iterations > 0
+                    # 3. The loop edge originates from that BRANCH node
+                    has_loop_control = any(
+                        n.type == NodeType.BRANCH
+                        and n.branch_config
+                        and n.branch_config.condition.max_iterations > 0
+                        and any(
+                            e.is_loop_edge and e.target in cycle
+                            for e in self.edges
+                            if e.source == n.id
+                        )
+                        for n in self.nodes
+                        if n.id in cycle
+                    )
+                    if not has_loop_control:
+                        errors.append(f"Cycle without loop control: {' -> '.join(cycle)}")
         except nx.NetworkXError as e:
             errors.append(f"Could not perform cycle detection: {e}")
+
+        # Validate BRANCH node targets exist and have edges
+        for node in self.nodes:
+            if node.type == NodeType.BRANCH and node.branch_config:
+                config = node.branch_config
+                # Check on_true target exists
+                if config.on_true not in node_ids:
+                    errors.append(
+                        f"BRANCH node '{node.id}': on_true target '{config.on_true}' not found"
+                    )
+                # Check on_false target exists
+                if config.on_false not in node_ids:
+                    errors.append(
+                        f"BRANCH node '{node.id}': on_false target '{config.on_false}' not found"
+                    )
+                # Check edges exist to targets
+                outgoing_targets = {e.target for e in self.edges if e.source == node.id}
+                if config.on_true not in outgoing_targets:
+                    errors.append(
+                        f"BRANCH node '{node.id}': missing edge to on_true target '{config.on_true}'"
+                    )
+                if config.on_false not in outgoing_targets:
+                    errors.append(
+                        f"BRANCH node '{node.id}': missing edge to on_false target '{config.on_false}'"
+                    )
 
         # Validate MERGE nodes have multiple incoming edges
         for node in self.nodes:
