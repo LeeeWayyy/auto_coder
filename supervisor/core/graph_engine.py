@@ -573,11 +573,15 @@ class GraphOrchestrator:
 
         try:
             # Execute based on node type
-            # MERGE and PARALLEL handle their own input collection, skip _collect_inputs for them
+            # MERGE handles its own input collection, skip _collect_inputs for it
             if node.type == NodeType.MERGE:
                 output = await asyncio.to_thread(self._execute_merge, execution_id, workflow, node)
             elif node.type == NodeType.PARALLEL:
-                output = await self._execute_parallel(execution_id, workflow, node)
+                # PARALLEL needs to collect and forward upstream inputs to branches
+                input_data = await asyncio.to_thread(
+                    self._collect_inputs, execution_id, workflow, node
+                )
+                output = await self._execute_parallel(execution_id, workflow, node, input_data)
             else:
                 # Collect inputs from completed upstream nodes for other node types
                 input_data = await asyncio.to_thread(
@@ -726,9 +730,28 @@ class GraphOrchestrator:
             # Full output under node ID enables {node_id} template references
             if isinstance(output, dict):
                 for k, v in output.items():
-                    merged[f"{edge.source}.{k}"] = v  # Namespaced keys
+                    namespaced_key = f"{edge.source}.{k}"
+                    # Check for collision on namespaced key (should be rare but possible
+                    # if same edge processed twice due to race)
+                    if namespaced_key in merged and merged[namespaced_key] != v:
+                        raise ValueError(
+                            f"Input key collision: namespaced key '{namespaced_key}' "
+                            f"has conflicting values. This may indicate duplicate edges."
+                        )
+                    merged[namespaced_key] = v
+                # Check for collision on source node ID key
+                if edge.source in merged and merged[edge.source] != output:
+                    raise ValueError(
+                        f"Input key collision: source '{edge.source}' already has a value. "
+                        f"Use data_mapping on edges to rename conflicting outputs."
+                    )
                 merged[edge.source] = output  # Full dict for {node_id} templates
             else:
+                if edge.source in merged and merged[edge.source] != output:
+                    raise ValueError(
+                        f"Input key collision for source '{edge.source}'. "
+                        f"Multiple edges from same source with different outputs."
+                    )
                 merged[edge.source] = output
 
         return merged
@@ -1443,7 +1466,7 @@ class GraphOrchestrator:
         return merged
 
     async def _execute_parallel(
-        self, execution_id: str, workflow: WorkflowGraph, node: Node
+        self, execution_id: str, workflow: WorkflowGraph, node: Node, input_data: dict
     ) -> Any:
         """
         Execute parallel node - fan-out to multiple branches.
@@ -1459,10 +1482,21 @@ class GraphOrchestrator:
         Pattern: PARALLEL -> [branch1, branch2, ...] -> MERGE
         - PARALLEL: Starts branches (completes immediately)
         - MERGE: Synchronizes branches (waits per merge_config.wait_for)
+
+        Input Forwarding:
+        PARALLEL nodes forward all upstream inputs to downstream branches,
+        allowing branch nodes to access predecessor outputs via templates
+        and conditions. The forwarded inputs are merged with PARALLEL metadata.
         """
         # PARALLEL nodes complete immediately - downstream MERGE handles sync
         # The actual parallel execution happens in execute_next_batch
-        return {"parallel_started": True, "branches": node.parallel_config.branches}
+        # Forward all upstream inputs so downstream branches can access them
+        output = {
+            "parallel_started": True,
+            "branches": node.parallel_config.branches,
+            **input_data,  # Forward all upstream inputs to downstream branches
+        }
+        return output
 
     async def _execute_human(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute human approval node."""

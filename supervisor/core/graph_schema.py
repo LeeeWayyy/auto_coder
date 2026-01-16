@@ -84,14 +84,22 @@ class TransitionCondition(BaseModel):
     @model_validator(mode="after")
     def check_value_type_for_operator(self) -> "TransitionCondition":
         """Ensure value type is compatible with the operator."""
-        list_operators = {"in", "not_in"}
-        is_list_op = self.operator in list_operators
+        list_required_operators = {"in", "not_in"}
+        list_allowed_operators = {"==", "!="}  # Allow list equality checks
+
         is_list_val = isinstance(self.value, list)
 
-        if is_list_op and not is_list_val:
+        if self.operator in list_required_operators and not is_list_val:
             raise ValueError(f"Operator '{self.operator}' requires value to be a list.")
-        if not is_list_op and is_list_val:
-            raise ValueError(f"Operator '{self.operator}' does not support list values.")
+
+        if (
+            is_list_val
+            and self.operator not in list_required_operators
+            and self.operator not in list_allowed_operators
+        ):
+            raise ValueError(
+                f"Operator '{self.operator}' does not support list values for the condition value."
+            )
         return self
 
 
@@ -129,14 +137,22 @@ class LoopCondition(BaseModel):
 
         Same validation as TransitionCondition for consistency.
         """
-        list_operators = {"in", "not_in"}
-        is_list_op = self.operator in list_operators
+        list_required_operators = {"in", "not_in"}
+        list_allowed_operators = {"==", "!="}  # Allow list equality checks
+
         is_list_val = isinstance(self.value, list)
 
-        if is_list_op and not is_list_val:
+        if self.operator in list_required_operators and not is_list_val:
             raise ValueError(f"Operator '{self.operator}' requires value to be a list.")
-        if not is_list_op and is_list_val:
-            raise ValueError(f"Operator '{self.operator}' does not support list values.")
+
+        if (
+            is_list_val
+            and self.operator not in list_required_operators
+            and self.operator not in list_allowed_operators
+        ):
+            raise ValueError(
+                f"Operator '{self.operator}' does not support list values for the condition value."
+            )
         return self
 
 
@@ -393,15 +409,24 @@ class WorkflowGraph(BaseModel):
                 # For large graphs, just check if any cycle exists
                 try:
                     cycle = nx.find_cycle(G)
-                    # Found a cycle - check if ANY branch node has loop control
-                    has_any_loop_control = any(
+                    # Extract node IDs from the detected cycle edges
+                    cycle_nodes = {edge[0] for edge in cycle} | {edge[1] for edge in cycle}
+
+                    # Check if any BRANCH node IN THE DETECTED CYCLE has loop control
+                    # This is more precise than checking any BRANCH in the entire graph
+                    has_loop_control_in_cycle = any(
                         n.type == NodeType.BRANCH
                         and n.branch_config
                         and n.branch_config.condition.max_iterations > 0
-                        and any(e.is_loop_edge for e in self.edges if e.source == n.id)
+                        and any(
+                            e.is_loop_edge and e.target in cycle_nodes
+                            for e in self.edges
+                            if e.source == n.id
+                        )
                         for n in self.nodes
+                        if n.id in cycle_nodes  # Only check BRANCH nodes in the cycle
                     )
-                    if not has_any_loop_control:
+                    if not has_loop_control_in_cycle:
                         cycle_path = " -> ".join(edge[0] for edge in cycle)
                         errors.append(
                             f"Cycle detected without loop control: {cycle_path}... "
