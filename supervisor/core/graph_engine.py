@@ -490,8 +490,7 @@ class GraphOrchestrator:
         if stale_failed_nodes and workflow.config.fail_fast:
             await self._fail_workflow(
                 execution_id,
-                f"Stale node(s) marked failed: {', '.join(stale_failed_nodes)} "
-                f"(fail_fast enabled)",
+                f"Stale node(s) marked failed: {', '.join(stale_failed_nodes)} (fail_fast enabled)",
             )
             return 0
 
