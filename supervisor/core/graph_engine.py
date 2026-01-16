@@ -450,7 +450,7 @@ class GraphOrchestrator:
     async def _claim_ready_nodes(self, execution_id: str, limit: int) -> list[str]:
         """
         Atomically claim READY nodes to prevent duplicate execution.
-        Uses optimistic locking via version field.
+        Uses BEGIN IMMEDIATE for atomic claim within the transaction.
         """
 
         def claim_nodes(db, exec_id, max_limit):
@@ -1122,7 +1122,20 @@ class GraphOrchestrator:
     # ========== Node Type Implementations ==========
 
     async def _execute_task(self, execution_id: str, node: Node, input_data: dict) -> Any:
-        """Execute a role-based task with pre-apply gate safety."""
+        """
+        Execute a role-based task with pre-apply gate safety.
+
+        Timeout Limitation:
+            When a timeout is configured, asyncio.wait_for cancels the coroutine
+            but cannot forcefully stop the underlying thread. The blocking run_role
+            call may continue executing in the background. To mitigate this:
+            - The node is immediately marked as FAILED (no result saved)
+            - A clear TimeoutError is raised with node context
+            - The ExecutionEngine should check for task validity before applying changes
+
+            For strict timeout enforcement, consider running tasks in isolated
+            subprocesses with process-level timeouts.
+        """
         config = node.task_config
 
         # Format task description using SafeFormatDict for attribute-style access
@@ -1154,7 +1167,15 @@ class GraphOrchestrator:
             )
 
             if config.timeout:
-                result = await asyncio.wait_for(coro, timeout=config.timeout)
+                try:
+                    result = await asyncio.wait_for(coro, timeout=config.timeout)
+                except TimeoutError:
+                    # Re-raise with context - the thread may still be running
+                    # but no result will be saved (node marked FAILED by caller)
+                    raise TimeoutError(
+                        f"Task '{node.id}' timed out after {config.timeout}s. "
+                        f"Note: The underlying thread may still be running."
+                    )
             else:
                 result = await coro
 
@@ -1241,10 +1262,41 @@ class GraphOrchestrator:
             "iterations": iteration,
         }
 
+    def _get_completion_order(self, execution_id: str, node_ids: list[str]) -> list[str]:
+        """
+        Get node IDs sorted by their completion timestamp.
+
+        Returns nodes in the order they actually completed, which is essential
+        for merge_strategy=first to honor the chronological completion order
+        rather than the edge definition order.
+        """
+        with self.db._connect() as conn:
+            placeholders = ",".join("?" * len(node_ids))
+            rows = conn.execute(
+                f"""
+                SELECT node_id, completed_at FROM node_executions
+                WHERE execution_id=? AND node_id IN ({placeholders})
+                AND completed_at IS NOT NULL
+                ORDER BY completed_at ASC
+                """,
+                (execution_id, *node_ids),
+            ).fetchall()
+            return [row[0] for row in rows]
+
     def _execute_merge(self, execution_id: str, workflow: WorkflowGraph, node: Node) -> Any:
         """Execute merge logic - combine inputs from multiple branches."""
         config = node.merge_config
         incoming = [e for e in workflow.edges if e.target == node.id]
+
+        # For merge_strategy=first, sort edges by actual completion timestamp
+        # so the first branch to complete chronologically wins
+        if config.merge_strategy == "first":
+            source_ids = [e.source for e in incoming]
+            completion_order = self._get_completion_order(execution_id, source_ids)
+            # Create a map for sorting
+            order_map = {nid: idx for idx, nid in enumerate(completion_order)}
+            # Sort edges by completion order (edges with no completion go last)
+            incoming = sorted(incoming, key=lambda e: order_map.get(e.source, float("inf")))
 
         merged = {}
         for edge in incoming:

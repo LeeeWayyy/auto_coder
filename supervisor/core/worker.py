@@ -39,12 +39,10 @@ class WorkflowWorker:
 
             executed = await self.orchestrator.execute_next_batch(execution_id)
 
-            # If nothing was executed and not terminal, propagate skips
+            # Only sleep when no work was done (waiting for external events or
+            # async completions). When work is done, immediately check for more.
             if executed == 0:
                 await asyncio.sleep(self.poll_interval)
-            else:
-                # Small delay to avoid busy-waiting
-                await asyncio.sleep(0.1)
 
     async def start_daemon(self):
         """

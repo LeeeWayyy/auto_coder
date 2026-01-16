@@ -10,6 +10,7 @@ Security-first design:
 - Comprehensive validation before execution
 """
 
+import re
 from enum import Enum
 from typing import Literal
 
@@ -68,8 +69,6 @@ class TransitionCondition(BaseModel):
         Valid: "status", "node_1.result", "a.b.c"
         Invalid: "..", "a..b", ".foo", "foo.", "a-b"
         """
-        import re
-
         # Pattern: identifier (letter/underscore + alphanumeric/underscore) optionally
         # followed by .identifier sequences
         pattern = r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$"
