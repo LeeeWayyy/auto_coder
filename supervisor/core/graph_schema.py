@@ -123,6 +123,22 @@ class LoopCondition(BaseModel):
                 raise ValueError(f"Invalid field name: {v} (segment cannot end with hyphen)")
         return v
 
+    @model_validator(mode="after")
+    def check_value_type_for_operator(self) -> "LoopCondition":
+        """Ensure value type is compatible with the operator.
+
+        Same validation as TransitionCondition for consistency.
+        """
+        list_operators = {"in", "not_in"}
+        is_list_op = self.operator in list_operators
+        is_list_val = isinstance(self.value, list)
+
+        if is_list_op and not is_list_val:
+            raise ValueError(f"Operator '{self.operator}' requires value to be a list.")
+        if not is_list_op and is_list_val:
+            raise ValueError(f"Operator '{self.operator}' does not support list values.")
+        return self
+
 
 class Edge(BaseModel):
     """Directed edge between nodes with optional conditions and data mapping"""

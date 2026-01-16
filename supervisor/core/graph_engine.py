@@ -1176,13 +1176,20 @@ class GraphOrchestrator:
                 if should_skip:
 
                     def mark_skipped(conn, exec_id, n_id):
-                        self._set_node_status(conn, exec_id, n_id, NodeStatus.SKIPPED)
+                        # Use guarded update to prevent race condition where node was
+                        # claimed as READY/RUNNING by another worker between our snapshot
+                        # and this update. Only transition PENDING -> SKIPPED.
+                        return self._set_node_status_guarded(
+                            conn, exec_id, n_id, NodeStatus.SKIPPED, expected_status=NodeStatus.PENDING
+                        )
 
-                    await asyncio.to_thread(
+                    updated = await asyncio.to_thread(
                         self._run_in_transaction, mark_skipped, execution_id, node.id
                     )
-                    statuses[node.id] = NodeStatus.SKIPPED.value
-                    changed = True
+                    if updated:
+                        statuses[node.id] = NodeStatus.SKIPPED.value
+                        changed = True
+                    # If not updated, node was already claimed - will be handled on next pass
 
     # ========== Node Type Implementations ==========
 
