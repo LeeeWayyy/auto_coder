@@ -126,23 +126,24 @@ class GraphOrchestrator:
                 conn.rollback()
                 raise
 
-    def _save_workflow(self, conn, workflow: WorkflowGraph):
-        """Save workflow definition to database.
+    def _save_workflow(self, conn, workflow: WorkflowGraph, snapshot_id: str):
+        """Save workflow definition to database as an immutable snapshot.
 
-        Uses ON CONFLICT DO UPDATE instead of REPLACE to preserve FK references
-        from graph_executions that reference this workflow.
+        Each execution gets its own snapshot of the workflow definition to prevent
+        hot-patching issues where updating a workflow affects running executions.
+        The snapshot_id should be unique per execution (e.g., execution_id).
+
+        This ensures:
+        - Running executions are not affected by subsequent workflow updates
+        - Each execution has a consistent view of its workflow definition
+        - No FK reference issues since each execution references its own snapshot
         """
         conn.execute(
             """
             INSERT INTO graph_workflows (id, name, definition, version, updated_at)
             VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                definition = excluded.definition,
-                version = excluded.version,
-                updated_at = CURRENT_TIMESTAMP
         """,
-            (workflow.id, workflow.name, workflow.model_dump_json(), workflow.version),
+            (snapshot_id, workflow.name, workflow.model_dump_json(), workflow.version),
         )
 
     def _create_execution(self, conn, execution_id: str, workflow_id: str, graph_id: str):
@@ -395,9 +396,14 @@ class GraphOrchestrator:
         execution_id = str(uuid.uuid4())
 
         # Persist workflow and initialize node states atomically
+        # Use execution_id as snapshot_id to ensure each execution has its own
+        # immutable workflow snapshot, preventing hot-patching issues
         def init_workflow(conn, exec_id, wf_id, wf, inputs):
-            self._save_workflow(conn, wf)
-            self._create_execution(conn, exec_id, wf_id, wf.id)
+            # Create a unique snapshot of the workflow for this execution
+            # This prevents updates to workflow definitions from affecting running executions
+            snapshot_id = f"snapshot_{exec_id}"
+            self._save_workflow(conn, wf, snapshot_id)
+            self._create_execution(conn, exec_id, wf_id, snapshot_id)
             for node in wf.nodes:
                 self._set_node_status(conn, exec_id, node.id, NodeStatus.PENDING, node.type.value)
             self._set_node_status(conn, exec_id, wf.entry_point, NodeStatus.READY)
@@ -458,17 +464,41 @@ class GraphOrchestrator:
 
         return sum(1 for r in results if not isinstance(r, Exception))
 
-    async def _claim_ready_nodes(self, execution_id: str, limit: int) -> list[str]:
+    async def _claim_ready_nodes(
+        self, execution_id: str, limit: int, stale_timeout_seconds: int = 300
+    ) -> list[str]:
         """
         Atomically claim READY nodes to prevent duplicate execution.
         Uses BEGIN IMMEDIATE for atomic claim within the transaction.
+
+        Also requeues stale RUNNING nodes (crashed workers) before claiming.
+        Nodes that have been RUNNING longer than stale_timeout_seconds are
+        reset to READY so they can be re-executed.
         """
 
-        def claim_nodes(db, exec_id, max_limit):
+        def claim_nodes(db, exec_id, max_limit, stale_timeout):
             with db._connect() as conn:
                 claimed = []
                 conn.execute("BEGIN IMMEDIATE")
                 try:
+                    # First, requeue stale RUNNING nodes (crash recovery)
+                    # Nodes that have been RUNNING longer than stale_timeout are reset
+                    stale_requeued = conn.execute(
+                        """
+                        UPDATE node_executions
+                        SET status='ready', version=version+1, started_at=NULL
+                        WHERE execution_id=? AND status='running'
+                        AND started_at IS NOT NULL
+                        AND (julianday('now') - julianday(started_at)) * 86400 > ?
+                        """,
+                        (exec_id, stale_timeout),
+                    ).rowcount
+                    if stale_requeued > 0:
+                        logger.warning(
+                            f"Requeued {stale_requeued} stale RUNNING node(s) for execution "
+                            f"{exec_id} (exceeded {stale_timeout}s timeout)"
+                        )
+
                     # Count currently running nodes to enforce global parallelism limit
                     running_count = conn.execute(
                         "SELECT COUNT(*) FROM node_executions "
@@ -489,9 +519,13 @@ class GraphOrchestrator:
                     ).fetchall()
 
                     for (node_id,) in rows:
+                        # Record started_at for crash recovery timeout tracking
                         result = conn.execute(
-                            "UPDATE node_executions SET status='running', version=version+1 "
-                            "WHERE execution_id=? AND node_id=? AND status='ready'",
+                            """
+                            UPDATE node_executions
+                            SET status='running', version=version+1, started_at=CURRENT_TIMESTAMP
+                            WHERE execution_id=? AND node_id=? AND status='ready'
+                            """,
                             (exec_id, node_id),
                         )
                         if result.rowcount > 0:
@@ -503,7 +537,9 @@ class GraphOrchestrator:
                     raise
                 return claimed
 
-        return await asyncio.to_thread(claim_nodes, self.db, execution_id, limit)
+        return await asyncio.to_thread(
+            claim_nodes, self.db, execution_id, limit, stale_timeout_seconds
+        )
 
     async def _check_workflow_state(self, execution_id: str, workflow: WorkflowGraph):
         """Check if workflow should complete or mark skipped nodes."""
@@ -1082,15 +1118,10 @@ class GraphOrchestrator:
             except (KeyError, TypeError):
                 pass  # Not found via nested access
 
-        # 2b. Fallback: treat dotted field as "source.field" format and extract just the field part
-        # This handles edge conditions evaluated against raw source output (flat dicts)
-        # e.g., condition field "test.test_status" with data {"test_status": "passed"}
-        if not found and "." in condition.field:
-            # Try the last part of the dotted field as a direct key
-            field_part = condition.field.split(".")[-1]
-            if field_part in data:
-                value = data[field_part]
-                found = True
+        # Note: We intentionally do NOT have a fallback that extracts just the last
+        # part of a dotted field name. Such implicit matching would be ambiguous
+        # and make conditions harder to debug. Users should use explicit,
+        # fully-qualified field names (e.g., "source_node.field").
 
         # 3. Un-namespaced convenience match with ambiguity detection
         # Raises error if multiple upstream nodes provide the same field name

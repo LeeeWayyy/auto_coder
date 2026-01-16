@@ -406,32 +406,18 @@ class WorkflowGraph(BaseModel):
         MAX_NODES_FOR_FULL_CYCLE_CHECK = 50
         try:
             if len(self.nodes) > MAX_NODES_FOR_FULL_CYCLE_CHECK:
-                # For large graphs, just check if any cycle exists
+                # For large graphs, we can only detect if ANY cycle exists, not enumerate all.
+                # nx.find_cycle() returns only one cycle, so we can't guarantee other
+                # uncontrolled cycles don't exist. Warn the user to manually verify.
                 try:
-                    cycle = nx.find_cycle(G)
-                    # Extract node IDs from the detected cycle edges
-                    cycle_nodes = {edge[0] for edge in cycle} | {edge[1] for edge in cycle}
-
-                    # Check if any BRANCH node IN THE DETECTED CYCLE has loop control
-                    # This is more precise than checking any BRANCH in the entire graph
-                    has_loop_control_in_cycle = any(
-                        n.type == NodeType.BRANCH
-                        and n.branch_config
-                        and n.branch_config.condition.max_iterations > 0
-                        and any(
-                            e.is_loop_edge and e.target in cycle_nodes
-                            for e in self.edges
-                            if e.source == n.id
-                        )
-                        for n in self.nodes
-                        if n.id in cycle_nodes  # Only check BRANCH nodes in the cycle
+                    nx.find_cycle(G)
+                    # A cycle exists - warn user since we can't validate all cycles
+                    errors.append(
+                        f"Cycle detected in large graph (>{MAX_NODES_FOR_FULL_CYCLE_CHECK} nodes). "
+                        f"Full cycle validation is skipped for performance. "
+                        f"Please manually verify all cycles have proper loop control "
+                        f"(BRANCH node with max_iterations and is_loop_edge=True on the loop edge)."
                     )
-                    if not has_loop_control_in_cycle:
-                        cycle_path = " -> ".join(edge[0] for edge in cycle)
-                        errors.append(
-                            f"Cycle detected without loop control: {cycle_path}... "
-                            f"(graph too large for full cycle analysis)"
-                        )
                 except nx.NetworkXNoCycle:
                     pass  # No cycles - OK
             else:
