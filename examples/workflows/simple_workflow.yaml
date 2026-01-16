@@ -1,0 +1,38 @@
+id: simple-workflow
+name: Simple Task Workflow
+version: 1.0.0
+entry_point: plan
+exit_points: [done]
+
+description: A simple linear workflow for testing basic graph execution
+
+nodes:
+  - id: plan
+    type: task
+    label: Plan the Task
+    task_config:
+      role: planner
+      task_template: "Create a plan for: {input}"
+
+  - id: implement
+    type: task
+    label: Implement the Plan
+    task_config:
+      role: implementer
+      task_template: "Implement based on plan: {input}"
+      gates: [test_gate]
+
+  - id: done
+    type: task
+    label: Mark Complete
+    task_config:
+      role: reviewer
+      task_template: "Review completed work: {input}"
+
+edges:
+  - { id: e1, source: plan, target: implement }
+  - { id: e2, source: implement, target: done }
+
+config:
+  max_parallel_nodes: 1
+  fail_fast: true

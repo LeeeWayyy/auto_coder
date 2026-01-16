@@ -216,10 +216,7 @@ class GraphOrchestrator:
                 "SELECT node_id, output_data FROM node_executions WHERE execution_id=?",
                 (execution_id,),
             ).fetchall()
-            return {
-                row[0]: json.loads(row[1]) if row[1] else None
-                for row in rows
-            }
+            return {row[0]: json.loads(row[1]) if row[1] else None for row in rows}
 
     def _get_node_status_single(self, execution_id: str, node_id: str) -> str:
         """Get status of a single node."""
@@ -661,7 +658,9 @@ class GraphOrchestrator:
             )
             if not completed:
                 # Node was reset (e.g., by loop restart) - don't count as success
-                logger.info(f"Node {node_id} completion discarded (status changed during execution)")
+                logger.info(
+                    f"Node {node_id} completion discarded (status changed during execution)"
+                )
             return completed
 
         except Exception as e:
@@ -1226,7 +1225,11 @@ class GraphOrchestrator:
                         # claimed as READY/RUNNING by another worker between our snapshot
                         # and this update. Only transition PENDING -> SKIPPED.
                         return self._set_node_status_guarded(
-                            conn, exec_id, n_id, NodeStatus.SKIPPED, expected_status=NodeStatus.PENDING
+                            conn,
+                            exec_id,
+                            n_id,
+                            NodeStatus.SKIPPED,
+                            expected_status=NodeStatus.PENDING,
                         )
 
                     updated = await asyncio.to_thread(
