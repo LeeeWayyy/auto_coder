@@ -558,26 +558,29 @@ class GraphOrchestrator:
         node = next(n for n in workflow.nodes if n.id == node_id)
 
         try:
-            # Collect inputs from completed upstream nodes
-            input_data = await asyncio.to_thread(self._collect_inputs, execution_id, workflow, node)
-
             # Execute based on node type
-            if node.type == NodeType.TASK:
-                output = await self._execute_task(execution_id, node, input_data)
-            elif node.type == NodeType.GATE:
-                output = await self._execute_gate(execution_id, node, input_data)
-            elif node.type == NodeType.BRANCH:
-                output = await self._execute_branch(execution_id, workflow, node, input_data)
-            elif node.type == NodeType.MERGE:
+            # MERGE and PARALLEL handle their own input collection, skip _collect_inputs for them
+            if node.type == NodeType.MERGE:
                 output = await asyncio.to_thread(self._execute_merge, execution_id, workflow, node)
             elif node.type == NodeType.PARALLEL:
                 output = await self._execute_parallel(execution_id, workflow, node)
-            elif node.type == NodeType.HUMAN:
-                output = await self._execute_human(execution_id, node, input_data)
-            elif node.type == NodeType.SUBGRAPH:
-                output = await self._execute_subgraph(execution_id, node, input_data)
             else:
-                raise ValueError(f"Unknown node type: {node.type}")
+                # Collect inputs from completed upstream nodes for other node types
+                input_data = await asyncio.to_thread(
+                    self._collect_inputs, execution_id, workflow, node
+                )
+                if node.type == NodeType.TASK:
+                    output = await self._execute_task(execution_id, node, input_data)
+                elif node.type == NodeType.GATE:
+                    output = await self._execute_gate(execution_id, node, input_data)
+                elif node.type == NodeType.BRANCH:
+                    output = await self._execute_branch(execution_id, workflow, node, input_data)
+                elif node.type == NodeType.HUMAN:
+                    output = await self._execute_human(execution_id, node, input_data)
+                elif node.type == NodeType.SUBGRAPH:
+                    output = await self._execute_subgraph(execution_id, node, input_data)
+                else:
+                    raise ValueError(f"Unknown node type: {node.type}")
 
             # Handle Pydantic models - serialize with model_dump()
             if hasattr(output, "model_dump"):
@@ -799,14 +802,26 @@ class GraphOrchestrator:
                     # SKIPPED nodes may need to run on subsequent iterations if branch
                     # conditions change (e.g., alternating paths in loop body)
                     if loop_status in (NodeStatus.COMPLETED.value, NodeStatus.SKIPPED.value):
+                        # Reset to PENDING (not READY) to preserve dependency ordering
+                        # Only the loop entry node will be marked READY below
                         self._set_node_status_guarded(
                             conn,
                             execution_id,
                             loop_node_id,
-                            NodeStatus.READY,
+                            NodeStatus.PENDING,
                             expected_status=NodeStatus(loop_status),
                         )
                         self._clear_node_output(conn, execution_id, loop_node_id)
+                # Mark only the loop entry node as READY to start the iteration
+                entry_status = self._get_node_status_in_txn(conn, execution_id, edge.target)
+                if entry_status == NodeStatus.PENDING.value:
+                    self._set_node_status_guarded(
+                        conn,
+                        execution_id,
+                        edge.target,
+                        NodeStatus.READY,
+                        expected_status=NodeStatus.PENDING,
+                    )
                 continue
 
             # Skip if already processed
@@ -1149,11 +1164,14 @@ class GraphOrchestrator:
         """Execute a verification gate in isolated worktree."""
         config = node.gate_config
 
+        # Get workflow_id for consistent event/artifact tracking
+        workflow_id = await asyncio.to_thread(self._get_workflow_id, execution_id)
+
         def run_gate_isolated():
             with self.engine.workspace.isolated_execution(f"gate_{execution_id}_{node.id}") as ctx:
                 gate_config = self.gate_loader.get_gate(config.gate_type)
                 result = self.gate_executor.run_gate(
-                    gate_config, ctx.worktree_path, execution_id, node.id
+                    gate_config, ctx.worktree_path, workflow_id, node.id
                 )
                 return result
 
