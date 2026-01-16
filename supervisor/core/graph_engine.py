@@ -739,13 +739,16 @@ class GraphOrchestrator:
                 loop_nodes = self._find_loop_cycle_nodes(workflow, edge.target, completed_id)
                 for loop_node_id in loop_nodes:
                     loop_status = self._get_node_status_in_txn(conn, execution_id, loop_node_id)
-                    if loop_status == NodeStatus.COMPLETED.value:
+                    # Reset both COMPLETED and SKIPPED nodes on loop re-entry
+                    # SKIPPED nodes may need to run on subsequent iterations if branch
+                    # conditions change (e.g., alternating paths in loop body)
+                    if loop_status in (NodeStatus.COMPLETED.value, NodeStatus.SKIPPED.value):
                         self._set_node_status_guarded(
                             conn,
                             execution_id,
                             loop_node_id,
                             NodeStatus.READY,
-                            expected_status=NodeStatus.COMPLETED,
+                            expected_status=NodeStatus(loop_status),
                         )
                         self._clear_node_output(conn, execution_id, loop_node_id)
                 continue
@@ -876,6 +879,16 @@ class GraphOrchestrator:
                 found = True
             except (KeyError, TypeError):
                 pass  # Not found via nested access
+
+        # 2b. Fallback: treat dotted field as "source.field" format and extract just the field part
+        # This handles edge conditions evaluated against raw source output (flat dicts)
+        # e.g., condition field "test.test_status" with data {"test_status": "passed"}
+        if not found and "." in condition.field:
+            # Try the last part of the dotted field as a direct key
+            field_part = condition.field.split(".")[-1]
+            if field_part in data:
+                value = data[field_part]
+                found = True
 
         # 3. Un-namespaced convenience match
         if not found and "." not in condition.field:
@@ -1011,11 +1024,12 @@ class GraphOrchestrator:
         config = node.task_config
 
         # Format task description
-        # Filter out 'input' key to avoid TypeError from duplicate keyword argument
-        format_data = {k: v for k, v in input_data.items() if k != "input"}
-        task_description = config.task_template.format(
-            input=json.dumps(input_data, indent=2), **format_data
-        )
+        # Use format_map to safely handle arbitrary keys from input_data,
+        # including namespaced keys like "node_id.field" which are not valid
+        # Python identifiers for **kwargs expansion.
+        format_mapping = input_data.copy()
+        format_mapping["input"] = json.dumps(input_data, indent=2)
+        task_description = config.task_template.format_map(format_mapping)
 
         # Get workflow_id (wrap in to_thread to avoid blocking)
         workflow_id = await asyncio.to_thread(self._get_workflow_id, execution_id)
