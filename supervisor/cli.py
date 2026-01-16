@@ -12,12 +12,14 @@ Commands:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+import pydantic
 import yaml
 from rich.console import Console
 from rich.panel import Panel
@@ -27,8 +29,11 @@ if TYPE_CHECKING:
     from supervisor.core.approval import ApprovalPolicy
 
 from supervisor.core.engine import ExecutionEngine
+from supervisor.core.graph_engine import GraphOrchestrator
+from supervisor.core.graph_schema import WorkflowGraph
 from supervisor.core.roles import RoleLoader
 from supervisor.core.state import Database
+from supervisor.core.worker import WorkflowWorker
 from supervisor.metrics.aggregator import MetricsAggregator
 from supervisor.metrics.dashboard import MetricsDashboard
 
@@ -453,6 +458,77 @@ def status(workflow_id: str | None) -> None:
             title="Supervisor Status",
         )
     )
+
+
+@main.command()
+@click.argument("workflow_file", type=click.Path(exists=True))
+@click.option("--workflow-id", required=True, help="Unique workflow execution ID")
+@click.option("--validate-only", is_flag=True, help="Only validate, don't execute")
+def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None:
+    """Execute a declarative workflow graph from YAML."""
+    # Load workflow YAML with proper error handling
+    try:
+        with open(workflow_file) as f:
+            workflow_dict = yaml.safe_load(f)
+            if not isinstance(workflow_dict, dict):
+                console.print(
+                    f"[red]Error: Invalid YAML content in '{workflow_file}'. "
+                    f"Expected a dictionary, got {type(workflow_dict).__name__}.[/red]"
+                )
+                sys.exit(1)
+            workflow = WorkflowGraph(**workflow_dict)
+    except yaml.YAMLError as e:
+        console.print(f"[red]Error parsing YAML file '{workflow_file}':[/red]")
+        console.print(f"  {e}")
+        sys.exit(1)
+    except pydantic.ValidationError as e:
+        console.print("[red]Error validating workflow schema:[/red]")
+        for err in e.errors():
+            loc = ".".join(str(x) for x in err["loc"])
+            console.print(f"  - {loc}: {err['msg']}")
+        sys.exit(1)
+    except (ValueError, TypeError) as e:
+        console.print("[red]Error validating workflow:[/red]")
+        console.print(f"  {e}")
+        sys.exit(1)
+
+    # Validate
+    errors = workflow.validate_graph()
+    if errors:
+        console.print("[red]Validation errors:[/red]")
+        for error in errors:
+            console.print(f"  - {error}")
+        sys.exit(1)
+
+    console.print("[green]Workflow validation passed[/green]")
+    console.print(f"  Nodes: {len(workflow.nodes)}")
+    console.print(f"  Edges: {len(workflow.edges)}")
+
+    if validate_only:
+        return
+
+    # Initialize components with shared database instance
+    repo_path = get_repo_path()
+    db_path = repo_path / ".supervisor" / "state.db"
+    db = Database(db_path)
+    engine = ExecutionEngine(repo_path, db=db)
+    orchestrator = GraphOrchestrator(db, engine, engine.gate_executor, engine.gate_loader)
+
+    # Start and run workflow
+    async def run():
+        exec_id = await orchestrator.start_workflow(workflow, workflow_id)
+        console.print(f"[blue]Started execution: {exec_id}[/blue]")
+
+        worker = WorkflowWorker(orchestrator)
+        return await worker.run_until_complete(exec_id)
+
+    status = asyncio.run(run())
+
+    if status == "completed":
+        console.print("[green]Workflow completed successfully[/green]")
+    else:
+        console.print(f"[red]Workflow {status}[/red]")
+        sys.exit(1)
 
 
 @main.command()

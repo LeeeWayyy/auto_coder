@@ -1,0 +1,58 @@
+id: debug-workflow
+name: Debug with Retry Loop
+version: 1.0.0
+entry_point: analyze
+exit_points: [review]
+
+nodes:
+  - id: analyze
+    type: task
+    label: Analyze Bug
+    task_config:
+      role: debugger
+      task_template: "Analyze this issue: {input}"
+
+  - id: fix
+    type: task
+    label: Apply Fix
+    task_config:
+      role: implementer
+      task_template: "Fix based on analysis: {input}"
+
+  - id: test
+    type: gate
+    label: Run Tests
+    gate_config:
+      gate_type: test
+
+  - id: check
+    type: branch
+    label: Check Test Result
+    branch_config:
+      condition:
+        field: test_status
+        operator: "=="
+        value: "passed"
+        max_iterations: 3
+      on_true: review
+      on_false: analyze
+
+  - id: review
+    type: task
+    label: Final Review
+    task_config:
+      role: reviewer
+      task_template: "Review: {input}"
+
+edges:
+  - { id: e1, source: analyze, target: fix }
+  - { id: e2, source: fix, target: test }
+  - { id: e3, source: test, target: check }
+  - { id: e4, source: check, target: review,
+      condition: { field: branch_outcome, operator: "==", value: "on_true" } }
+  - { id: e5, source: check, target: analyze, is_loop_edge: true,
+      condition: { field: branch_outcome, operator: "==", value: "on_false" } }
+
+config:
+  max_parallel_nodes: 2
+  fail_fast: true

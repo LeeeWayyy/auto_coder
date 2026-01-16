@@ -1,0 +1,75 @@
+id: parallel-review
+name: Parallel Code Review
+version: 1.0.0
+entry_point: implement
+exit_points: [merge]
+
+nodes:
+  - id: implement
+    type: task
+    label: Implement Feature
+    task_config:
+      role: implementer
+      task_template: "Implement feature: {input}"
+
+  - id: split
+    type: parallel
+    label: Split for Parallel Gates
+    parallel_config:
+      branches: [lint, test, security]
+      wait_for: all
+
+  - id: lint
+    type: gate
+    label: Lint Check
+    gate_config:
+      gate_type: lint
+
+  - id: test
+    type: gate
+    label: Run Tests
+    gate_config:
+      gate_type: test
+
+  - id: security
+    type: gate
+    label: Security Scan
+    gate_config:
+      gate_type: security
+
+  - id: join
+    type: merge
+    label: Join Results
+    merge_config:
+      wait_for: all
+      merge_strategy: union
+
+  - id: review
+    type: human
+    label: Human Review
+    human_config:
+      title: "Approve Changes"
+      description: "All gates passed. Review and approve."
+
+  - id: merge
+    type: task
+    label: Merge Changes
+    task_config:
+      role: implementer
+      task_template: "Merge approved changes"
+
+edges:
+  - { id: e1, source: implement, target: split }
+  - { id: e2, source: split, target: lint }
+  - { id: e3, source: split, target: test }
+  - { id: e4, source: split, target: security }
+  - { id: e5, source: lint, target: join }
+  - { id: e6, source: test, target: join }
+  - { id: e7, source: security, target: join }
+  - { id: e8, source: join, target: review }
+  - { id: e9, source: review, target: merge,
+      condition: { field: approved, operator: "==", value: true } }
+
+config:
+  max_parallel_nodes: 4
+  fail_fast: true
