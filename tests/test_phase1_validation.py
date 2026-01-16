@@ -8,8 +8,8 @@ This script checks:
 """
 
 import ast
+import importlib.util
 import sys
-from pathlib import Path
 
 
 def check_python_syntax(file_path):
@@ -64,20 +64,16 @@ def main():
     ]
 
     print("\n2. Checking YAML syntax...")
-    for file_path in yaml_files:
-        try:
-            import yaml
-
+    if importlib.util.find_spec("yaml") is None:
+        print("  ⚠ yaml module not available, skipping YAML checks")
+    else:
+        for file_path in yaml_files:
             passed, error = check_yaml_syntax(file_path)
-        except ImportError:
-            print(f"  ⚠ {file_path} (yaml module not available, skipping)")
-            continue
-
-        status = "✓" if passed else "✗"
-        print(f"  {status} {file_path}")
-        if not passed:
-            print(f"     Error: {error}")
-            all_passed = False
+            status = "✓" if passed else "✗"
+            print(f"  {status} {file_path}")
+            if not passed:
+                print(f"     Error: {error}")
+                all_passed = False
 
     # Summary
     print("\n" + "=" * 50)
