@@ -729,7 +729,14 @@ class GraphOrchestrator:
             # Namespaced keys (source.field) prevent collisions between nodes
             # Full output under node ID enables {node_id} template references
             if isinstance(output, dict):
+                # Check for passthrough marker from PARALLEL nodes
+                # When present, preserve original upstream keys without re-namespacing
+                is_passthrough = output.get("_passthrough_keys", False)
+
                 for k, v in output.items():
+                    if k == "_passthrough_keys":
+                        continue  # Skip the marker itself
+
                     namespaced_key = f"{edge.source}.{k}"
                     # Check for collision on namespaced key (should be rare but possible
                     # if same edge processed twice due to race)
@@ -739,6 +746,22 @@ class GraphOrchestrator:
                             f"has conflicting values. This may indicate duplicate edges."
                         )
                     merged[namespaced_key] = v
+
+                    # For passthrough sources (PARALLEL nodes), also preserve original keys
+                    # This allows downstream nodes to reference upstream outputs directly
+                    # e.g., {A.x} instead of {parallel.A.x}
+                    if is_passthrough and k not in ("parallel_started", "branches"):
+                        # Only add original key if no collision (namespaced always takes priority)
+                        if k not in merged:
+                            merged[k] = v
+                        elif merged[k] != v:
+                            # Collision on original key - log warning but don't fail
+                            # Namespaced key is always available as fallback
+                            logger.debug(
+                                f"Passthrough key '{k}' from PARALLEL has collision, "
+                                f"use namespaced key '{namespaced_key}' instead"
+                            )
+
                 # Check for collision on source node ID key
                 if edge.source in merged and merged[edge.source] != output:
                     raise ValueError(
@@ -1491,9 +1514,11 @@ class GraphOrchestrator:
         # PARALLEL nodes complete immediately - downstream MERGE handles sync
         # The actual parallel execution happens in execute_next_batch
         # Forward all upstream inputs so downstream branches can access them
+        # Mark with _passthrough_keys so _collect_inputs preserves original key names
         output = {
             "parallel_started": True,
             "branches": node.parallel_config.branches,
+            "_passthrough_keys": True,  # Signal to preserve original upstream keys
             **input_data,  # Forward all upstream inputs to downstream branches
         }
         return output
