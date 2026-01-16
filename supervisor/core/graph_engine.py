@@ -935,13 +935,13 @@ class GraphOrchestrator:
             branch_outcome = output.get("branch_outcome") if isinstance(output, dict) else None
 
             # Determine allowed target based on branch outcome
-            if branch_outcome == BranchOutcome.TRUE.value:
+            # When max_iterations is reached, selected_target is explicitly set and takes precedence
+            if isinstance(output, dict) and "selected_target" in output:
+                branch_allowed_target = output["selected_target"]
+            elif branch_outcome == BranchOutcome.TRUE.value:
                 branch_allowed_target = branch_config.on_true
             elif branch_outcome == BranchOutcome.FALSE.value:
                 branch_allowed_target = branch_config.on_false
-            elif branch_outcome == BranchOutcome.MAX_ITERATIONS.value:
-                # Use selected_target from output (determined by is_loop_edge)
-                branch_allowed_target = output.get("selected_target", branch_config.on_false)
 
             # Mark non-selected branch target as SKIPPED to prevent hanging
             # BUT only if the target doesn't have other valid incoming edges
@@ -1510,8 +1510,17 @@ class GraphOrchestrator:
                 )
             else:
                 non_loop_target = config.on_false
+            # Map branch_outcome to on_true/on_false so edge conditions work correctly.
+            # This ensures that edges checking "branch_outcome == 'on_true'" will match
+            # when we exit via on_true, even though we're at max_iterations.
+            mapped_outcome = (
+                BranchOutcome.TRUE.value
+                if non_loop_target == config.on_true
+                else BranchOutcome.FALSE.value
+            )
             return {
-                "branch_outcome": BranchOutcome.MAX_ITERATIONS.value,
+                "branch_outcome": mapped_outcome,
+                "max_iterations_reached": True,
                 "iterations": iteration,
                 "selected_target": non_loop_target,
             }
