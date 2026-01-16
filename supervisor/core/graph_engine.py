@@ -976,7 +976,7 @@ class GraphOrchestrator:
         # to prevent subtle bugs from non-deterministic matching.
         if not found and "." not in condition.field:
             suffix = f".{condition.field}"
-            matching_keys = [key for key in data.keys() if key.endswith(suffix)]
+            matching_keys = [key for key in data if key.endswith(suffix)]
             if len(matching_keys) > 1:
                 raise ValueError(
                     f"Ambiguous field '{condition.field}'. Found in multiple sources: "
