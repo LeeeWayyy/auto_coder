@@ -113,7 +113,9 @@ class LoopCondition(BaseModel):
     """
 
     field: str  # Field to evaluate from previous node output
-    operator: Literal["==", "!=", ">", "<", ">=", "<=", "in", "not_in"]
+    operator: Literal[
+        "==", "!=", ">", "<", ">=", "<=", "in", "not_in", "contains", "starts_with", "ends_with"
+    ]  # Aligned with TransitionCondition for consistency
     value: str | int | float | bool | list[str | int | float | bool]
     max_iterations: int = 10  # CRITICAL: Prevent infinite loops
 

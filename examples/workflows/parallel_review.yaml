@@ -23,19 +23,19 @@ nodes:
     type: gate
     label: Lint Check
     gate_config:
-      gate_type: lint_gate
+      gate_type: lint
 
   - id: test
     type: gate
     label: Run Tests
     gate_config:
-      gate_type: test_gate
+      gate_type: test
 
   - id: security
     type: gate
     label: Security Scan
     gate_config:
-      gate_type: security_gate
+      gate_type: security
 
   - id: join
     type: merge

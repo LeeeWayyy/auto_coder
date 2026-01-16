@@ -23,7 +23,7 @@ nodes:
     type: gate
     label: Run Tests
     gate_config:
-      gate_type: test_gate
+      gate_type: test
 
   - id: check
     type: branch
