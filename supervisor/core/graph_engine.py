@@ -471,9 +471,11 @@ class GraphOrchestrator:
         Atomically claim READY nodes to prevent duplicate execution.
         Uses BEGIN IMMEDIATE for atomic claim within the transaction.
 
-        Also requeues stale RUNNING nodes (crashed workers) before claiming.
+        Also handles stale RUNNING nodes (crashed workers) before claiming.
         Nodes that have been RUNNING longer than stale_timeout_seconds are
-        reset to READY so they can be re-executed.
+        marked as FAILED (not requeued) to prevent duplicate execution of
+        legitimately long-running tasks. Operators should investigate and
+        manually retry if needed.
         """
 
         def claim_nodes(db, exec_id, max_limit, stale_timeout):
