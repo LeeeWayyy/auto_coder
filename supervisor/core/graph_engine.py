@@ -7,11 +7,16 @@ This module implements a crash-resistant, resumable graph orchestrator that:
 - Implements pre-apply safety with gates
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from supervisor.core.engine import ExecutionEngine
 
 from supervisor.core.approval import ApprovalGate
 from supervisor.core.gate_executor import GateExecutor
@@ -31,6 +36,45 @@ from supervisor.core.state import Database
 logger = logging.getLogger(__name__)
 
 
+class _AttrDict:
+    """Wrapper to provide attribute-style access to dict values for format strings."""
+
+    def __init__(self, data: dict):
+        self._data = data
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        value = self._data.get(name, f"<missing:{name}>")
+        if isinstance(value, dict):
+            return _AttrDict(value)
+        return value
+
+    def __str__(self):
+        return str(self._data)
+
+
+class _SafeFormatDict(dict):
+    """
+    Dict subclass that wraps nested dicts in _AttrDict for attribute-style access.
+
+    This enables format strings like {node_id.field} where node_id is a dict output
+    stored by _collect_inputs. Missing keys return a placeholder instead of raising.
+    """
+
+    def __getitem__(self, key: str):
+        try:
+            value = super().__getitem__(key)
+            if isinstance(value, dict):
+                return _AttrDict(value)
+            return value
+        except KeyError:
+            return f"<missing:{key}>"
+
+    def __missing__(self, key: str):
+        return f"<missing:{key}>"
+
+
 class GraphOrchestrator:
     """
     Stateless workflow graph orchestrator.
@@ -45,7 +89,7 @@ class GraphOrchestrator:
     def __init__(
         self,
         db: Database,
-        execution_engine: Any,  # ExecutionEngine
+        execution_engine: ExecutionEngine,
         gate_executor: GateExecutor,
         gate_loader: GateLoader,
         max_parallel: int = 4,
@@ -82,11 +126,20 @@ class GraphOrchestrator:
                 raise
 
     def _save_workflow(self, conn, workflow: WorkflowGraph):
-        """Save workflow definition to database."""
+        """Save workflow definition to database.
+
+        Uses ON CONFLICT DO UPDATE instead of REPLACE to preserve FK references
+        from graph_executions that reference this workflow.
+        """
         conn.execute(
             """
-            INSERT OR REPLACE INTO graph_workflows (id, name, definition, version, updated_at)
+            INSERT INTO graph_workflows (id, name, definition, version, updated_at)
             VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                definition = excluded.definition,
+                version = excluded.version,
+                updated_at = CURRENT_TIMESTAMP
         """,
             (workflow.id, workflow.name, workflow.model_dump_json(), workflow.version),
         )
@@ -918,17 +971,20 @@ class GraphOrchestrator:
                 value = data[field_part]
                 found = True
 
-        # 3. Un-namespaced convenience match (deterministic via sorted keys)
-        # NOTE: If multiple upstream nodes provide the same field name, the first
-        # alphabetically sorted namespaced key wins. For explicit control, use
-        # fully-qualified field names like "node_id.field".
+        # 3. Un-namespaced convenience match with ambiguity detection
+        # Raises error if multiple upstream nodes provide the same field name
+        # to prevent subtle bugs from non-deterministic matching.
         if not found and "." not in condition.field:
             suffix = f".{condition.field}"
-            for key in sorted(data.keys()):  # Sort for deterministic matching
-                if key.endswith(suffix):
-                    value = data[key]
-                    found = True
-                    break
+            matching_keys = [key for key in data.keys() if key.endswith(suffix)]
+            if len(matching_keys) > 1:
+                raise ValueError(
+                    f"Ambiguous field '{condition.field}'. Found in multiple sources: "
+                    f"{sorted(matching_keys)}. Use a fully-qualified field name like 'source_node.field'."
+                )
+            if len(matching_keys) == 1:
+                value = data[matching_keys[0]]
+                found = True
 
         # Evaluate operator with type safety
         try:
@@ -1054,11 +1110,10 @@ class GraphOrchestrator:
         """Execute a role-based task with pre-apply gate safety."""
         config = node.task_config
 
-        # Format task description
-        # Use format_map to safely handle arbitrary keys from input_data,
-        # including namespaced keys like "node_id.field" which are not valid
-        # Python identifiers for **kwargs expansion.
-        format_mapping = input_data.copy()
+        # Format task description using SafeFormatDict for attribute-style access
+        # This enables templates like {node_id.field} by wrapping nested dicts
+        # in attribute-accessible objects.
+        format_mapping = _SafeFormatDict(input_data)
         format_mapping["input"] = json.dumps(input_data, indent=2)
         task_description = config.task_template.format_map(format_mapping)
 
