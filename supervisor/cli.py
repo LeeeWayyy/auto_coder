@@ -12,6 +12,7 @@ Commands:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import uuid
 from pathlib import Path
@@ -27,8 +28,11 @@ if TYPE_CHECKING:
     from supervisor.core.approval import ApprovalPolicy
 
 from supervisor.core.engine import ExecutionEngine
+from supervisor.core.graph_engine import GraphOrchestrator
+from supervisor.core.graph_schema import WorkflowGraph
 from supervisor.core.roles import RoleLoader
 from supervisor.core.state import Database
+from supervisor.core.worker import WorkflowWorker
 from supervisor.metrics.aggregator import MetricsAggregator
 from supervisor.metrics.dashboard import MetricsDashboard
 
@@ -461,12 +465,6 @@ def status(workflow_id: str | None) -> None:
 @click.option("--validate-only", is_flag=True, help="Only validate, don't execute")
 def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None:
     """Execute a declarative workflow graph from YAML."""
-    import asyncio
-
-    from supervisor.core.graph_engine import GraphOrchestrator
-    from supervisor.core.graph_schema import WorkflowGraph
-    from supervisor.core.worker import WorkflowWorker
-
     # Load workflow YAML
     with open(workflow_file) as f:
         workflow_dict = yaml.safe_load(f)

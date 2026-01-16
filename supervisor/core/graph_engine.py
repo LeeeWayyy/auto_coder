@@ -499,8 +499,8 @@ class GraphOrchestrator:
         # Propagate skips first
         await self._propagate_skips(execution_id, workflow)
 
-        # Check if all terminal
-        statuses = self._get_all_statuses(execution_id)
+        # Check if all terminal (wrapped in to_thread to avoid blocking event loop)
+        statuses = await asyncio.to_thread(self._get_all_statuses, execution_id)
         all_terminal = all(s in ["completed", "failed", "skipped"] for s in statuses.values())
 
         if all_terminal:
@@ -1001,6 +1001,12 @@ class GraphOrchestrator:
                 value = data[matching_keys[0]]
                 found = True
 
+        # If field was not found, condition cannot match.
+        # This prevents typos or missing outputs from accidentally passing conditions
+        # like "status != 'failed'" when status is absent (None != 'failed' would be True).
+        if not found:
+            return False
+
         # Evaluate operator with type safety
         try:
             if condition.operator == "==":
@@ -1195,7 +1201,21 @@ class GraphOrchestrator:
         return result
 
     async def _execute_gate(self, execution_id: str, node: Node, input_data: dict) -> Any:
-        """Execute a verification gate in isolated worktree."""
+        """
+        Execute a verification gate in isolated worktree.
+
+        Known Limitation:
+            Gates run in a fresh worktree created from HEAD, which does NOT include
+            uncommitted changes from prior TASK nodes. This means:
+            - Gates verify the committed state, not the current working tree
+            - A gate may pass while uncommitted changes would actually fail it
+            - This is by design for isolation, but can be surprising
+
+            Workarounds:
+            - Use TASK nodes with gates=[...] to run gates in the same worktree
+            - Have TASK nodes commit changes before GATE verification
+            - For Phase 2+, consider adding a "use_main_worktree" option
+        """
         config = node.gate_config
 
         # Get workflow_id for consistent event/artifact tracking

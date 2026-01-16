@@ -33,7 +33,10 @@ class WorkflowWorker:
         Returns final status.
         """
         while True:
-            status = self.orchestrator.get_execution_status(execution_id)
+            # Wrap sync DB call in to_thread to avoid blocking event loop
+            status = await asyncio.to_thread(
+                self.orchestrator.get_execution_status, execution_id
+            )
             if status in ["completed", "failed", "cancelled"]:
                 return status
 
@@ -52,8 +55,8 @@ class WorkflowWorker:
 
         while self.running:
             try:
-                # Find all running executions
-                active = self._get_active_executions()
+                # Find all running executions (wrapped to avoid blocking)
+                active = await asyncio.to_thread(self._get_active_executions)
 
                 for execution_id in active:
                     await self.orchestrator.execute_next_batch(execution_id)
