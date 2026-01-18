@@ -28,6 +28,9 @@ from rich.table import Table
 if TYPE_CHECKING:
     from supervisor.core.approval import ApprovalPolicy
 
+from supervisor.cli_ui.graph_renderer import StatusTableRenderer, TerminalGraphRenderer
+from supervisor.cli_ui.live_monitor import LiveExecutionMonitor
+from supervisor.cli_ui.node_inspector import NodeInspector
 from supervisor.core.engine import ExecutionEngine
 from supervisor.core.graph_engine import GraphOrchestrator
 from supervisor.core.graph_schema import WorkflowGraph
@@ -439,32 +442,163 @@ def roles() -> None:
 
 
 @main.command()
-@click.option("--workflow-id", "-w", help="Show specific workflow")
-def status(workflow_id: str | None) -> None:
-    """Show current workflow status."""
-    repo_path = get_repo_path()
-    db_path = repo_path / ".supervisor/state.db"
+@click.argument("workflow_file", type=click.Path(exists=True))
+def visualize(workflow_file: str) -> None:
+    """Visualize a workflow graph in the terminal."""
+    from pydantic import ValidationError
+    from rich.markup import escape
 
-    if not db_path.exists():
-        console.print("[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]")
+    # Load and validate YAML with error handling
+    try:
+        with open(workflow_file) as f:
+            data = yaml.safe_load(f)
+        workflow = WorkflowGraph(**data)
+    except yaml.YAMLError as e:
+        console.print(f"[red]Invalid YAML:[/] {escape(str(e))}")
+        return
+    except ValidationError as e:
+        console.print("[red]Schema validation failed:[/]")
+        for err in e.errors():
+            console.print(f"  [red]• {escape(str(err))}[/]")
+        return
+    except (TypeError, ValueError) as e:
+        console.print(f"[red]Invalid workflow data:[/] {escape(str(e))}")
         return
 
-    Database(db_path)
+    renderer = TerminalGraphRenderer(console)
 
-    # For now, just show that the database exists
-    console.print(
-        Panel(
-            f"Database: {db_path}\nWorkflow ID filter: {workflow_id or 'All'}",
-            title="Supervisor Status",
-        )
+    # Show graph tree
+    tree = renderer.render_as_tree(workflow)
+    console.print(tree)
+
+    # Show summary - SECURITY: escape user-controlled values
+    console.print()
+    console.print(f"[bold]Nodes:[/] {len(workflow.nodes)}")
+    console.print(f"[bold]Edges:[/] {len(workflow.edges)}")
+    console.print(f"[bold]Entry:[/] {escape(workflow.entry_point)}")
+    exit_str = (
+        ", ".join(escape(e) for e in workflow.exit_points)
+        if workflow.exit_points
+        else "(auto-detect)"
     )
+    console.print(f"[bold]Exits:[/] {exit_str}")
+
+    # Validate and show any issues
+    errors = workflow.validate_graph()
+    if errors:
+        console.print("\n[red bold]Validation Errors:[/]")
+        for error in errors:
+            # SECURITY: escape error messages that may contain user data
+            console.print(f"  [red]• {escape(str(error))}[/]")
+    else:
+        console.print("\n[green]✓ Graph is valid[/]")
+
+
+@main.command()
+@click.option("--workflow-id", "-w", help="Filter by workflow ID")
+@click.option("--execution-id", "-e", help="Show specific execution")
+def status(workflow_id: str | None, execution_id: str | None) -> None:
+    """Show workflow execution status."""
+    from rich.markup import escape
+
+    repo_path = get_repo_path()
+    db_path = repo_path / ".supervisor" / "state.db"
+
+    if not db_path.exists():
+        console.print(
+            "[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]"
+        )
+        return
+
+    db = Database(db_path)
+
+    if execution_id:
+        # SECURITY: Escape execution_id for all Rich output
+        safe_exec_id = escape(execution_id)
+
+        # Show specific execution
+        try:
+            with db._connect() as conn:
+                exec_row = conn.execute(
+                    "SELECT status, started_at, completed_at, error FROM graph_executions WHERE id=?",
+                    (execution_id,),
+                ).fetchone()
+
+                if not exec_row:
+                    console.print(f"[red]Execution '{safe_exec_id}' not found[/]")
+                    return
+
+                workflow_row = conn.execute(
+                    """
+                    SELECT w.definition FROM graph_workflows w
+                    JOIN graph_executions e ON w.id = e.graph_id WHERE e.id = ?
+                """,
+                    (execution_id,),
+                ).fetchone()
+        except Exception as e:
+            console.print(f"[red]Database error: {e}[/]")
+            return
+
+        # Handle missing workflow definition gracefully
+        if not workflow_row:
+            console.print(
+                f"[red]Workflow definition not found for execution '{safe_exec_id}'[/]"
+            )
+            return
+
+        workflow = WorkflowGraph.model_validate_json(workflow_row[0])
+
+        # Show execution info
+        status_color = {
+            "running": "blue",
+            "completed": "green",
+            "failed": "red",
+            "cancelled": "yellow",
+        }.get(exec_row[0], "white")
+
+        # SECURITY: Escape error message which may contain user data
+        safe_error = escape(str(exec_row[3])) if exec_row[3] else "-"
+
+        console.print(
+            Panel(
+                f"[bold]Status:[/] [{status_color}]{exec_row[0]}[/]\n"
+                f"[bold]Started:[/] {exec_row[1]}\n"
+                f"[bold]Completed:[/] {exec_row[2] or '-'}\n"
+                f"[bold]Error:[/] {safe_error}",
+                title=f"Execution: {safe_exec_id[:8]}...",
+            )
+        )
+
+        # Show node status table
+        renderer = StatusTableRenderer(console)
+        statuses = {}
+        with db._connect() as conn:
+            rows = conn.execute(
+                "SELECT node_id, status FROM node_executions WHERE execution_id=?",
+                (execution_id,),
+            ).fetchall()
+            statuses = {r[0]: r[1] for r in rows}
+
+        table = renderer.render_status_table(workflow, execution_id, statuses)
+        console.print(table)
+    else:
+        # List recent executions (existing functionality)
+        console.print(
+            Panel(
+                f"Database: {db_path}\nWorkflow ID filter: {workflow_id or 'All'}",
+                title="Supervisor Status",
+            )
+        )
 
 
 @main.command()
 @click.argument("workflow_file", type=click.Path(exists=True))
 @click.option("--workflow-id", required=True, help="Unique workflow execution ID")
 @click.option("--validate-only", is_flag=True, help="Only validate, don't execute")
-def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None:
+@click.option("--live", is_flag=True, help="Show live execution monitor")
+def run_graph(
+    workflow_file: str, workflow_id: str, validate_only: bool, live: bool
+) -> None:
     """Execute a declarative workflow graph from YAML."""
     # Load workflow YAML with proper error handling
     try:
@@ -519,16 +653,99 @@ def run_graph(workflow_file: str, workflow_id: str, validate_only: bool) -> None
         exec_id = await orchestrator.start_workflow(workflow, workflow_id)
         console.print(f"[blue]Started execution: {exec_id}[/blue]")
 
-        worker = WorkflowWorker(orchestrator)
-        return await worker.run_until_complete(exec_id)
+        if live:
+            # Run with live monitor
+            # Use explicit task management so we can cancel monitor when worker finishes
+            monitor = LiveExecutionMonitor(orchestrator, db)
+            worker = WorkflowWorker(orchestrator)
 
-    status = asyncio.run(run())
+            async def run_worker_and_cancel_monitor():
+                """Run worker, then signal monitor to stop."""
+                try:
+                    result = await worker.run_until_complete(exec_id)
+                    return result
+                finally:
+                    # Always cancel monitor when worker exits (success or failure)
+                    monitor.cancel()
 
-    if status == "completed":
+            try:
+                # Run worker and monitor concurrently
+                # Worker cancels monitor when done via the cancel() method
+                results = await asyncio.gather(
+                    run_worker_and_cancel_monitor(),
+                    monitor.monitor(exec_id, workflow),
+                    return_exceptions=True,
+                )
+                worker_result = results[0]
+                if isinstance(worker_result, Exception):
+                    raise worker_result
+                return worker_result
+            except Exception as e:
+                monitor.cancel()  # Ensure monitor stops on error
+                console.print(f"[red]Error during execution: {e}[/]")
+                return "failed"
+        else:
+            # Existing non-live execution
+            worker = WorkflowWorker(orchestrator)
+            return await worker.run_until_complete(exec_id)
+
+    final_status = asyncio.run(run())
+
+    if final_status == "completed":
         console.print("[green]Workflow completed successfully[/green]")
     else:
-        console.print(f"[red]Workflow {status}[/red]")
+        console.print(f"[red]Workflow {final_status}[/red]")
         sys.exit(1)
+
+
+@main.command()
+@click.argument("execution_id")
+@click.option("--node", "-n", help="Specific node ID to inspect")
+@click.option("--interactive", "-i", is_flag=True, help="Enter interactive inspection mode")
+def inspect(execution_id: str, node: str | None, interactive: bool) -> None:
+    """Inspect an execution's node details.
+
+    By default, shows a summary of all nodes (one-shot).
+    Use --node to inspect a specific node.
+    Use --interactive for REPL-style exploration.
+    """
+    repo_path = get_repo_path()
+    db_path = repo_path / ".supervisor" / "state.db"
+
+    if not db_path.exists():
+        console.print(
+            "[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]"
+        )
+        return
+
+    db = Database(db_path)
+
+    # Get workflow
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT w.definition FROM graph_workflows w
+                JOIN graph_executions e ON w.id = e.graph_id
+                WHERE e.id = ?
+            """,
+                (execution_id,),
+            ).fetchone()
+    except Exception as e:
+        click.secho(f"Database error: {e}", fg="red")
+        return
+
+    if not row:
+        click.secho(f"Execution '{execution_id}' not found", fg="red")
+        return
+
+    workflow = WorkflowGraph.model_validate_json(row[0])
+    inspector = NodeInspector(db)
+
+    if interactive:
+        inspector.inspect_interactive(execution_id, workflow)
+    else:
+        inspector.inspect_node(execution_id, workflow, node)
 
 
 @main.command()
