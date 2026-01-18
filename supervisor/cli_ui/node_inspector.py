@@ -82,7 +82,9 @@ class NodeInspector:
                 status = statuses.get(node.id, "pending")
                 safe_id = escape(node.id)
                 safe_label = escape(node.label or node.id)
-                self.console.print(f"  {safe_id}: {safe_label} [{status}]")
+                # SECURITY: Escape status from DB to prevent Rich markup injection
+                safe_status = escape(str(status))
+                self.console.print(f"  {safe_id}: {safe_label} [{safe_status}]")
 
     def inspect_interactive(self, execution_id: str, workflow: WorkflowGraph):
         """
@@ -145,7 +147,8 @@ class NodeInspector:
                     (execution_id, node.id),
                 ).fetchone()
         except Exception as e:
-            self.console.print(f"[red]DB error: {e}[/]")
+            # SECURITY: Escape exception message to prevent Rich markup injection
+            self.console.print(f"[red]DB error: {escape(str(e))}[/]")
             return
 
         if not row:
@@ -156,11 +159,13 @@ class NodeInspector:
 
         # Node info panel - use Rich Group to preserve renderables
         # DO NOT stringify Rich objects - use Group to compose them
+        # SECURITY: Escape status from DB to prevent Rich markup injection
+        safe_status = escape(str(status))
         info_parts = [
             Text.from_markup(f"[bold]ID:[/] {safe_id}"),
             Text.from_markup(f"[bold]Type:[/] {node.type.value}"),
             Text.from_markup(f"[bold]Label:[/] {safe_label}"),
-            Text.from_markup(f"[bold]Status:[/] {status}"),
+            Text.from_markup(f"[bold]Status:[/] {safe_status}"),
         ]
 
         # Add type-specific config
@@ -176,13 +181,20 @@ class NodeInspector:
         if config:
             info_parts.append(Text(""))  # Empty line
             info_parts.append(Text.from_markup("[bold]Configuration:[/]"))
-            config_json = json.dumps(config.model_dump(), indent=2)
+            # NOTE: Use model_dump_json() instead of json.dumps(model_dump()) to
+            # handle non-JSON-serializable types (datetime, UUID, Path, etc.)
+            config_json = config.model_dump_json(indent=2)
             info_parts.append(Syntax(config_json, "json", theme="monokai"))
 
         # Use Group to compose multiple renderables without stringifying
         self.console.print(Panel(Group(*info_parts), title=f"Node: {safe_id}"))
 
         # Input data with JSON error handling
+        # NOTE: Catch multiple error types - SQLite adapters may return bytes or other types
+        # - JSONDecodeError: invalid JSON
+        # - TypeError: json.loads(None) or non-string types
+        # - ValueError: other value-related JSON errors
+        # - UnicodeDecodeError: non-UTF-8 bytes from SQLite BLOB/adapters
         if input_data:
             try:
                 input_json = json.loads(input_data)
@@ -192,7 +204,7 @@ class NodeInspector:
                         title="Input Data",
                     )
                 )
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError, ValueError, UnicodeDecodeError):
                 self.console.print(
                     Panel(
                         f"[dim]<Invalid JSON: {escape(str(input_data)[:100])}>[/]",
@@ -201,6 +213,11 @@ class NodeInspector:
                 )
 
         # Output data with JSON error handling
+        # NOTE: Catch multiple error types - SQLite adapters may return bytes or other types
+        # - JSONDecodeError: invalid JSON
+        # - TypeError: json.loads(None) or non-string types
+        # - ValueError: other value-related JSON errors
+        # - UnicodeDecodeError: non-UTF-8 bytes from SQLite BLOB/adapters
         if output_data:
             try:
                 output_json = json.loads(output_data)
@@ -212,7 +229,7 @@ class NodeInspector:
                         title="Output Data",
                     )
                 )
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError, ValueError, UnicodeDecodeError):
                 self.console.print(
                     Panel(
                         f"[dim]<Invalid JSON: {escape(str(output_data)[:100])}>[/]",

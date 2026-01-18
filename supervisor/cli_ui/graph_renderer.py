@@ -3,7 +3,7 @@
 Provides ASCII art and tree-based visualization of workflow graphs using Rich.
 """
 
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import networkx as nx
 from rich.console import Console
@@ -11,7 +11,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.tree import Tree
 
-from supervisor.core.graph_schema import Node, NodeStatus, NodeType, WorkflowGraph
+from supervisor.core.graph_schema import Edge, Node, NodeStatus, NodeType, WorkflowGraph
 
 
 class TerminalGraphRenderer:
@@ -22,7 +22,11 @@ class TerminalGraphRenderer:
     - Topological layout (left-to-right flow)
     - Color-coded node types
     - Status indicators
-    - Edge labels for conditions
+    - Edge labels for conditions (render_as_tree only)
+
+    NOTE: render_graph() provides a simplified ASCII view that shows topological levels
+    but does not visualize exact edge connections (would require complex ASCII line drawing).
+    Use render_as_tree() for accurate structural visualization including edge conditions.
 
     Performance Notes:
     - Uses node_map for O(1) lookups instead of O(N) list scans
@@ -66,6 +70,18 @@ class TerminalGraphRenderer:
         """Build O(1) lookup map for nodes by ID."""
         return {n.id: n for n in workflow.nodes}
 
+    def _build_edge_map(self, workflow: WorkflowGraph) -> Dict[str, List[Edge]]:
+        """Build O(1) lookup map for outgoing edges by source node ID.
+
+        Performance: Precomputing this avoids O(N*E) traversal in tree rendering,
+        reducing to O(N+E) total instead.
+        """
+        edge_map: Dict[str, List[Edge]] = {n.id: [] for n in workflow.nodes}
+        for edge in workflow.edges:
+            if edge.source in edge_map:
+                edge_map[edge.source].append(edge)
+        return edge_map
+
     def render_graph(
         self,
         workflow: WorkflowGraph,
@@ -92,7 +108,6 @@ class TerminalGraphRenderer:
             levels = [[n.id for n in workflow.nodes]]
 
         lines = []
-        max_width = 0
 
         # Render each level
         for level_idx, level in enumerate(levels):
@@ -122,7 +137,6 @@ class TerminalGraphRenderer:
 
             level_line = "  |  ".join(level_nodes)
             lines.append(level_line)
-            max_width = max(max_width, len(level_line))
 
             # Add connector arrows if not last level
             if level_idx < len(levels) - 1:
@@ -154,6 +168,8 @@ class TerminalGraphRenderer:
 
         # Build node map for O(1) lookups
         node_map = self._build_node_map(workflow)
+        # Build edge map for O(1) outgoing edge lookups (avoids O(N*E) traversal)
+        edge_map = self._build_edge_map(workflow)
 
         # Find entry point with graceful fallback
         entry = node_map.get(workflow.entry_point)
@@ -163,10 +179,10 @@ class TerminalGraphRenderer:
 
         self._add_node_to_tree(
             tree,
-            workflow,
             entry,
             statuses,
             node_map,
+            edge_map,
             visited=set(),
             depth=0,
             max_depth=max_depth,
@@ -177,15 +193,19 @@ class TerminalGraphRenderer:
     def _add_node_to_tree(
         self,
         parent: Tree,
-        workflow: WorkflowGraph,
         node: Node,
         statuses: Optional[Dict[str, str]],
         node_map: Dict[str, Node],
+        edge_map: Dict[str, List[Edge]],
         visited: set,
         depth: int = 0,
         max_depth: int = 50,
     ):
-        """Recursively add nodes to tree with depth limiting to prevent exponential blow-up."""
+        """Recursively add nodes to tree with depth limiting to prevent exponential blow-up.
+
+        Performance: Uses precomputed edge_map for O(1) outgoing edge lookup instead of
+        scanning all edges (O(E)) per node.
+        """
         # Depth guard to prevent exponential blow-up on wide DAGs
         if depth >= max_depth:
             parent.add("[dim]... (max depth reached)[/]")
@@ -220,8 +240,8 @@ class TerminalGraphRenderer:
 
         branch = parent.add(node_text)
 
-        # Add children using node_map for O(1) lookup
-        outgoing = [e for e in workflow.edges if e.source == node.id]
+        # Add children using precomputed edge_map for O(1) lookup
+        outgoing = edge_map.get(node.id, [])
         for edge in outgoing:
             child_node = node_map.get(edge.target)
             if child_node:
@@ -237,10 +257,10 @@ class TerminalGraphRenderer:
                     edge_branch = branch.add(condition_label)
                     self._add_node_to_tree(
                         edge_branch,
-                        workflow,
                         child_node,
                         statuses,
                         node_map,
+                        edge_map,
                         visited.copy(),
                         depth + 1,
                         max_depth,
@@ -248,10 +268,10 @@ class TerminalGraphRenderer:
                 else:
                     self._add_node_to_tree(
                         branch,
-                        workflow,
                         child_node,
                         statuses,
                         node_map,
+                        edge_map,
                         visited.copy(),
                         depth + 1,
                         max_depth,
@@ -272,8 +292,8 @@ class StatusTableRenderer:
         self,
         workflow: WorkflowGraph,
         execution_id: str,
-        statuses: Dict[str, str],
-        outputs: Optional[Dict[str, any]] = None,
+        statuses: Dict[str, NodeStatus | str],
+        outputs: Optional[Dict[str, Any]] = None,
     ) -> Table:
         """
         Render execution status as a table.
@@ -288,7 +308,10 @@ class StatusTableRenderer:
         table.add_column("Output", max_width=40)
 
         for node in workflow.nodes:
-            status = statuses.get(node.id, "pending")
+            # Normalize status to string for consistent comparison
+            # (callers may pass NodeStatus enums or strings from DB)
+            raw_status = statuses.get(node.id, "pending")
+            status = TerminalGraphRenderer._normalize_status(raw_status)
             # Handle None values explicitly - dict.get returns None if key exists with None value
             val = outputs.get(node.id) if outputs else None
             output = val if val is not None else ""

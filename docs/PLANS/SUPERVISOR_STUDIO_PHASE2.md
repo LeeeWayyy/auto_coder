@@ -1169,4 +1169,38 @@ tui = [
 
 ---
 
+## 2.8 Design Decisions
+
+This section documents intentional design choices made during code review.
+
+### render_graph() Simplified Visualization (DECLINED: Gemini)
+
+**Issue:** The ASCII `render_graph()` shows topological levels but doesn't draw exact edge connections, which could be misleading.
+
+**Decision:** DECLINED - This is intentional. Drawing crossing ASCII lines for arbitrary DAGs is complex and often produces unreadable output. The `render_as_tree()` method is the primary visualization tool and shows accurate structure including edge conditions. The docstring clarifies this distinction:
+
+> "NOTE: render_graph() provides a simplified ASCII view that shows topological levels
+> but does not visualize exact edge connections (would require complex ASCII line drawing).
+> Use render_as_tree() for accurate structural visualization including edge conditions."
+
+### Cyclic Graph Fallback (DECLINED: Gemini)
+
+**Issue:** Cyclic graphs in `render_graph()` fall back to a single row display.
+
+**Decision:** DECLINED - Cyclic graphs are invalid for DAG-based workflows (our target use case). The fallback is a graceful degradation rather than crashing. The `render_as_tree()` method properly handles back-edges with `visited` tracking and displays `↩ node_id (loop)` indicators.
+
+### Fixed Output Truncation (DECLINED: Gemini)
+
+**Issue:** Output is manually truncated to fixed lengths (40/100 chars) instead of using Rich's dynamic overflow handling.
+
+**Decision:** DECLINED - Fixed truncation is intentional for `LiveExecutionMonitor` where Rich's automatic layout handling can cause layout instability in the `Live` context with frequent updates. Consistent column widths provide a more stable visual experience. The full output is available via the `inspect` command.
+
+### Tree Rendering Visited Copy (DECLINED: Codex)
+
+**Issue:** Tree rendering copies `visited` set for every edge, which is O(N) per edge.
+
+**Decision:** DECLINED - This is the correct behavior for DAG visualization. When the same node is reachable via multiple paths (e.g., A→C and B→C), we intentionally render it in both subtrees to show the complete structure from each path. The `visited.copy()` ensures each path is tracked independently. For the typical workflow sizes we handle (<100 nodes), this is not a performance concern. The `max_depth` parameter provides a safety limit for pathological cases.
+
+---
+
 **End of Phase 2 Plan**

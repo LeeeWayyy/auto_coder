@@ -101,12 +101,13 @@ class LiveExecutionMonitor:
         with Live(layout, console=self.console, refresh_per_second=2) as live:
             while not self._cancelled:
                 # Batch all DB queries into single call to reduce overhead
-                statuses, outputs, exec_status = await asyncio.to_thread(
+                statuses, outputs, exec_status, had_db_error = await asyncio.to_thread(
                     self._get_execution_snapshot, execution_id
                 )
 
                 # Track DB errors - break out if too many consecutive failures
-                if exec_status == "unknown":
+                # NOTE: Only count actual exceptions, not missing rows (normal during startup)
+                if had_db_error:
                     consecutive_db_errors += 1
                     if consecutive_db_errors >= self.MAX_DB_ERRORS:
                         self.console.print(
@@ -162,7 +163,7 @@ class LiveExecutionMonitor:
 
     def _get_execution_snapshot(
         self, execution_id: str
-    ) -> Tuple[Dict[str, str], Dict[str, Any], str]:
+    ) -> Tuple[Dict[str, str], Dict[str, Any], str, bool]:
         """
         Get complete execution snapshot in a single DB transaction.
 
@@ -173,11 +174,14 @@ class LiveExecutionMonitor:
         blocking the event loop. Do not call directly from async code.
 
         Returns:
-            Tuple of (statuses, outputs, exec_status)
+            Tuple of (statuses, outputs, exec_status, had_db_error)
+            - had_db_error is True only when an actual exception occurred,
+              not when execution row is simply missing (normal during startup race)
         """
         statuses: Dict[str, str] = {}
         outputs: Dict[str, Any] = {}
-        exec_status = "unknown"
+        exec_status = "pending"  # Default to pending, not unknown
+        had_db_error = False
 
         try:
             with self.db._connect() as conn:
@@ -193,29 +197,46 @@ class LiveExecutionMonitor:
                     node_id, status, output_summary = row
                     statuses[node_id] = status
                     # Parse JSON with error handling (may be truncated/invalid)
+                    # NOTE: Catch multiple error types:
+                    # - JSONDecodeError: invalid/truncated JSON
+                    # - TypeError: json.loads(None) or non-string types
+                    # - UnicodeDecodeError: non-UTF-8 bytes from SQLite BLOB/adapters
                     if output_summary:
                         try:
                             outputs[node_id] = json.loads(output_summary)
-                        except json.JSONDecodeError:
+                        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
                             # Truncated JSON or invalid - show summary as string
+                            # NOTE: Normalize to string before truncation - SQLite adapters
+                            # may return bytes, and "bytes[:40] + '...'" raises TypeError
+                            if isinstance(output_summary, (bytes, bytearray)):
+                                summary_str = output_summary.decode(
+                                    "utf-8", errors="replace"
+                                )
+                            else:
+                                summary_str = str(output_summary)
                             outputs[node_id] = (
-                                output_summary[:40] + "..."
-                                if len(output_summary) > 40
-                                else output_summary
+                                summary_str[:40] + "..."
+                                if len(summary_str) > 40
+                                else summary_str
                             )
                     else:
                         outputs[node_id] = None
 
                 # Get execution status
+                # NOTE: Missing row is NOT an error - can happen during startup race
+                # when worker hasn't created the execution row yet
                 exec_row = conn.execute(
                     "SELECT status FROM graph_executions WHERE id=?",
                     (execution_id,),
                 ).fetchone()
                 if exec_row:
                     exec_status = exec_row[0]
+                # else: keep default "pending" - not an error
 
         except Exception as e:
             # Log error but don't crash the monitor
-            self.console.print(f"[dim]DB error: {e}[/]")
+            # SECURITY: Escape exception message to prevent Rich markup injection
+            self.console.print(f"[dim]DB error: {escape(str(e))}[/]")
+            had_db_error = True
 
-        return statuses, outputs, exec_status
+        return statuses, outputs, exec_status, had_db_error
