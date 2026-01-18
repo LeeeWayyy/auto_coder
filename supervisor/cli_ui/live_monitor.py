@@ -5,7 +5,7 @@ Provides real-time terminal display of workflow execution progress.
 
 import asyncio
 import json
-from typing import Any, Dict, Tuple
+from typing import Any
 
 from rich.console import Console
 from rich.layout import Layout
@@ -62,9 +62,7 @@ class LiveExecutionMonitor:
             Layout(name="footer", size=5),
         )
 
-        layout["main"].split_row(
-            Layout(name="graph", ratio=1), Layout(name="status", ratio=1)
-        )
+        layout["main"].split_row(Layout(name="graph", ratio=1), Layout(name="status", ratio=1))
 
         return layout
 
@@ -94,11 +92,9 @@ class LiveExecutionMonitor:
             BarColumn(),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         )
-        self._progress_task_id = self._progress.add_task(
-            "Nodes: 0/0", total=len(workflow.nodes)
-        )
+        self._progress_task_id = self._progress.add_task("Nodes: 0/0", total=len(workflow.nodes))
 
-        with Live(layout, console=self.console, refresh_per_second=2) as live:
+        with Live(layout, console=self.console, refresh_per_second=2):
             while not self._cancelled:
                 # Batch all DB queries into single call to reduce overhead
                 statuses, outputs, exec_status, had_db_error = await asyncio.to_thread(
@@ -110,9 +106,7 @@ class LiveExecutionMonitor:
                 if had_db_error:
                     consecutive_db_errors += 1
                     if consecutive_db_errors >= self.MAX_DB_ERRORS:
-                        self.console.print(
-                            "[red]Monitor stopping: too many DB errors[/]"
-                        )
+                        self.console.print("[red]Monitor stopping: too many DB errors[/]")
                         break
                 else:
                     consecutive_db_errors = 0  # Reset on success
@@ -142,9 +136,7 @@ class LiveExecutionMonitor:
                 layout["status"].update(Panel(status_table, title="Node Status"))
 
                 # Update footer with progress (reuse widget to avoid flicker)
-                completed = sum(
-                    1 for s in statuses.values() if s in ["completed", "skipped"]
-                )
+                completed = sum(1 for s in statuses.values() if s in ["completed", "skipped"])
                 total = len(workflow.nodes)
                 self._progress.update(
                     self._progress_task_id,
@@ -163,7 +155,7 @@ class LiveExecutionMonitor:
 
     def _get_execution_snapshot(
         self, execution_id: str
-    ) -> Tuple[Dict[str, str], Dict[str, Any], str, bool]:
+    ) -> tuple[dict[str, str], dict[str, Any], str, bool]:
         """
         Get complete execution snapshot in a single DB transaction.
 
@@ -178,8 +170,8 @@ class LiveExecutionMonitor:
             - had_db_error is True only when an actual exception occurred,
               not when execution row is simply missing (normal during startup race)
         """
-        statuses: Dict[str, str] = {}
-        outputs: Dict[str, Any] = {}
+        statuses: dict[str, str] = {}
+        outputs: dict[str, Any] = {}
         exec_status = "pending"  # Default to pending, not unknown
         had_db_error = False
 
@@ -209,15 +201,11 @@ class LiveExecutionMonitor:
                             # NOTE: Normalize to string before truncation - SQLite adapters
                             # may return bytes, and "bytes[:40] + '...'" raises TypeError
                             if isinstance(output_summary, (bytes, bytearray)):
-                                summary_str = output_summary.decode(
-                                    "utf-8", errors="replace"
-                                )
+                                summary_str = output_summary.decode("utf-8", errors="replace")
                             else:
                                 summary_str = str(output_summary)
                             outputs[node_id] = (
-                                summary_str[:40] + "..."
-                                if len(summary_str) > 40
-                                else summary_str
+                                summary_str[:40] + "..." if len(summary_str) > 40 else summary_str
                             )
                     else:
                         outputs[node_id] = None

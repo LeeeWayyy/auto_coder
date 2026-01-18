@@ -505,9 +505,7 @@ def status(workflow_id: str | None, execution_id: str | None) -> None:
     db_path = repo_path / ".supervisor" / "state.db"
 
     if not db_path.exists():
-        console.print(
-            "[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]"
-        )
+        console.print("[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]")
         return
 
     db = Database(db_path)
@@ -541,9 +539,7 @@ def status(workflow_id: str | None, execution_id: str | None) -> None:
 
         # Handle missing workflow definition gracefully
         if not workflow_row:
-            console.print(
-                f"[red]Workflow definition not found for execution '{safe_exec_id}'[/]"
-            )
+            console.print(f"[red]Workflow definition not found for execution '{safe_exec_id}'[/]")
             return
 
         workflow = WorkflowGraph.model_validate_json(workflow_row[0])
@@ -596,9 +592,7 @@ def status(workflow_id: str | None, execution_id: str | None) -> None:
 @click.option("--workflow-id", required=True, help="Unique workflow execution ID")
 @click.option("--validate-only", is_flag=True, help="Only validate, don't execute")
 @click.option("--live", is_flag=True, help="Show live execution monitor")
-def run_graph(
-    workflow_file: str, workflow_id: str, validate_only: bool, live: bool
-) -> None:
+def run_graph(workflow_file: str, workflow_id: str, validate_only: bool, live: bool) -> None:
     """Execute a declarative workflow graph from YAML."""
     # Load workflow YAML with proper error handling
     try:
@@ -713,9 +707,7 @@ def inspect(execution_id: str, node: str | None, interactive: bool) -> None:
     db_path = repo_path / ".supervisor" / "state.db"
 
     if not db_path.exists():
-        console.print(
-            "[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]"
-        )
+        console.print("[yellow]No supervisor database found. Run 'supervisor init' first.[/yellow]")
         return
 
     db = Database(db_path)

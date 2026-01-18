@@ -4,7 +4,6 @@ Provides one-shot and interactive modes for inspecting node execution details.
 """
 
 import json
-from typing import Dict, Optional
 
 from rich.console import Console, Group
 from rich.markup import escape
@@ -41,7 +40,7 @@ class NodeInspector:
         self.db = db
         self.console = Console()
 
-    def _get_statuses(self, execution_id: str) -> Dict[str, str]:
+    def _get_statuses(self, execution_id: str) -> dict[str, str]:
         """Get all node statuses for display."""
         try:
             with self.db._connect() as conn:
@@ -57,7 +56,7 @@ class NodeInspector:
         self,
         execution_id: str,
         workflow: WorkflowGraph,
-        node_id: Optional[str] = None,
+        node_id: str | None = None,
     ):
         """
         One-shot inspection: show node details and exit.
@@ -223,9 +222,7 @@ class NodeInspector:
                 output_json = json.loads(output_data)
                 self.console.print(
                     Panel(
-                        Syntax(
-                            json.dumps(output_json, indent=2), "json", theme="monokai"
-                        ),
+                        Syntax(json.dumps(output_json, indent=2), "json", theme="monokai"),
                         title="Output Data",
                     )
                 )
@@ -239,6 +236,4 @@ class NodeInspector:
 
         # Error - escape to prevent markup injection
         if error:
-            self.console.print(
-                Panel(f"[red]{escape(str(error))}[/]", title="Error", style="red")
-            )
+            self.console.print(Panel(f"[red]{escape(str(error))}[/]", title="Error", style="red"))

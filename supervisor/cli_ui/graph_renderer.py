@@ -3,7 +3,7 @@
 Provides ASCII art and tree-based visualization of workflow graphs using Rich.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import networkx as nx
 from rich.console import Console
@@ -57,26 +57,26 @@ class TerminalGraphRenderer:
     }
 
     @staticmethod
-    def _normalize_status(status: Optional[NodeStatus | str]) -> str:
+    def _normalize_status(status: NodeStatus | str | None) -> str:
         """Normalize status to string for consistent lookup."""
         if isinstance(status, NodeStatus):
             return status.value
         return str(status) if status else "pending"
 
-    def __init__(self, console: Optional[Console] = None):
+    def __init__(self, console: Console | None = None):
         self.console = console or Console()
 
-    def _build_node_map(self, workflow: WorkflowGraph) -> Dict[str, Node]:
+    def _build_node_map(self, workflow: WorkflowGraph) -> dict[str, Node]:
         """Build O(1) lookup map for nodes by ID."""
         return {n.id: n for n in workflow.nodes}
 
-    def _build_edge_map(self, workflow: WorkflowGraph) -> Dict[str, List[Edge]]:
+    def _build_edge_map(self, workflow: WorkflowGraph) -> dict[str, list[Edge]]:
         """Build O(1) lookup map for outgoing edges by source node ID.
 
         Performance: Precomputing this avoids O(N*E) traversal in tree rendering,
         reducing to O(N+E) total instead.
         """
-        edge_map: Dict[str, List[Edge]] = {n.id: [] for n in workflow.nodes}
+        edge_map: dict[str, list[Edge]] = {n.id: [] for n in workflow.nodes}
         for edge in workflow.edges:
             if edge.source in edge_map:
                 edge_map[edge.source].append(edge)
@@ -85,7 +85,7 @@ class TerminalGraphRenderer:
     def render_graph(
         self,
         workflow: WorkflowGraph,
-        statuses: Optional[Dict[str, NodeStatus | str]] = None,
+        statuses: dict[str, NodeStatus | str] | None = None,
     ) -> str:
         """
         Render workflow graph as ASCII.
@@ -124,9 +124,7 @@ class TerminalGraphRenderer:
 
                 # Apply status color if available
                 # Normalize status to string for consistent lookup
-                status = (
-                    self._normalize_status(statuses.get(node_id)) if statuses else None
-                )
+                status = self._normalize_status(statuses.get(node_id)) if statuses else None
                 if status and status != "pending":
                     status_color = self.STATUS_COLORS.get(status, "white")
                     node_str = f"[{status_color}]{symbol} {safe_label}[/]"
@@ -148,7 +146,7 @@ class TerminalGraphRenderer:
     def render_as_tree(
         self,
         workflow: WorkflowGraph,
-        statuses: Optional[Dict[str, NodeStatus | str]] = None,
+        statuses: dict[str, NodeStatus | str] | None = None,
         max_depth: int = 50,
     ) -> Tree:
         """
@@ -194,9 +192,9 @@ class TerminalGraphRenderer:
         self,
         parent: Tree,
         node: Node,
-        statuses: Optional[Dict[str, str]],
-        node_map: Dict[str, Node],
-        edge_map: Dict[str, List[Edge]],
+        statuses: dict[str, str] | None,
+        node_map: dict[str, Node],
+        edge_map: dict[str, list[Edge]],
         visited: set,
         depth: int = 0,
         max_depth: int = 50,
@@ -250,9 +248,7 @@ class TerminalGraphRenderer:
                 if edge.condition:
                     safe_field = escape(str(edge.condition.field))
                     safe_op = escape(str(edge.condition.operator))
-                    safe_val = escape(
-                        str(edge.condition.value)[:50]
-                    )  # Truncate long values
+                    safe_val = escape(str(edge.condition.value)[:50])  # Truncate long values
                     condition_label = f"[dim]({safe_field} {safe_op} {safe_val})[/]"
                     edge_branch = branch.add(condition_label)
                     self._add_node_to_tree(
@@ -285,15 +281,15 @@ class StatusTableRenderer:
     to prevent Rich markup injection.
     """
 
-    def __init__(self, console: Optional[Console] = None):
+    def __init__(self, console: Console | None = None):
         self.console = console or Console()
 
     def render_status_table(
         self,
         workflow: WorkflowGraph,
         execution_id: str,
-        statuses: Dict[str, NodeStatus | str],
-        outputs: Optional[Dict[str, Any]] = None,
+        statuses: dict[str, NodeStatus | str],
+        outputs: dict[str, Any] | None = None,
     ) -> Table:
         """
         Render execution status as a table.

@@ -9,7 +9,7 @@ This package provides rich terminal UI capabilities for:
 - Status dashboards
 """
 
-from supervisor.cli_ui.graph_renderer import TerminalGraphRenderer, StatusTableRenderer
+from supervisor.cli_ui.graph_renderer import StatusTableRenderer, TerminalGraphRenderer
 from supervisor.cli_ui.live_monitor import LiveExecutionMonitor
 from supervisor.cli_ui.node_inspector import NodeInspector
 
