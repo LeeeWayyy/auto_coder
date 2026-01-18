@@ -13,6 +13,7 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import sys
 import uuid
 from pathlib import Path
@@ -533,7 +534,7 @@ def status(workflow_id: str | None, execution_id: str | None) -> None:
                 """,
                     (execution_id,),
                 ).fetchone()
-        except Exception as e:
+        except sqlite3.Error as e:
             console.print(f"[red]Database error: {e}[/]")
             return
 

@@ -49,7 +49,9 @@ class NodeInspector:
                     (execution_id,),
                 ).fetchall()
                 return {row[0]: row[1] for row in rows}
-        except Exception:
+        except Exception as e:
+            # Log the error for debugging but return empty dict for graceful UI fallback
+            self.console.print(f"[dim]DB error while fetching statuses: {escape(str(e))}[/]")
             return {}
 
     def inspect_node(
@@ -82,8 +84,9 @@ class NodeInspector:
                 safe_id = escape(node.id)
                 safe_label = escape(node.label or node.id)
                 # SECURITY: Escape status from DB to prevent Rich markup injection
+                # NOTE: Use \[ and \] to escape brackets so Rich doesn't interpret as markup tags
                 safe_status = escape(str(status))
-                self.console.print(f"  {safe_id}: {safe_label} [{safe_status}]")
+                self.console.print(f"  {safe_id}: {safe_label} \\[{safe_status}\\]")
 
     def inspect_interactive(self, execution_id: str, workflow: WorkflowGraph):
         """

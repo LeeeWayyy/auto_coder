@@ -204,8 +204,9 @@ class LiveExecutionMonitor:
                                 summary_str = output_summary.decode("utf-8", errors="replace")
                             else:
                                 summary_str = str(output_summary)
+                            # NOTE: Use [:37] + "..." to respect 40-char limit (consistent with StatusTableRenderer)
                             outputs[node_id] = (
-                                summary_str[:40] + "..." if len(summary_str) > 40 else summary_str
+                                summary_str[:37] + "..." if len(summary_str) > 40 else summary_str
                             )
                     else:
                         outputs[node_id] = None
