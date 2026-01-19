@@ -231,7 +231,7 @@ class ExecutionResponse(BaseModel):
     workflow_id: str
     graph_id: str
     status: str
-    started_at: str
+    started_at: str | None = None
     completed_at: str | None = None
     error: str | None = None
 
@@ -671,7 +671,7 @@ def list_executions(
             workflow_id=row[1],
             graph_id=row[2],
             status=row[3],
-            started_at=str(row[4]) if row[4] else "",
+            started_at=str(row[4]) if row[4] else None,
             completed_at=str(row[5]) if row[5] else None,
             error=row[6],
         )
@@ -702,7 +702,7 @@ def get_execution(execution_id: str) -> ExecutionResponse:
         workflow_id=row[0],
         graph_id=row[1],
         status=row[2],
-        started_at=str(row[3]) if row[3] else "",
+        started_at=str(row[3]) if row[3] else None,
         completed_at=str(row[4]) if row[4] else None,
         error=row[5],
     )

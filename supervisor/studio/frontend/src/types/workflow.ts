@@ -93,7 +93,7 @@ export interface ExecutionResponse {
   workflow_id: string;
   graph_id: string;
   status: ExecutionStatus;
-  started_at: string;
+  started_at?: string | null;
   completed_at?: string | null;
   error?: string | null;
 }
