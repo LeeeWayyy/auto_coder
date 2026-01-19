@@ -187,7 +187,8 @@ class GraphOrchestrator:
             return
 
         try:
-            callback(node_id, status, output or {}, version)
+            # Use empty dict only for None, preserve other falsy values (0, "", [], etc.)
+            callback(node_id, status, output if output is not None else {}, version)
         except Exception as e:
             logger.warning(f"Status callback error for {execution_id}/{node_id}: {e}")
 

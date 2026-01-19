@@ -521,7 +521,7 @@ async def _run_execution_with_events(execution_id: str):
                     """,
                     (error_msg, execution_id),
                 )
-                conn.commit()
+                # Note: db._connect() context manager handles commit on exit
 
         await run_in_threadpool(mark_failed)
 
@@ -595,7 +595,7 @@ async def cancel_execution(execution_id: str) -> dict[str, str]:
                 """,
                 (execution_id,),
             )
-            conn.commit()
+            # Note: db._connect() context manager handles commit on exit
 
             # Then fetch all final node states
             rows = conn.execute(
@@ -649,9 +649,9 @@ def list_executions(
         if workflow_id:
             conditions.append("workflow_id = ?")
             params.append(workflow_id)
-
-        if source_graph_id:
+        elif source_graph_id:
             # Use workflow_id filter (defaults to graph_id when not overridden)
+            # Note: workflow_id takes precedence if both are provided
             conditions.append("workflow_id = ?")
             params.append(source_graph_id)
 
@@ -715,7 +715,14 @@ def get_execution_nodes(
 
     Args:
         execution_id: The execution ID
-        since_version: Optional - only return nodes with version > this value
+        since_version: Optional - only return nodes with version > this value.
+            IMPORTANT: Node versions are incremented per-node, not globally.
+            Using since_version may miss updates on nodes with lower versions
+            than the cutoff. For complete state, omit this parameter.
+            This filter is primarily useful for detecting if ANY updates have
+            occurred (non-empty response means something changed), not for
+            incremental state synchronization. For real-time updates, use the
+            WebSocket endpoint instead.
     """
     db = get_db()
 
