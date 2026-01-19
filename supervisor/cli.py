@@ -742,6 +742,62 @@ def inspect(execution_id: str, node: str | None, interactive: bool) -> None:
 
 
 @main.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+@click.option("--port", default=8000, type=int, help="Port to bind to (default: 8000)")
+@click.option("--reload", is_flag=True, help="Enable auto-reload for development")
+def studio(host: str, port: int, reload: bool) -> None:
+    """Launch the Supervisor Studio web UI.
+
+    Starts a local web server for visual workflow management.
+
+    Example:
+        supervisor studio
+        supervisor studio --port 3000
+        supervisor studio --reload  # Development mode
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "[red]Error:[/red] uvicorn is required for the studio. "
+            "Install it with: pip install uvicorn"
+        )
+        sys.exit(1)
+
+    # Check if running on non-localhost (security warning)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        console.print(
+            f"[yellow]Warning:[/yellow] Binding to {host} exposes the server externally. "
+            "The studio has no authentication - only bind to localhost in production."
+        )
+        if not click.confirm("Continue anyway?"):
+            return
+
+    console.print(
+        Panel(
+            f"[green]Starting Supervisor Studio[/green]\n\n"
+            f"URL: http://{host}:{port}\n"
+            f"API: http://{host}:{port}/api\n\n"
+            f"Press Ctrl+C to stop",
+            title="Supervisor Studio",
+        )
+    )
+
+    # Pass port to server for dynamic CORS origin configuration
+    import os
+
+    os.environ["SUPERVISOR_STUDIO_PORT"] = str(port)
+
+    uvicorn.run(
+        "supervisor.studio.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
+
+
+@main.command()
 def version() -> None:
     """Show version information."""
     from supervisor import __version__
