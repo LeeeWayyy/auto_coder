@@ -12,7 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import uuid
+from collections.abc import Callable
+from datetime import datetime
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
@@ -132,6 +135,61 @@ class GraphOrchestrator:
         self.gate_loader = gate_loader
         self.semaphore = asyncio.Semaphore(max_parallel)
         self.approval_gate = ApprovalGate(db)
+        # Status callbacks for real-time WebSocket updates (Phase 3)
+        # Protected by lock for thread-safety (callbacks invoked from worker threads)
+        # Callback signature: (node_id, status, output, version) -> None
+        self._status_callbacks: dict[str, Callable[[str, str, dict, int], None]] = {}
+        self._callbacks_lock = threading.Lock()
+
+    def register_status_callback(
+        self, execution_id: str, callback: Callable[[str, str, dict, int], None]
+    ) -> None:
+        """Register a callback to be invoked when node status changes.
+
+        Args:
+            execution_id: The execution to monitor
+            callback: Function(node_id, status, output, version) called on status change
+                      - node_id: ID of the node that changed
+                      - status: New status value
+                      - output: Node output data
+                      - version: DB version number for this state (for ordering)
+
+        Note: Callbacks may be invoked from either the main event loop (after await
+        in _execute_node) or from threadpool threads (in _claim_ready_nodes). The
+        callback implementation should be thread-safe and use
+        asyncio.run_coroutine_threadsafe() for async operations.
+        """
+        with self._callbacks_lock:
+            self._status_callbacks[execution_id] = callback
+
+    def unregister_status_callback(self, execution_id: str) -> None:
+        """Remove callback for an execution."""
+        with self._callbacks_lock:
+            self._status_callbacks.pop(execution_id, None)
+
+    def _invoke_status_callback(
+        self, execution_id: str, node_id: str, status: str, output: dict | None = None, version: int = 0
+    ) -> None:
+        """Invoke status callback if registered.
+
+        Called after transaction commits to ensure data consistency.
+        Thread-safe: uses lock to snapshot callback before invocation.
+
+        Args:
+            version: DB version number for this state change (passed directly from
+                     transaction to avoid race between status and version).
+        """
+        # Snapshot callback under lock to avoid race with unregister
+        with self._callbacks_lock:
+            callback = self._status_callbacks.get(execution_id)
+
+        if callback is None:
+            return
+
+        try:
+            callback(node_id, status, output or {}, version)
+        except Exception as e:
+            logger.warning(f"Status callback error for {execution_id}/{node_id}: {e}")
 
     # ========== Database Transaction Helpers ==========
 
@@ -284,10 +342,11 @@ class GraphOrchestrator:
         node_id: str,
         new_status: NodeStatus,
         expected_status: NodeStatus,
-    ) -> bool:
+    ) -> tuple[bool, int]:
         """
         Set node status only if current status matches expected.
-        Returns True if update was applied, False if status had changed.
+        Returns (success, new_version): success is True if update was applied,
+        new_version is the version after update (0 if not updated).
         This prevents race conditions where a concurrent worker changed the status.
         """
         result = conn.execute(
@@ -297,7 +356,14 @@ class GraphOrchestrator:
         """,
             (new_status.value, execution_id, node_id, expected_status.value),
         )
-        return result.rowcount > 0
+        if result.rowcount > 0:
+            # Fetch the new version within the same transaction
+            row = conn.execute(
+                "SELECT version FROM node_executions WHERE execution_id=? AND node_id=?",
+                (execution_id, node_id),
+            ).fetchone()
+            return (True, row[0] if row else 0)
+        return (False, 0)
 
     def _get_workflow(self, execution_id: str) -> WorkflowGraph:
         """Load workflow definition for an execution."""
@@ -356,7 +422,17 @@ class GraphOrchestrator:
             return row[0] if row else 0
 
     def _increment_loop_counter(self, execution_id: str, loop_key: str):
-        """Increment loop iteration counter."""
+        """Increment loop iteration counter.
+
+        Known limitation: This counter is incremented in a separate transaction
+        before persist_completion commits the node result. If the worker crashes
+        between incrementing and persist_completion, the counter will be
+        incremented again on retry. This is acceptable for most use cases since:
+        1. Crashes mid-execution are rare
+        2. Loop max_iterations provides an upper bound safety
+        3. Fixing requires complex refactoring to bundle counter update with
+           persist_completion, which would complicate the branching logic
+        """
         with self.db._connect() as conn:
             conn.execute(
                 """
@@ -399,6 +475,33 @@ class GraphOrchestrator:
                 (execution_id, node_id),
             ).fetchone()
             return json.loads(row[0]) if row and row[0] else None
+
+    def cancel_execution(self, execution_id: str) -> bool:
+        """Cancel a running execution.
+
+        Sets execution status to 'cancelled' and prevents new nodes from being claimed.
+        NOTE: This does NOT stop currently running tasks - they will complete but their
+        results will be ignored. This is a known limitation for the MVP.
+
+        Returns:
+            True if cancellation was successful, False if execution was not running
+        """
+        with self.db._connect() as conn:
+            result = conn.execute(
+                """
+                UPDATE graph_executions
+                SET status = 'cancelled', completed_at = ?
+                WHERE id = ? AND status = 'running'
+            """,
+                (datetime.utcnow(), execution_id),
+            )
+
+            if result.rowcount == 0:
+                return False
+
+            # Unregister any status callback
+            self.unregister_status_callback(execution_id)
+            return True
 
     # ========== Workflow Lifecycle ==========
 
@@ -536,12 +639,21 @@ class GraphOrchestrator:
             Caller should check stale_failed_node_ids with fail_fast config.
         """
 
-        def claim_nodes(db, exec_id, max_limit, stale_timeout, should_fail_fast):
+        def claim_nodes(orchestrator, db, exec_id, max_limit, stale_timeout, should_fail_fast):
             with db._connect() as conn:
-                claimed = []
-                stale_failed = []
+                claimed = []  # List of (node_id, version) tuples
+                stale_failed = []  # List of (node_id, version) tuples
                 conn.execute("BEGIN IMMEDIATE")
                 try:
+                    # Guard: Skip claiming if execution was cancelled to prevent
+                    # race condition where new nodes are claimed after cancellation
+                    exec_row = conn.execute(
+                        "SELECT status FROM graph_executions WHERE id=?", (exec_id,)
+                    ).fetchone()
+                    if exec_row and exec_row[0] == "cancelled":
+                        conn.commit()
+                        return [], []
+
                     # First, mark stale RUNNING nodes as FAILED (crash recovery)
                     # Instead of requeueing (which risks duplicate execution if a node
                     # is legitimately long-running), we mark them failed with a clear
@@ -572,18 +684,33 @@ class GraphOrchestrator:
                                 stale_node_id,
                             ),
                         )
-                        stale_failed.append(stale_node_id)
+                        # Get the new version for the callback
+                        row = conn.execute(
+                            "SELECT version FROM node_executions WHERE execution_id=? AND node_id=?",
+                            (exec_id, stale_node_id),
+                        ).fetchone()
+                        stale_failed.append((stale_node_id, row[0] if row else 0))
                     if stale_failed:
                         logger.warning(
                             f"Marked {len(stale_failed)} stale RUNNING node(s) as FAILED for "
                             f"execution {exec_id} (exceeded {stale_timeout}s timeout). "
-                            f"Nodes: {stale_failed}"
+                            f"Nodes: {[nid for nid, _ in stale_failed]}"
                         )
                         # If fail_fast is enabled, don't claim new nodes - this prevents
                         # orphaned RUNNING nodes that would never be executed
                         if should_fail_fast:
                             conn.commit()
-                            return [], stale_failed
+                            # Invoke callbacks for stale failed nodes after commit
+                            for node_id, version in stale_failed:
+                                orchestrator._invoke_status_callback(
+                                    exec_id,
+                                    node_id,
+                                    NodeStatus.FAILED.value,
+                                    {"error": f"Stale node timeout ({stale_timeout}s)"},
+                                    version,
+                                )
+                            # Return only node IDs (not tuples) as documented in return type
+                            return [], [nid for nid, _ in stale_failed]
 
                     # Count currently running nodes to enforce global parallelism limit
                     running_count = conn.execute(
@@ -615,16 +742,37 @@ class GraphOrchestrator:
                             (exec_id, node_id),
                         )
                         if result.rowcount > 0:
-                            claimed.append(node_id)
+                            # Get the new version for the callback
+                            row = conn.execute(
+                                "SELECT version FROM node_executions WHERE execution_id=? AND node_id=?",
+                                (exec_id, node_id),
+                            ).fetchone()
+                            claimed.append((node_id, row[0] if row else 0))
 
                     conn.commit()
                 except Exception:
                     conn.rollback()
                     raise
-                return claimed, stale_failed
+
+                # Invoke callbacks after transaction commits
+                for node_id, version in stale_failed:
+                    orchestrator._invoke_status_callback(
+                        exec_id,
+                        node_id,
+                        NodeStatus.FAILED.value,
+                        {"error": f"Stale node timeout ({stale_timeout}s)"},
+                        version,
+                    )
+                for node_id, version in claimed:
+                    orchestrator._invoke_status_callback(
+                        exec_id, node_id, NodeStatus.RUNNING.value, {}, version
+                    )
+
+                # Return only node IDs (not tuples) as documented in return type
+                return [nid for nid, _ in claimed], [nid for nid, _ in stale_failed]
 
         return await asyncio.to_thread(
-            claim_nodes, self.db, execution_id, limit, stale_timeout_seconds, fail_fast
+            claim_nodes, self, self.db, execution_id, limit, stale_timeout_seconds, fail_fast
         )
 
     async def _check_workflow_state(self, execution_id: str, workflow: WorkflowGraph):
@@ -655,22 +803,34 @@ class GraphOrchestrator:
                 await self._fail_workflow(execution_id, "No exit point reached")
 
     async def _complete_workflow(self, execution_id: str):
-        """Mark workflow as completed."""
+        """Mark workflow as completed.
+
+        Guarded: Does not overwrite 'cancelled' status to prevent race
+        with cancel_execution().
+        """
 
         def complete(conn, exec_id):
             conn.execute(
-                "UPDATE graph_executions SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?",
+                """UPDATE graph_executions
+                   SET status='completed', completed_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND status != 'cancelled'""",
                 (exec_id,),
             )
 
         await asyncio.to_thread(self._run_in_transaction, complete, execution_id)
 
     async def _fail_workflow(self, execution_id: str, error: str):
-        """Mark workflow as failed."""
+        """Mark workflow as failed.
+
+        Guarded: Does not overwrite 'cancelled' status to prevent race
+        with cancel_execution().
+        """
 
         def fail(conn, exec_id, err):
             conn.execute(
-                "UPDATE graph_executions SET status='failed', completed_at=CURRENT_TIMESTAMP, error=? WHERE id=?",
+                """UPDATE graph_executions
+                   SET status='failed', completed_at=CURRENT_TIMESTAMP, error=?
+                   WHERE id=? AND status != 'cancelled'""",
                 (err, exec_id),
             )
 
@@ -732,7 +892,7 @@ class GraphOrchestrator:
 
                 def persist_gate_failure(conn, exec_id, n_id, out):
                     # Use guarded update to handle race with loop resets
-                    updated = self._set_node_status_guarded(
+                    updated, version = self._set_node_status_guarded(
                         conn, exec_id, n_id, NodeStatus.FAILED, expected_status=NodeStatus.RUNNING
                     )
                     if updated:
@@ -742,18 +902,24 @@ class GraphOrchestrator:
                             "UPDATE node_executions SET error=? WHERE execution_id=? AND node_id=?",
                             (f"Gate failed: {out.get('output', 'unknown')}", exec_id, n_id),
                         )
-                    return updated
+                    return (updated, version)
 
-                failed = await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     self._run_in_transaction,
                     persist_gate_failure,
                     execution_id,
                     node_id,
                     output,
                 )
+                failed, fail_version = result
 
-                if failed and workflow.config.fail_fast:
-                    await self._fail_workflow(execution_id, f"Gate '{node_id}' failed")
+                # Invoke callback after transaction commits
+                if failed:
+                    self._invoke_status_callback(
+                        execution_id, node_id, NodeStatus.FAILED.value, output, fail_version
+                    )
+                    if workflow.config.fail_fast:
+                        await self._fail_workflow(execution_id, f"Gate '{node_id}' failed")
                 return False
 
             # Persist output and update dependents atomically
@@ -762,15 +928,23 @@ class GraphOrchestrator:
             def persist_completion(conn, exec_id, n_id, out, wf):
                 # Guarded update: only complete if still RUNNING
                 # This prevents stale completions from overwriting loop resets
-                updated = self._set_node_status_guarded(
+                updated, version = self._set_node_status_guarded(
                     conn, exec_id, n_id, NodeStatus.COMPLETED, expected_status=NodeStatus.RUNNING
                 )
+                skipped: list[tuple[str, int]] = []  # (node_id, version) tuples
                 if updated:
                     self._set_node_output(conn, exec_id, n_id, out)
-                    self._update_dependents(conn, exec_id, wf, n_id, out)
-                return updated
+                    skipped_ids = self._update_dependents(conn, exec_id, wf, n_id, out)
+                    # Get versions for skipped nodes within the same transaction
+                    for skipped_id in skipped_ids:
+                        row = conn.execute(
+                            "SELECT version FROM node_executions WHERE execution_id=? AND node_id=?",
+                            (exec_id, skipped_id),
+                        ).fetchone()
+                        skipped.append((skipped_id, row[0] if row else 0))
+                return (updated, version, skipped)
 
-            completed = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._run_in_transaction,
                 persist_completion,
                 execution_id,
@@ -778,7 +952,19 @@ class GraphOrchestrator:
                 output,
                 workflow,
             )
-            if not completed:
+            completed, complete_version, skipped_nodes = result
+
+            # Invoke callbacks after transaction commits
+            if completed:
+                self._invoke_status_callback(
+                    execution_id, node_id, NodeStatus.COMPLETED.value, output, complete_version
+                )
+                # Also broadcast SKIPPED status for nodes skipped by branch routing
+                for skipped_id, skipped_version in skipped_nodes:
+                    self._invoke_status_callback(
+                        execution_id, skipped_id, NodeStatus.SKIPPED.value, {}, skipped_version
+                    )
+            else:
                 # Node was reset (e.g., by loop restart) - don't count as success
                 logger.info(
                     f"Node {node_id} completion discarded (status changed during execution)"
@@ -790,7 +976,7 @@ class GraphOrchestrator:
 
             def persist_failure(conn, exec_id, n_id, err):
                 # Use guarded update to handle race with loop resets
-                updated = self._set_node_status_guarded(
+                updated, version = self._set_node_status_guarded(
                     conn, exec_id, n_id, NodeStatus.FAILED, expected_status=NodeStatus.RUNNING
                 )
                 if updated:
@@ -798,14 +984,20 @@ class GraphOrchestrator:
                         "UPDATE node_executions SET error=? WHERE execution_id=? AND node_id=?",
                         (err, exec_id, n_id),
                     )
-                return updated
+                return (updated, version)
 
-            failed = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._run_in_transaction, persist_failure, execution_id, node_id, str(e)
             )
+            failed, fail_version = result
 
-            if failed and workflow.config.fail_fast:
-                await self._fail_workflow(execution_id, str(e))
+            # Invoke callback after transaction commits
+            if failed:
+                self._invoke_status_callback(
+                    execution_id, node_id, NodeStatus.FAILED.value, {"error": str(e)}, fail_version
+                )
+                if workflow.config.fail_fast:
+                    await self._fail_workflow(execution_id, str(e))
             raise
 
     def _collect_inputs(
@@ -907,7 +1099,7 @@ class GraphOrchestrator:
         workflow: WorkflowGraph,
         completed_id: str,
         output: Any,
-    ):
+    ) -> list[str]:
         """
         After node completes, update downstream nodes.
 
@@ -918,7 +1110,21 @@ class GraphOrchestrator:
         - Handles loop re-execution
         - Respects wait_for_incoming policy
         - Uses same transaction for reads/writes to prevent race conditions
+        - Skips updates if execution was cancelled (prevents race with cancel)
+
+        Returns:
+            List of node IDs that were marked as SKIPPED (for callback invocation)
         """
+        skipped_nodes: list[str] = []
+
+        # Guard: Skip if execution was cancelled to prevent advancing workflow
+        # after cancellation. This check is inside the same transaction.
+        row = conn.execute(
+            "SELECT status FROM graph_executions WHERE id=?", (execution_id,)
+        ).fetchone()
+        if row and row[0] == "cancelled":
+            logger.debug(f"Skipping dependent updates for {completed_id}: execution cancelled")
+            return skipped_nodes
         # Get the completed node to check if it's a BRANCH
         completed_node = next((n for n in workflow.nodes if n.id == completed_id), None)
 
@@ -975,13 +1181,15 @@ class GraphOrchestrator:
                         non_selected_node and non_selected_node.wait_for_incoming == "all"
                     )
                     if should_skip:
-                        self._set_node_status_guarded(
+                        was_skipped, _ = self._set_node_status_guarded(
                             conn,
                             execution_id,
                             non_selected,
                             NodeStatus.SKIPPED,
                             expected_status=NodeStatus.PENDING,
                         )
+                        if was_skipped:
+                            skipped_nodes.append(non_selected)
 
         for edge in [e for e in workflow.edges if e.source == completed_id]:
             # BRANCH ROUTING: Skip edges that don't match the branch decision
@@ -1016,6 +1224,7 @@ class GraphOrchestrator:
                     ):
                         # Reset to PENDING (not READY) to preserve dependency ordering
                         # Only the loop entry node will be marked READY below
+                        # Ignore version return - internal loop reset doesn't need callback
                         self._set_node_status_guarded(
                             conn,
                             execution_id,
@@ -1030,6 +1239,7 @@ class GraphOrchestrator:
                 # and loops only execute once.
                 branch_status = self._get_node_status_in_txn(conn, execution_id, completed_id)
                 if branch_status == NodeStatus.COMPLETED.value:
+                    # Ignore version return - internal loop reset doesn't need callback
                     self._set_node_status_guarded(
                         conn,
                         execution_id,
@@ -1042,6 +1252,7 @@ class GraphOrchestrator:
                 # Mark only the loop entry node as READY to start the iteration
                 entry_status = self._get_node_status_in_txn(conn, execution_id, edge.target)
                 if entry_status == NodeStatus.PENDING.value:
+                    # Ignore version return - internal state update
                     self._set_node_status_guarded(
                         conn,
                         execution_id,
@@ -1065,6 +1276,8 @@ class GraphOrchestrator:
                     NodeStatus.READY,
                     expected_status=NodeStatus.PENDING,
                 )
+
+        return skipped_nodes
 
     def _find_loop_cycle_nodes(
         self, workflow: WorkflowGraph, start_node: str, end_node: str
@@ -1349,12 +1562,17 @@ class GraphOrchestrator:
                             expected_status=NodeStatus.PENDING,
                         )
 
-                    updated = await asyncio.to_thread(
+                    result = await asyncio.to_thread(
                         self._run_in_transaction, mark_skipped, execution_id, node.id
                     )
+                    updated, skip_version = result
                     if updated:
                         statuses[node.id] = NodeStatus.SKIPPED.value
                         changed = True
+                        # Broadcast SKIPPED status to WebSocket clients
+                        self._invoke_status_callback(
+                            execution_id, node.id, NodeStatus.SKIPPED.value, {}, skip_version
+                        )
                     # If not updated, node was already claimed - will be handled on next pass
 
     # ========== Node Type Implementations ==========
@@ -1552,6 +1770,10 @@ class GraphOrchestrator:
         Returns nodes in the order they actually completed, which is essential
         for merge_strategy=first to honor the chronological completion order
         rather than the edge definition order.
+
+        NOTE: SQLite's CURRENT_TIMESTAMP has 1-second resolution. We use
+        the version column as a tie-breaker since it's atomically incremented
+        with each status update, providing sub-second ordering determinism.
         """
         with self.db._connect() as conn:
             placeholders = ",".join("?" * len(node_ids))
@@ -1560,7 +1782,7 @@ class GraphOrchestrator:
                 SELECT node_id, completed_at FROM node_executions
                 WHERE execution_id=? AND node_id IN ({placeholders})
                 AND completed_at IS NOT NULL
-                ORDER BY completed_at ASC
+                ORDER BY completed_at ASC, version ASC
                 """,
                 (execution_id, *node_ids),
             ).fetchall()
