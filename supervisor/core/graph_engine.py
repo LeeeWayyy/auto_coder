@@ -729,6 +729,16 @@ class GraphOrchestrator:
                     effective_limit = max(0, max_limit - running_count)
                     if effective_limit == 0:
                         conn.commit()
+                        # Broadcast stale failures even when no slots available
+                        # This ensures WebSocket clients update UI state correctly
+                        for node_id, version in stale_failed:
+                            orchestrator._invoke_status_callback(
+                                exec_id,
+                                node_id,
+                                NodeStatus.FAILED.value,
+                                {"error": f"Stale node timeout ({stale_timeout}s)"},
+                                version,
+                            )
                         return claimed, stale_failed
 
                     rows = conn.execute(
@@ -938,9 +948,10 @@ class GraphOrchestrator:
                     conn, exec_id, n_id, NodeStatus.COMPLETED, expected_status=NodeStatus.RUNNING
                 )
                 skipped: list[tuple[str, int]] = []  # (node_id, version) tuples
+                ready: list[tuple[str, int]] = []  # (node_id, version) tuples
                 if updated:
                     self._set_node_output(conn, exec_id, n_id, out)
-                    skipped_ids = self._update_dependents(conn, exec_id, wf, n_id, out)
+                    skipped_ids, ready_ids = self._update_dependents(conn, exec_id, wf, n_id, out)
                     # Get versions for skipped nodes within the same transaction
                     for skipped_id in skipped_ids:
                         row = conn.execute(
@@ -948,7 +959,14 @@ class GraphOrchestrator:
                             (exec_id, skipped_id),
                         ).fetchone()
                         skipped.append((skipped_id, row[0] if row else 0))
-                return (updated, version, skipped)
+                    # Get versions for ready nodes within the same transaction
+                    for ready_id in ready_ids:
+                        row = conn.execute(
+                            "SELECT version FROM node_executions WHERE execution_id=? AND node_id=?",
+                            (exec_id, ready_id),
+                        ).fetchone()
+                        ready.append((ready_id, row[0] if row else 0))
+                return (updated, version, skipped, ready)
 
             result = await asyncio.to_thread(
                 self._run_in_transaction,
@@ -958,17 +976,24 @@ class GraphOrchestrator:
                 output,
                 workflow,
             )
-            completed, complete_version, skipped_nodes = result
+            completed, complete_version, skipped_nodes, ready_nodes = result
 
             # Invoke callbacks after transaction commits
             if completed:
                 self._invoke_status_callback(
                     execution_id, node_id, NodeStatus.COMPLETED.value, output, complete_version
                 )
-                # Also broadcast SKIPPED status for nodes skipped by branch routing
+                # Broadcast SKIPPED status for nodes skipped by branch routing
                 for skipped_id, skipped_version in skipped_nodes:
                     self._invoke_status_callback(
                         execution_id, skipped_id, NodeStatus.SKIPPED.value, {}, skipped_version
+                    )
+                # Broadcast READY status for nodes that became runnable
+                # This allows WebSocket clients to show nodes as queued when max_parallel_nodes
+                # prevents immediate execution
+                for ready_id, ready_version in ready_nodes:
+                    self._invoke_status_callback(
+                        execution_id, ready_id, NodeStatus.READY.value, {}, ready_version
                     )
             else:
                 # Node was reset (e.g., by loop restart) - don't count as success
@@ -1105,7 +1130,7 @@ class GraphOrchestrator:
         workflow: WorkflowGraph,
         completed_id: str,
         output: Any,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         """
         After node completes, update downstream nodes.
 
@@ -1119,9 +1144,10 @@ class GraphOrchestrator:
         - Skips updates if execution was cancelled (prevents race with cancel)
 
         Returns:
-            List of node IDs that were marked as SKIPPED (for callback invocation)
+            Tuple of (skipped_node_ids, ready_node_ids) for callback invocation
         """
         skipped_nodes: list[str] = []
+        ready_nodes: list[str] = []
 
         # Guard: Skip if execution was cancelled to prevent advancing workflow
         # after cancellation. This check is inside the same transaction.
@@ -1130,7 +1156,7 @@ class GraphOrchestrator:
         ).fetchone()
         if row and row[0] == "cancelled":
             logger.debug(f"Skipping dependent updates for {completed_id}: execution cancelled")
-            return skipped_nodes
+            return skipped_nodes, ready_nodes
         # Get the completed node to check if it's a BRANCH
         completed_node = next((n for n in workflow.nodes if n.id == completed_id), None)
 
@@ -1258,14 +1284,15 @@ class GraphOrchestrator:
                 # Mark only the loop entry node as READY to start the iteration
                 entry_status = self._get_node_status_in_txn(conn, execution_id, edge.target)
                 if entry_status == NodeStatus.PENDING.value:
-                    # Ignore version return - internal state update
-                    self._set_node_status_guarded(
+                    was_ready, _ = self._set_node_status_guarded(
                         conn,
                         execution_id,
                         edge.target,
                         NodeStatus.READY,
                         expected_status=NodeStatus.PENDING,
                     )
+                    if was_ready:
+                        ready_nodes.append(edge.target)
                 continue
 
             # Skip if already processed
@@ -1275,15 +1302,17 @@ class GraphOrchestrator:
             # Check if node is ready (use same connection)
             if self._is_node_ready_in_txn(conn, execution_id, workflow, edge.target, target):
                 # Guard with expected status to prevent race
-                self._set_node_status_guarded(
+                was_ready, _ = self._set_node_status_guarded(
                     conn,
                     execution_id,
                     edge.target,
                     NodeStatus.READY,
                     expected_status=NodeStatus.PENDING,
                 )
+                if was_ready:
+                    ready_nodes.append(edge.target)
 
-        return skipped_nodes
+        return skipped_nodes, ready_nodes
 
     def _find_loop_cycle_nodes(
         self, workflow: WorkflowGraph, start_node: str, end_node: str
