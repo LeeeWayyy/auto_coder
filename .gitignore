@@ -138,3 +138,6 @@ test_git_status/
 *.key
 credentials.json
 secrets.yaml
+
+# Node.js
+node_modules/
