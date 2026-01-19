@@ -14,9 +14,9 @@ import json
 import logging
 import threading
 import uuid
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
-from collections import deque
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -168,7 +168,12 @@ class GraphOrchestrator:
             self._status_callbacks.pop(execution_id, None)
 
     def _invoke_status_callback(
-        self, execution_id: str, node_id: str, status: str, output: dict | None = None, version: int = 0
+        self,
+        execution_id: str,
+        node_id: str,
+        status: str,
+        output: dict | None = None,
+        version: int = 0,
     ) -> None:
         """Invoke status callback if registered.
 

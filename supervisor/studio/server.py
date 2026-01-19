@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
 # CORS for local development - restricted to known origins
 # NOTE: This is intentionally restrictive. The studio is designed for localhost-only use.
 # If deployed behind a reverse proxy, client_host will be the proxy IP (often 127.0.0.1),
@@ -70,10 +71,12 @@ def _get_allowed_origins() -> list[str]:
     # Add configured port from CLI (allows custom --port to work)
     configured_port = os.environ.get("SUPERVISOR_STUDIO_PORT")
     if configured_port and configured_port not in ("3000", "5173", "8000"):
-        origins.extend([
-            f"http://localhost:{configured_port}",
-            f"http://127.0.0.1:{configured_port}",
-        ])
+        origins.extend(
+            [
+                f"http://localhost:{configured_port}",
+                f"http://127.0.0.1:{configured_port}",
+            ]
+        )
 
     return origins
 
@@ -309,8 +312,8 @@ def create_workflow(request: WorkflowCreateRequest) -> dict[str, Any]:
                     request.graph.name,
                     request.graph.model_dump_json(),
                     request.graph.version,
-                    datetime.now(timezone.utc),
-                    datetime.now(timezone.utc),
+                    datetime.now(UTC),
+                    datetime.now(UTC),
                 ),
             )
     except sqlite3.IntegrityError:
@@ -352,7 +355,7 @@ def update_workflow(graph_id: str, request: WorkflowUpdateRequest) -> dict[str, 
                 request.graph.name,
                 request.graph.model_dump_json(),
                 request.graph.version,
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
                 graph_id,
             ),
         )
@@ -437,12 +440,13 @@ async def execute_workflow(request: ExecutionRequest) -> ExecutionResponse:
                     "status": status,
                     "output": output,
                     "version": version,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                 },
             )
         except Exception as e:
             # Log error but don't propagate - avoid breaking WebSocket stream
             import logging
+
             logging.getLogger(__name__).warning(
                 f"Error broadcasting status change for {execution_id}/{node_id}: {e}"
             )
@@ -462,7 +466,7 @@ async def execute_workflow(request: ExecutionRequest) -> ExecutionResponse:
             row = conn.execute(
                 "SELECT started_at FROM graph_executions WHERE id = ?", (execution_id,)
             ).fetchone()
-        return row[0] if row else datetime.now(timezone.utc).isoformat()
+        return row[0] if row else datetime.now(UTC).isoformat()
 
     started_at = await run_in_threadpool(get_started_at)
 
@@ -542,7 +546,7 @@ async def _run_execution_with_events(execution_id: str):
                     "type": "execution_complete",
                     "status": "failed",
                     "error": error_msg,
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "completed_at": datetime.now(UTC).isoformat(),
                 },
             )
     finally:
@@ -577,9 +581,7 @@ async def cancel_execution(execution_id: str) -> dict[str, str]:
         if not row:
             raise HTTPException(status_code=404, detail="Execution not found")
 
-        raise HTTPException(
-            status_code=400, detail=f"Cannot cancel execution in '{row[0]}' state"
-        )
+        raise HTTPException(status_code=400, detail=f"Cannot cancel execution in '{row[0]}' state")
 
     # Update running nodes to 'skipped' and broadcast final states to WebSocket clients.
     # This ensures the UI doesn't show nodes stuck in "running" state after cancellation.
@@ -830,7 +832,9 @@ async def execution_websocket(websocket: WebSocket, execution_id: str):
             return
     else:
         if client_host not in ("127.0.0.1", "localhost", "::1"):
-            await websocket.close(code=4003, reason="Non-localhost connections require Origin header")
+            await websocket.close(
+                code=4003, reason="Non-localhost connections require Origin header"
+            )
             return
 
     await manager.connect(websocket, execution_id)
@@ -842,9 +846,7 @@ async def execution_websocket(websocket: WebSocket, execution_id: str):
             nodes = await run_in_threadpool(get_execution_nodes, execution_id, None)
             execution = await run_in_threadpool(get_execution, execution_id)
         except HTTPException as e:
-            await websocket.send_json(
-                {"type": "error", "code": e.status_code, "detail": e.detail}
-            )
+            await websocket.send_json({"type": "error", "code": e.status_code, "detail": e.detail})
             await websocket.close(code=4004, reason=str(e.detail))
             return
 
@@ -854,9 +856,7 @@ async def execution_websocket(websocket: WebSocket, execution_id: str):
 
         # If already complete, send completion and close explicitly
         if execution.status in ["completed", "failed", "cancelled"]:
-            await websocket.send_json(
-                {"type": "execution_complete", "status": execution.status}
-            )
+            await websocket.send_json({"type": "execution_complete", "status": execution.status})
             await websocket.close(code=1000, reason="Execution already complete")
             return
 
@@ -867,7 +867,7 @@ async def execution_websocket(websocket: WebSocket, execution_id: str):
                 if msg == "ping":
                     # Respond with JSON so client can parse consistently
                     await websocket.send_json({"type": "pong"})
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Send heartbeat to detect dead connections
                 try:
                     await websocket.send_json({"type": "heartbeat"})

@@ -785,6 +785,7 @@ def studio(host: str, port: int, reload: bool) -> None:
 
     # Pass port to server for dynamic CORS origin configuration
     import os
+
     os.environ["SUPERVISOR_STUDIO_PORT"] = str(port)
 
     uvicorn.run(
