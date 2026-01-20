@@ -486,6 +486,29 @@ def _validate_workdir(workdir: Path, allowed_roots: list[str]) -> Path:
     )
 
 
+def _build_cli_config(cli_name: str, model_id: str | None) -> tuple[list[str], bool]:
+    """Build CLI command args and stdin usage flag."""
+    base_configs: dict[str, tuple[list[str], bool]] = {
+        # Claude Code CLI: prompt must be argument, not stdin
+        "claude": (["claude", "-p"], False),
+        # Codex: supports stdin with --stdin flag
+        "codex": (["codex", "exec", "--json", "--stdin"], True),
+        # Gemini: reads prompt from stdin
+        "gemini": (["gemini", "-o", "json"], True),
+    }
+
+    cmd_args, uses_stdin = base_configs.get(cli_name, ([cli_name], True))
+
+    if model_id:
+        model_flag = ["--model", model_id]
+        if cli_name == "codex":
+            cmd_args = cmd_args[:2] + model_flag + cmd_args[2:]
+        else:
+            cmd_args = cmd_args[:1] + model_flag + cmd_args[1:]
+
+    return cmd_args, uses_stdin
+
+
 class SandboxedLLMClient:
     """Execute AI CLI in isolated container with controlled egress.
 
@@ -629,30 +652,7 @@ class SandboxedLLMClient:
         - codex: --model <model_id> (after exec)
         - gemini: --model <model_id> (before -o)
         """
-        # Base configs without model flag
-        base_configs: dict[str, tuple[list[str], bool]] = {
-            # Claude Code CLI: prompt must be argument, not stdin
-            "claude": (["claude", "-p"], False),
-            # Codex: supports stdin with --stdin flag
-            "codex": (["codex", "exec", "--json", "--stdin"], True),
-            # Gemini: reads prompt from stdin
-            "gemini": (["gemini", "-o", "json"], True),
-        }
-
-        cmd_args, uses_stdin = base_configs.get(self.cli_name, ([self.cli_name], True))
-
-        # Add model flag if model_id is specified
-        # Insert into existing command list to avoid duplication with base_configs
-        if self.model_id:
-            model_flag = ["--model", self.model_id]
-            if self.cli_name == "codex":
-                # codex exec --model <id> --json --stdin (insert after 'exec')
-                cmd_args = cmd_args[:2] + model_flag + cmd_args[2:]
-            else:
-                # For claude, gemini, and generic: insert after cli name
-                cmd_args = cmd_args[:1] + model_flag + cmd_args[1:]
-
-        return cmd_args, uses_stdin
+        return _build_cli_config(self.cli_name, self.model_id)
 
     def execute(
         self,
@@ -962,6 +962,82 @@ class SandboxedExecutor:
             )
         finally:
             _registry.remove(container_name)
+
+
+class HostLLMClient:
+    """Execute AI CLI directly on host (UNSANDBOXED).
+
+    WARNING: This bypasses Docker isolation and should only be used when
+    subscription login is required. Opt-in via SUPERVISOR_USE_HOST_CLI=1.
+    """
+
+    ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+    def __init__(
+        self,
+        cli_name: str,
+        config: SandboxConfig | None = None,
+        model_id: str | None = None,
+    ):
+        self.cli_name = cli_name
+        self.model_id = model_id
+        self.config = config or SandboxConfig()
+        if os.environ.get("SUPERVISOR_USE_HOST_CLI") != "1":
+            raise SandboxError(
+                "HostLLMClient requires SUPERVISOR_USE_HOST_CLI=1. "
+                "This mode is UNSANDBOXED and should be used only for local dev."
+            )
+
+    def execute(self, prompt: str, workdir: Path | str) -> ExecutionResult:
+        workdir = Path(workdir).absolute()
+        workdir_resolved = _validate_workdir(workdir, self.config.allowed_workdir_roots)
+
+        if not workdir_resolved.exists():
+            raise SandboxError(f"Workdir does not exist: {workdir_resolved}")
+        if not workdir_resolved.is_dir():
+            raise SandboxError(f"Workdir is not a directory: {workdir_resolved}")
+
+        cli_args, uses_stdin = _build_cli_config(self.cli_name, self.model_id)
+
+        stdin_input = prompt
+        cmd: list[str]
+
+        if uses_stdin:
+            cmd = cli_args
+        else:
+            # Avoid putting prompt in argv; pass via stdin and expand in shell.
+            cmd = [
+                "sh",
+                "-c",
+                f'PROMPT="$(cat)" && {shlex.join(cli_args)} "$PROMPT"',
+            ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                input=stdin_input,
+                capture_output=True,
+                text=True,
+                timeout=self.config.cli_timeout,
+                cwd=str(workdir_resolved),
+            )
+            max_bytes = self.config.max_output_bytes
+            return ExecutionResult(
+                returncode=result.returncode,
+                stdout=_truncate_output(self._strip_ansi(result.stdout), max_bytes),
+                stderr=_truncate_output(result.stderr, max_bytes),
+                timed_out=False,
+            )
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(
+                returncode=-1,
+                stdout="",
+                stderr=f"CLI execution timed out after {self.config.cli_timeout}s",
+                timed_out=True,
+            )
+
+    def _strip_ansi(self, text: str) -> str:
+        return self.ANSI_ESCAPE.sub("", text)
 
 
 class LocalExecutor:

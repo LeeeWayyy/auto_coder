@@ -13,7 +13,9 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -40,6 +42,7 @@ from supervisor.core.state import Database
 from supervisor.core.worker import WorkflowWorker
 from supervisor.metrics.aggregator import MetricsAggregator
 from supervisor.metrics.dashboard import MetricsDashboard
+from supervisor.sandbox.executor import SandboxConfig, require_docker
 
 console = Console()
 
@@ -47,6 +50,193 @@ console = Console()
 def get_repo_path() -> Path:
     """Get the repository path (current directory)."""
     return Path.cwd()
+
+
+def load_env_file(repo_path: Path) -> None:
+    """Load .env from repo root if present (non-destructive)."""
+    env_path = repo_path / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def _docker_network_exists(name: str) -> bool:
+    result = subprocess.run(
+        ["docker", "network", "inspect", name],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _docker_image_exists(image: str) -> bool:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _ensure_egress_network(config: SandboxConfig) -> None:
+    if _docker_network_exists(config.egress_network):
+        return
+    console.print(
+        f"[yellow]Docker network '{config.egress_network}' not found. Creating...[/yellow]"
+    )
+    subprocess.run(
+        [
+            "docker",
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            config.egress_network,
+        ],
+        check=True,
+    )
+
+
+def _build_sandbox_images(config: SandboxConfig) -> None:
+    repo_path = get_repo_path()
+    console.print("[cyan]Building Supervisor sandbox images...[/cyan]")
+    subprocess.run(
+        [
+            "docker",
+            "build",
+            "-f",
+            "supervisor/sandbox/Dockerfile",
+            "--target",
+            "cli",
+            "-t",
+            config.cli_image,
+            ".",
+        ],
+        cwd=repo_path,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "docker",
+            "build",
+            "-f",
+            "supervisor/sandbox/Dockerfile",
+            "--target",
+            "executor",
+            "-t",
+            config.executor_image,
+            ".",
+        ],
+        cwd=repo_path,
+        check=True,
+    )
+
+
+def _cli_binaries_present(config: SandboxConfig) -> bool:
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            config.cli_image,
+            "-lc",
+            "command -v claude >/dev/null && command -v codex >/dev/null && command -v gemini >/dev/null",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def ensure_sandbox_preflight(strict: bool = True) -> bool:
+    """Ensure Docker, network, and images exist before execution."""
+    if os.environ.get("SUPERVISOR_USE_HOST_CLI") == "1":
+        console.print(
+            "[yellow]Host CLI mode enabled. AI CLIs will run UNSANDBOXED on the host.[/yellow]"
+        )
+    try:
+        require_docker()
+    except Exception as exc:
+        console.print(f"[yellow]Docker not available:[/yellow] {exc}")
+        return not strict
+
+    config = SandboxConfig()
+    try:
+        _ensure_egress_network(config)
+    except Exception as exc:
+        console.print(f"[red]Failed to ensure Docker network:[/red] {exc}")
+        return False
+
+    images_to_check = (config.executor_image,)
+    if os.environ.get("SUPERVISOR_USE_HOST_CLI") != "1":
+        images_to_check = (config.cli_image, config.executor_image)
+    missing = [image for image in images_to_check if not _docker_image_exists(image)]
+    if not missing:
+        if os.environ.get("SUPERVISOR_USE_HOST_CLI") == "1":
+            # CLI runs on host; still need executor image for gates/tests.
+            return True
+        if os.environ.get("SUPERVISOR_SKIP_CLI_CHECKS") == "1":
+            return True
+        if not _cli_binaries_present(config):
+            console.print(
+                "[yellow]CLI binaries not found inside sandbox image.[/yellow] "
+                "Rebuild images to install claude/codex/gemini."
+            )
+            if click.confirm("Rebuild sandbox images now?", default=True):
+                try:
+                    _build_sandbox_images(config)
+                except Exception as exc:
+                    console.print(f"[red]Failed to build images:[/red] {exc}")
+                    return False
+            else:
+                console.print("[red]Cannot proceed without required CLI binaries.[/red]")
+                return False
+        return True
+
+    auto_build = os.environ.get("SUPERVISOR_AUTO_BUILD_IMAGES") == "1"
+    if auto_build:
+        try:
+            _build_sandbox_images(config)
+            if os.environ.get("SUPERVISOR_SKIP_CLI_CHECKS") != "1":
+                if not _cli_binaries_present(config):
+                    console.print(
+                        "[red]CLI binaries missing after build. Verify Dockerfile installs.[/red]"
+                    )
+                    return False
+            return True
+        except Exception as exc:
+            console.print(f"[red]Failed to build images:[/red] {exc}")
+            return False
+
+    console.print("[yellow]Missing Docker images:[/yellow] " + ", ".join(missing))
+    if click.confirm("Build sandbox images now? This may take a few minutes.", default=True):
+        try:
+            _build_sandbox_images(config)
+            if os.environ.get("SUPERVISOR_SKIP_CLI_CHECKS") != "1":
+                if not _cli_binaries_present(config):
+                    console.print(
+                        "[red]CLI binaries missing after build. Verify Dockerfile installs.[/red]"
+                    )
+                    return False
+            return True
+        except Exception as exc:
+            console.print(f"[red]Failed to build images:[/red] {exc}")
+            return False
+
+    console.print("[red]Cannot proceed without sandbox images.[/red]")
+    return False
 
 
 @click.group()
@@ -57,7 +247,7 @@ def main() -> None:
     Treats AI CLIs (Claude, Codex, Gemini) as stateless workers
     to prevent context dilution in long workflows.
     """
-    pass
+    load_env_file(get_repo_path())
 
 
 @main.command()
@@ -184,6 +374,8 @@ def plan(task: str, workflow_id: str | None, dry_run: bool) -> None:
         return
 
     try:
+        if not ensure_sandbox_preflight():
+            sys.exit(1)
         engine = ExecutionEngine(repo_path)
         result = engine.run_plan(task, workflow_id)
 
@@ -235,6 +427,8 @@ def run(role: str, task: str, workflow_id: str | None, target: tuple[str, ...]) 
     console.print(f"[dim]Workflow ID: {workflow_id}[/dim]\n")
 
     try:
+        if not ensure_sandbox_preflight():
+            sys.exit(1)
         engine = ExecutionEngine(repo_path)
         result = engine.run_role(
             role_name=role,
@@ -346,6 +540,8 @@ def workflow(feature_id: str, tui: bool, parallel: bool, timeout: int | None) ->
         from supervisor.core.interaction import InteractionBridge
         from supervisor.core.workflow import WorkflowCoordinator
 
+        if not ensure_sandbox_preflight():
+            sys.exit(1)
         engine = ExecutionEngine(repo_path)
 
         # FIX (v27 - Gemini PR review): Use helper functions for config loading
@@ -783,10 +979,45 @@ def studio(host: str, port: int, reload: bool) -> None:
         )
     )
 
+    if not ensure_sandbox_preflight(strict=False):
+        console.print(
+            "[yellow]Studio will start, but executions may fail until Docker and images are ready.[/yellow]"
+        )
+
     # Pass port to server for dynamic CORS origin configuration
     import os
+    from pathlib import Path
 
     os.environ["SUPERVISOR_STUDIO_PORT"] = str(port)
+    frontend_dir = Path(__file__).parent / "studio" / "frontend"
+    frontend_dist = frontend_dir / "dist"
+    if not frontend_dist.exists():
+        if os.environ.get("AUTO_CODER_SKIP_FRONTEND_BUILD") == "1":
+            console.print(
+                "[yellow]Studio UI not built.[/yellow] "
+                "Visit http://127.0.0.1:5173 after running "
+                "`cd supervisor/studio/frontend && npm install && npm run dev`, "
+                "or build with `npm run build` to serve from the backend."
+            )
+        else:
+            import shutil
+            import subprocess
+
+            npm = shutil.which("npm")
+            if npm:
+                console.print("[cyan]Building Studio UI (npm run build)...[/cyan]")
+                try:
+                    subprocess.run([npm, "install"], cwd=frontend_dir, check=True)
+                    subprocess.run([npm, "run", "build"], cwd=frontend_dir, check=True)
+                except subprocess.CalledProcessError as exc:
+                    console.print(f"[yellow]Studio UI build failed:[/yellow] {exc}")
+            else:
+                console.print(
+                    "[yellow]Studio UI not built.[/yellow] "
+                    "Visit http://127.0.0.1:5173 after running "
+                    "`cd supervisor/studio/frontend && npm install && npm run dev`, "
+                    "or build with `npm run build` to serve from the backend."
+                )
 
     uvicorn.run(
         "supervisor.studio.server:app",

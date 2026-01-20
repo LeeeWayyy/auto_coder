@@ -10,6 +10,7 @@ Practical examples demonstrating Supervisor workflows and features.
 | [custom-gates](custom-gates/) | Creating custom verification gates | Intermediate |
 | [multi-model-routing](multi-model-routing/) | Adaptive model selection | Intermediate |
 | [parallel-workflow](parallel-workflow/) | Parallel component execution | Advanced |
+| [workflows](workflows/) | Declarative graph workflows (Studio) | Intermediate |
 
 ## Quick Start
 
@@ -44,4 +45,4 @@ Have a useful example? Please contribute!
 
 ---
 
-For more information, see the [Getting Started Guide](../docs/GETTING_STARTED.md).
+For more information, see the [Getting Started Guide](../docs/GETTING_STARTED.md) and the [Runbook](../runbook/README.md).

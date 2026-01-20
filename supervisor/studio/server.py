@@ -31,7 +31,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -41,6 +41,7 @@ from supervisor.core.graph_engine import GraphOrchestrator
 from supervisor.core.graph_schema import WorkflowGraph
 from supervisor.core.state import Database
 from supervisor.core.worker import WorkflowWorker
+from supervisor.sandbox.executor import DockerNotAvailableError, EgressNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,9 @@ app = FastAPI(
     description="API for visual workflow management",
     version="1.0.0",
 )
+
+# Expose host CLI mode to the frontend (for warning banner).
+HOST_CLI_MODE = os.environ.get("SUPERVISOR_USE_HOST_CLI") == "1"
 
 
 # CORS for local development - restricted to known origins
@@ -285,15 +289,22 @@ def get_workflow(graph_id: str) -> dict[str, Any]:
 @app.post("/api/workflows", status_code=201)
 def create_workflow(request: WorkflowCreateRequest) -> dict[str, Any]:
     """Create a new workflow."""
+    graph_id = request.graph.id.strip()
     # Prevent reserved prefix to avoid collision with execution snapshots
-    if request.graph.id.startswith("snapshot_"):
+    if graph_id.startswith("snapshot_"):
         raise HTTPException(
             status_code=400,
             detail="Workflow ID cannot start with 'snapshot_' (reserved for execution snapshots)",
         )
+    if not graph_id:
+        raise HTTPException(status_code=400, detail="Workflow ID cannot be empty")
+
+    graph = request.graph
+    if graph.id != graph_id:
+        graph = graph.model_copy(update={"id": graph_id})
 
     # Validate graph
-    errors = request.graph.validate_graph()
+    errors = graph.validate_graph()
     if errors:
         raise HTTPException(status_code=400, detail={"validation_errors": errors})
 
@@ -308,20 +319,20 @@ def create_workflow(request: WorkflowCreateRequest) -> dict[str, Any]:
                 VALUES (?, ?, ?, ?, ?, ?)
             """,
                 (
-                    request.graph.id,
-                    request.graph.name,
-                    request.graph.model_dump_json(),
-                    request.graph.version,
+                    graph_id,
+                    graph.name,
+                    graph.model_dump_json(),
+                    graph.version,
                     datetime.now(UTC),
                     datetime.now(UTC),
                 ),
             )
     except sqlite3.IntegrityError:
         raise HTTPException(
-            status_code=409, detail=f"Workflow with ID '{request.graph.id}' already exists"
+            status_code=409, detail=f"Workflow with ID '{graph_id}' already exists"
         )
 
-    return request.graph.model_dump()
+    return graph.model_dump()
 
 
 @app.put("/api/workflows/{graph_id}")
@@ -394,7 +405,13 @@ def delete_workflow(graph_id: str) -> dict[str, str]:
 async def execute_workflow(request: ExecutionRequest) -> ExecutionResponse:
     """Start workflow execution."""
     db = get_db()
-    orchestrator = get_orchestrator()
+    try:
+        orchestrator = get_orchestrator()
+    except (DockerNotAvailableError, EgressNotConfiguredError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Sandbox preflight failed. Start Docker Desktop or configure egress rules. ({exc})",
+        ) from exc
 
     # Load workflow by graph_id
     def load_workflow():
@@ -415,9 +432,15 @@ async def execute_workflow(request: ExecutionRequest) -> ExecutionResponse:
     run_label = request.workflow_id or request.graph_id
 
     # Start execution
-    execution_id = await orchestrator.start_workflow(
-        workflow, run_label, initial_inputs=request.input_data
-    )
+    try:
+        execution_id = await orchestrator.start_workflow(
+            workflow, run_label, initial_inputs=request.input_data
+        )
+    except (DockerNotAvailableError, EgressNotConfiguredError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Sandbox preflight failed. Start Docker Desktop or configure egress rules. ({exc})",
+        ) from exc
 
     # The engine creates an immutable snapshot with ID "snapshot_{execution_id}"
     snapshot_graph_id = f"snapshot_{execution_id}"
@@ -891,7 +914,14 @@ if frontend_dir.exists():
 
     @app.get("/")
     async def serve_index():
-        return FileResponse(frontend_dir / "index.html")
+        index_path = frontend_dir / "index.html"
+        content = index_path.read_text()
+        if HOST_CLI_MODE:
+            content = content.replace(
+                "</head>",
+                "<script>window.__SUPERVISOR_HOST_CLI__ = true;</script></head>",
+            )
+        return Response(content, media_type="text/html")
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
@@ -912,3 +942,22 @@ if frontend_dir.exists():
         if requested_path.exists() and requested_path.is_file():
             return FileResponse(requested_path)
         return FileResponse(frontend_dir / "index.html")
+else:
+    @app.get("/")
+    async def studio_not_built():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Studio UI not built.",
+                "next_steps": [
+                    "cd supervisor/studio/frontend",
+                    "npm install",
+                    "npm run dev  # open http://127.0.0.1:5173",
+                    "npm run build  # serve from backend",
+                ],
+            },
+        )
+
+    @app.get("/favicon.ico")
+    async def favicon_missing():
+        return JSONResponse(status_code=404, content={"detail": "No favicon (UI not built)"})

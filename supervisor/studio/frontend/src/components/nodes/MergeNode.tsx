@@ -7,9 +7,9 @@ import type { NodeProps } from '@xyflow/react';
 import { BaseNode, type BaseNodeData } from './BaseNode';
 
 function MergeNodeComponent(props: NodeProps) {
-  const data = props.data as BaseNodeData;
+  const data = (props.data ?? {}) as BaseNodeData;
 
-  return <BaseNode {...props} data={{ ...data, nodeType: 'merge' }} />;
+  return <BaseNode {...props} data={{ ...data, nodeType: 'merge', label: data.label ?? 'Merge' }} />;
 }
 
 export const MergeNode = memo(MergeNodeComponent);

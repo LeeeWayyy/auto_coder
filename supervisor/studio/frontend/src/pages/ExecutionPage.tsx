@@ -3,7 +3,7 @@
  */
 
 import { useCallback } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { useExecution } from '../hooks/useExecutions';
 import { useWorkflow } from '../hooks/useWorkflows';
 import { ExecutionMonitor } from '../components/ExecutionMonitor';
@@ -11,8 +11,6 @@ import type { ExecutionStatus } from '../types/workflow';
 
 export function ExecutionPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-
   // Fetch execution
   const { data: execution, isLoading: execLoading, error: execError } = useExecution(id);
 

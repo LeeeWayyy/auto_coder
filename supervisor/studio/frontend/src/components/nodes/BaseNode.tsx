@@ -2,11 +2,11 @@
  * Base node component with shared styling and status indicators.
  */
 
-import { memo } from 'react';
+import { memo, type ReactNode } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { NodeStatus, NodeType } from '../../types/workflow';
 
-export interface BaseNodeData {
+export interface BaseNodeData extends Record<string, unknown> {
   label: string;
   nodeType: NodeType;
   status?: NodeStatus;
@@ -53,12 +53,16 @@ const typeIcons: Record<NodeType, string> = {
 
 interface BaseNodeProps extends NodeProps {
   data: BaseNodeData;
-  children?: React.ReactNode;
+  children?: ReactNode;
 }
 
 function BaseNodeComponent({ data, selected, children }: BaseNodeProps) {
-  const status = data.status || 'pending';
-  const typeColor = typeColors[data.nodeType] || 'border-l-gray-500';
+  const safeData: BaseNodeData = data || {
+    label: 'Node',
+    nodeType: 'task',
+  };
+  const status = safeData.status || 'pending';
+  const typeColor = typeColors[safeData.nodeType] || 'border-l-gray-500';
   const statusColor = statusColors[status];
 
   return (
@@ -79,13 +83,13 @@ function BaseNodeComponent({ data, selected, children }: BaseNodeProps) {
       />
 
       <div className="flex items-center gap-2">
-        <span className="text-lg" title={data.nodeType}>
-          {typeIcons[data.nodeType]}
+        <span className="text-lg" title={safeData.nodeType}>
+          {typeIcons[safeData.nodeType]}
         </span>
         <div className="flex-1 min-w-0">
-          <div className="font-medium text-sm truncate">{data.label}</div>
-          {data.description && (
-            <div className="text-xs text-gray-500 truncate">{data.description}</div>
+          <div className="font-medium text-sm truncate">{safeData.label}</div>
+          {safeData.description && (
+            <div className="text-xs text-gray-500 truncate">{safeData.description}</div>
           )}
         </div>
         {status !== 'pending' && (

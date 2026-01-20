@@ -11,10 +11,10 @@ export interface SubgraphNodeData extends BaseNodeData {
 }
 
 function SubgraphNodeComponent(props: NodeProps) {
-  const data = props.data as SubgraphNodeData;
+  const data = (props.data ?? {}) as SubgraphNodeData;
 
   return (
-    <BaseNode {...props} data={{ ...data, nodeType: 'subgraph' }}>
+    <BaseNode {...props} data={{ ...data, nodeType: 'subgraph', label: data.label ?? 'Subgraph' }}>
       {data.subgraphId && (
         <div className="mt-1 text-xs text-indigo-600 font-mono truncate">
           {data.subgraphId}
