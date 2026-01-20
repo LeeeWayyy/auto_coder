@@ -1,11 +1,11 @@
-# Supervisor - AI CLI Orchestrator
+# Auto Coder (Supervisor CLI) - AI Orchestrator
 
 [![Tests](https://github.com/LeeeWayyy/auto_coder/workflows/Tests/badge.svg)](https://github.com/LeeeWayyy/auto_coder/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-Treats AI CLIs (Claude, Codex, Gemini) as **stateless workers** to prevent context dilution in long workflows.
+Auto Coder treats AI CLIs (Claude, Codex, Gemini) as **stateless workers** to prevent context dilution in long workflows. The CLI entrypoint is `supervisor`.
 
 > **AI-powered code orchestration with event sourcing, Docker isolation, and verification gates**
 
@@ -35,6 +35,9 @@ supervisor run implementer "Add login endpoint" -t src/api/auth.py
 # List available roles
 supervisor roles
 ```
+
+> Studio UI: `pip install` will attempt to build the frontend if `npm` is available.
+> If npm isn’t installed, you can still run Studio in dev mode (see runbook).
 
 ## Architecture
 
@@ -67,17 +70,22 @@ supervisor roles
 - **Git Worktree Isolation**: Clean workspace per step, atomic commits
 - **Schema-Enforced Outputs**: Pydantic validation, no magic strings
 - **Circuit Breakers**: Prevent infinite retry loops
+- **Supervisor Studio (Web Console)**: Visual workflow editor, execution, live monitoring
+- **Declarative Workflow Graphs**: YAML-defined graphs with gating and branching
+- **Terminal UI + CLI Visualizers**: TUI workflows, graph rendering, node inspection
 
 ## Documentation
 
 **Getting Started**:
 - [Getting Started Guide](docs/GETTING_STARTED.md) - Your first workflow in 5 minutes
+- [Runbook](runbook/README.md) - Step-by-step operational guide for the full tool
 - [Examples](examples/) - Practical workflow examples
 
 **Reference**:
 - [CLI Reference](docs/CLI_REFERENCE.md) - Complete command documentation
 - [Architecture](docs/ARCHITECTURE.md) - System design and internals
 - [FAQ](docs/FAQ.md) - Common questions and troubleshooting
+ - [Specs](docs/SPECS/README.md) - Module-level specifications
 
 **Operations**:
 - [Operations Guide](docs/OPERATIONS.md) - Production deployment and monitoring
@@ -89,6 +97,7 @@ supervisor roles
 ## Quick Links
 
 - [Report an Issue](https://github.com/LeeeWayyy/auto_coder/issues)
+- [Runbook](runbook/README.md)
 - [View Changelog](CHANGELOG.md)
 - [License](LICENSE)
 

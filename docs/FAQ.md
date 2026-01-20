@@ -1,6 +1,6 @@
 # Frequently Asked Questions (FAQ)
 
-Common questions and answers about Supervisor.
+Common questions and answers about Auto Coder (Supervisor CLI). For operational guidance, see the [Runbook](../runbook/README.md).
 
 ## Table of Contents
 
@@ -19,6 +19,14 @@ Common questions and answers about Supervisor.
 ### What is Supervisor?
 
 Supervisor is an AI-powered orchestration system that coordinates multiple AI models to plan, implement, review, and deploy code changes. It uses event sourcing, isolated execution environments, and verification gates to ensure safe, reliable automation.
+
+### Does it include a web console?
+
+Yes. **Supervisor Studio** is a web UI for visual workflow management (graph editing, execution, and live monitoring). Start it with:
+```bash
+supervisor studio --port 8000
+```
+Studio is localhost-only and has no authentication. See the runbook for full setup details.
 
 ### How does Supervisor differ from LangGraph or MetaGPT?
 

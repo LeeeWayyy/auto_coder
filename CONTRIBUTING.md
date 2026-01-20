@@ -1,6 +1,6 @@
-# Contributing to Supervisor
+# Contributing to Auto Coder (Supervisor CLI)
 
-Thank you for your interest in contributing to Supervisor! This document provides guidelines and instructions for contributing to the project.
+Thank you for your interest in contributing to Auto Coder (Supervisor CLI)! This document provides guidelines and instructions for contributing to the project.
 
 ## Table of Contents
 

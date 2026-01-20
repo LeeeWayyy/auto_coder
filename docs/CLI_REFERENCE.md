@@ -1,6 +1,6 @@
 # CLI Reference
 
-Complete reference for all Supervisor CLI commands, options, and configuration files.
+Complete reference for all Auto Coder (Supervisor CLI) commands, options, and configuration files. For step-by-step operational guidance, see the [Runbook](../runbook/README.md).
 
 ## Command Overview
 
@@ -13,6 +13,10 @@ Complete reference for all Supervisor CLI commands, options, and configuration f
 | `supervisor metrics` | View performance metrics |
 | `supervisor roles` | List available roles |
 | `supervisor status` | Show workflow status |
+| `supervisor visualize` | Render a workflow graph in the terminal |
+| `supervisor run-graph` | Execute a declarative workflow graph (YAML) |
+| `supervisor inspect` | Inspect execution node details |
+| `supervisor studio` | Launch the Studio web console |
 | `supervisor version` | Show version information |
 
 ---
@@ -350,7 +354,7 @@ Available Roles
 
 ### `supervisor status`
 
-Show current workflow status and database information.
+Show workflow execution status.
 
 **Usage**:
 ```bash
@@ -358,7 +362,8 @@ supervisor status [OPTIONS]
 ```
 
 **Options**:
-- `-w, --workflow-id TEXT`: Show specific workflow
+- `-w, --workflow-id TEXT`: Filter by workflow ID
+- `-e, --execution-id TEXT`: Show a specific graph execution
 
 **Exit Codes**:
 - `0`: Success
@@ -366,25 +371,103 @@ supervisor status [OPTIONS]
 
 **Examples**:
 ```bash
-# Show all workflows
+# Show recent executions (optionally filtered by workflow id)
 supervisor status
-
-# Show specific workflow
 supervisor status --workflow-id wf-abc12345
+
+# Show a specific execution
+supervisor status --execution-id exec_1234
 ```
 
-**Output**:
+---
+
+### `supervisor visualize`
+
+Render a declarative workflow graph in the terminal.
+
+**Usage**:
+```bash
+supervisor visualize WORKFLOW_FILE
 ```
-Supervisor Status
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Database: /repo/.supervisor/state.db
-Workflow ID filter: All
+**Examples**:
+```bash
+supervisor visualize examples/workflows/basic_workflow.yaml
+```
 
-Recent Workflows:
-- wf-abc12345: In Progress (3/6 steps)
-- wf-xyz67890: Completed
-- wf-def34567: Failed (gate: test)
+---
+
+### `supervisor run-graph`
+
+Execute a declarative workflow graph (YAML).
+
+**Usage**:
+```bash
+supervisor run-graph WORKFLOW_FILE --workflow-id ID [OPTIONS]
+```
+
+**Options**:
+- `--workflow-id TEXT` (required): Execution label
+- `--validate-only`: Validate graph and exit
+- `--live`: Show live execution monitor
+
+**Examples**:
+```bash
+# Validate only
+supervisor run-graph examples/workflows/basic_workflow.yaml --workflow-id wf-1234 --validate-only
+
+# Execute with live monitor
+supervisor run-graph examples/workflows/basic_workflow.yaml --workflow-id wf-1234 --live
+```
+
+---
+
+### `supervisor inspect`
+
+Inspect a graph execution and node details.
+
+**Usage**:
+```bash
+supervisor inspect EXECUTION_ID [OPTIONS]
+```
+
+**Options**:
+- `-n, --node TEXT`: Inspect a specific node ID
+- `-i, --interactive`: Interactive inspection mode
+
+**Examples**:
+```bash
+# Summary view
+supervisor inspect exec_1234
+
+# Node-specific
+supervisor inspect exec_1234 --node node_1
+
+# Interactive
+supervisor inspect exec_1234 --interactive
+```
+
+---
+
+### `supervisor studio`
+
+Launch the Supervisor Studio web console.
+
+**Usage**:
+```bash
+supervisor studio [OPTIONS]
+```
+
+**Options**:
+- `--host TEXT`: Host to bind to (default: 127.0.0.1)
+- `--port INTEGER`: Port to bind to (default: 8000)
+- `--reload`: Enable auto-reload for development
+
+**Examples**:
+```bash
+supervisor studio
+supervisor studio --port 8000
+supervisor studio --reload
 ```
 
 ---
@@ -847,6 +930,7 @@ workflow_timeout: 7200  # 2 hours
 
 ## See Also
 
+- [Runbook](../runbook/README.md) - Operational guide
 - [Getting Started](GETTING_STARTED.md) - Quickstart guide
 - [Architecture](ARCHITECTURE.md) - System design
 - [Operations](OPERATIONS.md) - Production deployment

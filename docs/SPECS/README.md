@@ -48,6 +48,18 @@ This directory contains detailed specifications for each module in the Superviso
 | [Models](models.md) | `supervisor/core/models.py` | Data models |
 | [Roles](roles.md) | `supervisor/core/roles.py` | Role configuration |
 | [Context](context.md) | `supervisor/core/context.py` | Context packing |
+| [Gates](gates.md) | `supervisor/core/gate_*` | Verification gates system |
+| [Approval](approval.md) | `supervisor/core/approval.py` | Human-in-the-loop approvals |
+| [Interaction](approval.md) | `supervisor/core/interaction.py` | TUI/workflow bridge |
+| [Workflow](workflow.md) | `supervisor/core/workflow.py` | Feature/phase/component coordinator |
+| [Routing](routing.md) | `supervisor/core/routing.py` | Adaptive model selection |
+| [Graph Schema](graph_schema.md) | `supervisor/core/graph_schema.py` | Declarative workflow schema |
+| [Graph Engine](graph_engine.md) | `supervisor/core/graph_engine.py` | Stateless graph orchestrator |
+| [Worker](worker.md) | `supervisor/core/worker.py` | Graph execution worker |
+| [CLI UI](cli_ui.md) | `supervisor/cli_ui/` | Terminal visualization tools |
+| [TUI](tui.md) | `supervisor/tui/app.py` | Interactive terminal UI |
+| [Metrics](metrics.md) | `supervisor/metrics/` | Metrics aggregation and dashboard |
+| [Studio](studio.md) | `supervisor/studio/` | Web console (backend + frontend) |
 
 ## Security Model
 

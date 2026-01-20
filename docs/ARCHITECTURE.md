@@ -1,8 +1,8 @@
-# Supervisor Architecture
+# Auto Coder (Supervisor) Architecture
 
 ## System Overview
 
-Supervisor is an AI CLI orchestrator that treats AI tools (Claude, Codex, Gemini) as **stateless workers** rather than conversational partners. This architectural document describes how Supervisor manages AI workers with the same rigor as an operating system manages processes, memory, and I/O.
+Auto Coder is an AI CLI orchestrator that treats AI tools (Claude, Codex, Gemini) as **stateless workers** rather than conversational partners. This architectural document describes how Supervisor manages AI workers with the same rigor as an operating system manages processes, memory, and I/O.
 
 ### Core Philosophy
 
@@ -53,6 +53,19 @@ Think of it as **process management for AI** - each AI execution is a process wi
     │  Codex, etc) │  │              │  │              │
     └──────────────┘  └──────────────┘  └──────────────┘
 ```
+
+## Declarative Graph Workflows & Studio
+
+Supervisor includes a **declarative graph engine** (`supervisor/core/graph_engine.py`) and
+schema (`supervisor/core/graph_schema.py`) that power Supervisor Studio, the web console.
+
+Key characteristics:
+- Graphs are defined in YAML/JSON with typed nodes (TASK, GATE, BRANCH, PARALLEL, HUMAN, etc.)
+- Execution is **stateless** and persisted in SQLite tables (`graph_workflows`, `graph_executions`, `node_executions`)
+- Real-time updates use WebSockets from the Studio backend (`supervisor/studio/server.py`)
+- Live updates are **in-memory callbacks**; only executions started by the same Studio instance stream updates
+
+Studio is a local-only UI intended for development and inspection (no auth).
 
 ---
 
@@ -1113,7 +1126,7 @@ context:
 4. **Enhanced Observability**
    - Prometheus metrics export
    - OpenTelemetry tracing
-   - Web dashboard
+   - Web dashboard (Supervisor Studio)
 
 5. **Plugin System**
    - Third-party role marketplace
