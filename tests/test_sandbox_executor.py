@@ -367,8 +367,9 @@ class TestSandboxDockerIntegration:
         executor = SandboxedExecutor(config=config)
 
         # Execute simple command
+        # Use -u for unbuffered output to ensure stdout is captured before container exits
         result = executor.run(
-            command=["python", "-c", "print('Hello from Docker')"],
+            command=["python", "-u", "-c", "print('Hello from Docker')"],
             workdir=temp_repo,
             timeout=30,
         )

@@ -22,7 +22,7 @@ const statusColors: Record<string, string> = {
 };
 
 function BranchNodeComponent({ data, selected }: NodeProps) {
-  const nodeData = data as BranchNodeData;
+  const nodeData = (data ?? {}) as BranchNodeData;
   const status = nodeData.status || 'pending';
   const statusColor = statusColors[status];
 
@@ -52,7 +52,7 @@ function BranchNodeComponent({ data, selected }: NodeProps) {
       {/* Label overlay (not rotated) */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
         <div className="text-center">
-          <div className="font-medium text-sm">{nodeData.label}</div>
+          <div className="font-medium text-sm">{nodeData.label || 'Branch'}</div>
           {nodeData.conditionExpr && (
             <div className="text-xs text-amber-600 font-mono truncate max-w-[80px]">
               {nodeData.conditionExpr}

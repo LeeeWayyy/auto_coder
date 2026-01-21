@@ -7,10 +7,10 @@ import type { NodeProps } from '@xyflow/react';
 import { BaseNode, type BaseNodeData } from './BaseNode';
 
 function ParallelNodeComponent(props: NodeProps) {
-  const data = props.data as BaseNodeData;
+  const data = (props.data ?? {}) as BaseNodeData;
 
   return (
-    <BaseNode {...props} data={{ ...data, nodeType: 'parallel' }}>
+    <BaseNode {...props} data={{ ...data, nodeType: 'parallel', label: data.label ?? 'Parallel' }}>
       <div className="mt-1 text-xs text-cyan-600">Fork</div>
     </BaseNode>
   );

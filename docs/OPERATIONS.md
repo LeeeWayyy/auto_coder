@@ -1,6 +1,6 @@
 # Operations Guide
 
-Production deployment, monitoring, and maintenance guide for Supervisor.
+Production deployment, monitoring, and maintenance guide for Auto Coder (Supervisor CLI). For a condensed operational checklist, see the [Runbook](../runbook/README.md).
 
 ## Table of Contents
 
@@ -104,6 +104,64 @@ sudo apt-get install iptables-persistent
 sudo netfilter-persistent save
 ```
 
+**Local development bypass (not recommended for production):**
+
+If you're running locally and don't have egress rules configured, you can bypass
+the verification check with environment variables:
+
+```bash
+SUPERVISOR_VERIFY_EGRESS_RULES=false
+SUPERVISOR_FAIL_ON_UNVERIFIED_EGRESS=false
+```
+
+The CLI loads `.env` from the repo root, so you can put these settings in `.env`
+for local dev. Do not use this in production.
+
+#### 4. Build Sandbox Images (Required for CLI runs)
+
+The orchestrator runs CLI workers in Docker. Build the images before running:
+
+```bash
+docker build -f supervisor/sandbox/Dockerfile --target cli -t supervisor-cli:latest .
+docker build -f supervisor/sandbox/Dockerfile --target executor -t supervisor-executor:latest .
+```
+
+If you see errors like `Unable to find image 'supervisor-cli:latest'`, the image
+has not been built yet. If the CLI binary itself is missing inside the image,
+install the appropriate CLI (claude/codex/gemini) in the Dockerfile per the
+vendor's official install instructions.
+
+The default Dockerfile installs all three CLIs (Claude, Codex, Gemini) via npm.
+If you update the Dockerfile, rebuild the images so the new CLI binaries are present.
+
+**Auto-preflight (recommended):**
+
+When you run `supervisor`, it will:
+- create the `supervisor-egress` network if missing
+- prompt to build missing sandbox images (or build automatically with
+  `SUPERVISOR_AUTO_BUILD_IMAGES=1`)
+- verify CLI binaries are present inside the sandbox image
+
+To skip the CLI binary check (not recommended):
+```bash
+SUPERVISOR_SKIP_CLI_CHECKS=1 supervisor studio
+```
+
+This keeps first-run setup simple without manual steps.
+
+## Host CLI Mode (Subscription Login)
+
+If you need subscription login (browser/OAuth) instead of API keys, you can run
+AI CLIs on the host instead of Docker:
+
+```bash
+SUPERVISOR_USE_HOST_CLI=1 supervisor studio
+```
+
+**Warning:** Host CLI mode is **not sandboxed**. The AI CLI can access your
+filesystem, environment variables, and network as your user. Use only on trusted
+machines and avoid running it on sensitive repositories.
+
 #### 4. Configure API Keys
 
 Set environment variables for AI APIs:
@@ -136,6 +194,34 @@ supervisor init
 supervisor --version
 supervisor roles
 ```
+
+#### 6. Supervisor Studio (Web Console)
+
+Supervisor Studio is the web UI for visual workflow management.
+
+**Backend**:
+```bash
+# Localhost-only (recommended)
+supervisor studio --port 8000
+```
+
+**Frontend (dev)**:
+```bash
+cd supervisor/studio/frontend
+npm install
+npm run dev
+```
+
+**Frontend (production build)**:
+```bash
+cd supervisor/studio/frontend
+npm install
+npm run build
+```
+
+The backend serves the static SPA from `supervisor/studio/frontend/dist` when present.
+
+**Security**: Studio has no authentication. Bind to localhost only; avoid exposing externally.
 
 ### Docker Image Management
 

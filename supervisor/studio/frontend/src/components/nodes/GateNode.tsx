@@ -11,10 +11,10 @@ export interface GateNodeData extends BaseNodeData {
 }
 
 function GateNodeComponent(props: NodeProps) {
-  const data = props.data as GateNodeData;
+  const data = (props.data ?? {}) as GateNodeData;
 
   return (
-    <BaseNode {...props} data={{ ...data, nodeType: 'gate' }}>
+    <BaseNode {...props} data={{ ...data, nodeType: 'gate', label: data.label ?? 'Gate' }}>
       {data.checks && data.checks.length > 0 && (
         <div className="mt-1 text-xs text-violet-600">
           {data.checks.length} check(s)

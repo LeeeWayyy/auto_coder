@@ -2,7 +2,7 @@
  * WorkflowCanvas component with ReactFlow for visual workflow editing.
  */
 
-import { useCallback, useMemo, useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -11,6 +11,8 @@ import {
   useNodesState,
   useEdgesState,
   addEdge,
+  useReactFlow,
+  type ReactFlowInstance,
   type Connection,
   type Edge as FlowEdge,
   type Node as FlowNode,
@@ -20,8 +22,11 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { nodeTypes } from './nodes';
+// Use default ReactFlow node renderer for stability
 import type { WorkflowGraph, Node, Edge, NodeStatus } from '../types/workflow';
+import { nodeTypes } from './nodes';
+
+const EMPTY_STATUSES: Record<string, NodeStatus> = {};
 
 export interface WorkflowCanvasProps {
   workflow: WorkflowGraph;
@@ -40,19 +45,21 @@ function toFlowNodes(
 ): FlowNode[] {
   return nodes.map((node, index) => ({
     id: node.id,
-    type: node.type,
+    type: node.type || 'task',
     position: node.position || {
       x: 100 + (index % 4) * 200,
       y: 100 + Math.floor(index / 4) * 150,
     },
     data: {
       label: node.label || node.id,
-      nodeType: node.type,
+      nodeType: node.type || 'task',
       status: nodeStatuses[node.id] || 'pending',
-      description: node.task_config?.description || node.gate_config?.description,
+      description: node.description,
       role: node.task_config?.role,
-      checks: node.gate_config?.checks,
-      conditionExpr: node.branch_config?.condition_expr,
+      gateType: node.gate_config?.gate_type,
+      conditionExpr: node.branch_config?.condition
+        ? JSON.stringify(node.branch_config.condition)
+        : undefined,
       onTrue: node.branch_config?.on_true,
       onFalse: node.branch_config?.on_false,
     },
@@ -65,7 +72,7 @@ function toFlowNodes(
  */
 function toFlowEdges(edges: Edge[]): FlowEdge[] {
   return edges.map((edge, index) => ({
-    id: `${edge.source}-${edge.target}-${index}`,
+    id: edge.id || `${edge.source}-${edge.target}-${index}`,
     source: edge.source,
     target: edge.target,
     animated: edge.is_loop_edge,
@@ -75,6 +82,7 @@ function toFlowEdges(edges: Edge[]): FlowEdge[] {
     label: edge.condition,
     // Preserve original edge metadata for round-trip conversion
     data: {
+      id: edge.id,
       condition: edge.condition,
       is_loop_edge: edge.is_loop_edge,
       data_mapping: edge.data_mapping,
@@ -93,15 +101,15 @@ function fromFlowNodes(flowNodes: FlowNode[], originalNodes: Node[]): Node[] {
     const original = originalMap.get(flowNode.id);
     const baseNode: Node = {
       id: flowNode.id,
-      type: (flowNode.type as Node['type']) || 'task',
-      label: flowNode.data.label as string,
+      type: (original?.type || (flowNode.type as Node['type']) || 'task'),
+      label: (flowNode.data?.label as string) || original?.label || flowNode.id,
       position: { x: flowNode.position.x, y: flowNode.position.y },
     };
 
     // For existing nodes, preserve original config (task_config, gate_config, etc.)
     // For new nodes (no original), just return the base node
     if (original) {
-      return { ...original, ...baseNode };
+      return { ...original, ...baseNode, type: original.type };
     }
 
     // New node - add default task_config
@@ -124,15 +132,16 @@ function fromFlowEdges(flowEdges: FlowEdge[], originalEdges: Edge[]): Edge[] {
   // Fallback map for edges that don't have data (e.g., newly created via UI)
   // Use edge ID for precise matching since source-target can have duplicates
   const originalById = new Map(
-    originalEdges.map((e, idx) => [`${e.source}-${e.target}-${idx}`, e])
+    originalEdges.map((e, idx) => [e.id || `${e.source}-${e.target}-${idx}`, e])
   );
 
   return flowEdges.map((flowEdge) => {
     // Prefer data from the flow edge (preserved during toFlowEdges)
-    const edgeData = flowEdge.data as { condition?: string; is_loop_edge?: boolean; data_mapping?: Record<string, string> } | undefined;
+    const edgeData = flowEdge.data as { id?: string; condition?: string; is_loop_edge?: boolean; data_mapping?: Record<string, string> } | undefined;
 
     if (edgeData && (edgeData.condition !== undefined || edgeData.is_loop_edge !== undefined || edgeData.data_mapping !== undefined)) {
       return {
+        id: edgeData.id || flowEdge.id,
         source: flowEdge.source,
         target: flowEdge.target,
         condition: edgeData.condition,
@@ -146,6 +155,7 @@ function fromFlowEdges(flowEdges: FlowEdge[], originalEdges: Edge[]): Edge[] {
     const original = originalById.get(flowEdge.id);
 
     return {
+      id: original?.id || flowEdge.id,
       source: flowEdge.source,
       target: flowEdge.target,
       condition: original?.condition,
@@ -157,28 +167,23 @@ function fromFlowEdges(flowEdges: FlowEdge[], originalEdges: Edge[]): Edge[] {
 
 export function WorkflowCanvas({
   workflow,
-  nodeStatuses = {},
+  nodeStatuses = EMPTY_STATUSES,
   readOnly = false,
   onWorkflowChange,
   onNodeSelect,
 }: WorkflowCanvasProps) {
-  // Initialize ReactFlow state from workflow
-  // Note: nodeStatuses is not in deps because useNodesState only uses initialNodes
-  // on mount. Status updates are handled by the useEffect below that watches nodeStatuses.
-  const initialNodes = useMemo(
-    () => toFlowNodes(workflow.nodes, nodeStatuses),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [workflow.nodes]
-  );
-
-  const initialEdges = useMemo(
-    () => toFlowEdges(workflow.edges),
-    [workflow.edges]
-  );
-
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const reactFlow = useReactFlow();
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
+  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
+  const [debugEnabled, setDebugEnabled] = useState(() => {
+    try {
+      return localStorage.getItem('studio.debug') === '1';
+    } catch {
+      return false;
+    }
+  });
 
   // Ref for debounce timeout to enable cleanup on unmount
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -191,38 +196,82 @@ export function WorkflowCanvas({
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
   const workflowRef = useRef(workflow);
+  const rfInstanceRef = useRef<ReactFlowInstance | null>(null);
+  const didAutoFitRef = useRef(false);
   nodesRef.current = nodes;
   edgesRef.current = edges;
   workflowRef.current = workflow;
 
   // Reset nodes/edges when workflow changes (e.g., navigating to different workflow)
   useEffect(() => {
-    if (prevWorkflowIdRef.current !== workflow.id) {
-      // Clear any pending debounced update to prevent stale edits being applied
-      // to the new workflow
+    const workflowChanged = prevWorkflowIdRef.current !== workflow.id;
+    if (workflowChanged) {
       if (debounceTimeoutRef.current) {
         clearTimeout(debounceTimeoutRef.current);
         debounceTimeoutRef.current = null;
       }
-      setNodes(toFlowNodes(workflow.nodes, nodeStatuses));
-      setEdges(toFlowEdges(workflow.edges));
-      setSelectedNodeId(null);
       prevWorkflowIdRef.current = workflow.id;
+      didAutoFitRef.current = false;
     }
+
+    // Sync ReactFlow state from workflow model updates.
+    setNodes(toFlowNodes(workflow.nodes, nodeStatuses));
+    setEdges(toFlowEdges(workflow.edges));
   }, [workflow.id, workflow.nodes, workflow.edges, nodeStatuses, setNodes, setEdges]);
 
-  // Update nodes when statuses change
   useEffect(() => {
-    setNodes((nds) =>
-      nds.map((node) => ({
-        ...node,
-        data: {
-          ...node.data,
-          status: nodeStatuses[node.id] || 'pending',
-        },
-      }))
-    );
-  }, [nodeStatuses, setNodes]);
+    if (!rfInstanceRef.current) return;
+    if (workflow.nodes.length === 0) return;
+    if (didAutoFitRef.current) return;
+    const instance = rfInstanceRef.current;
+    const nodePos = workflow.nodes[0].position;
+    const fit = () => {
+      if (nodePos) {
+        instance.setCenter(nodePos.x, nodePos.y, { zoom: 1 });
+      } else {
+        instance.fitView({ padding: 0.2 });
+      }
+    };
+    // Defer to next frame so nodes have dimensions.
+    requestAnimationFrame(() => requestAnimationFrame(fit));
+    didAutoFitRef.current = true;
+  }, [workflow.id, workflow.nodes]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('studio.debug', debugEnabled ? '1' : '0');
+    } catch {
+      // Ignore storage failures (e.g. private mode).
+    }
+  }, [debugEnabled]);
+
+  const copySnapshot = useCallback(() => {
+    const size = containerRef.current
+      ? {
+          w: containerRef.current.clientWidth,
+          h: containerRef.current.clientHeight,
+        }
+      : undefined;
+    const snap = {
+      workflowId: workflow.id,
+      nodes: nodes.map((n) => ({
+        id: n.id,
+        type: n.type,
+        label: String(n.data?.label ?? ''),
+        position: n.position,
+      })),
+      edges: edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+      })),
+      viewport,
+      size,
+    };
+    navigator.clipboard.writeText(JSON.stringify(snap, null, 2));
+  }, [workflow.id, nodes, edges, viewport]);
+
+  // Sync nodes/edges when workflow changes (including sidebar edits)
 
   // Clean up debounce timeout on unmount
   useEffect(() => {
@@ -266,12 +315,15 @@ export function WorkflowCanvas({
         }
         return;
       }
+      const onlySelection = changes.every((c) => c.type === 'select');
       onNodesChange(changes);
-      // Schedule debounced update using ref for latest edges to avoid stale closure
-      setNodes((current) => {
-        debouncedUpdate(current, edgesRef.current);
-        return current;
-      });
+      if (!onlySelection) {
+        // Schedule debounced update using ref for latest edges to avoid stale closure
+        setNodes((current) => {
+          debouncedUpdate(current, edgesRef.current);
+          return current;
+        });
+      }
     },
     [readOnly, onNodesChange, debouncedUpdate, setNodes]
   );
@@ -307,7 +359,6 @@ export function WorkflowCanvas({
   // Handle node selection
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: FlowNode) => {
-      setSelectedNodeId(node.id);
       onNodeSelect?.(node.id);
     },
     [onNodeSelect]
@@ -315,7 +366,6 @@ export function WorkflowCanvas({
 
   // Handle background click (deselect)
   const onPaneClick = useCallback(() => {
-    setSelectedNodeId(null);
     onNodeSelect?.(null);
   }, [onNodeSelect]);
 
@@ -356,11 +406,54 @@ export function WorkflowCanvas({
   );
 
   return (
-    <div className="w-full h-full">
+    <div ref={containerRef} className="w-full h-full min-h-0 relative">
+      <div className="absolute right-4 top-4 z-10 flex gap-2">
+        <button
+          type="button"
+          onClick={() => reactFlow.fitView({ padding: 0.2 })}
+          className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded shadow-sm hover:bg-gray-50"
+        >
+          Zoom to Fit
+        </button>
+        <button
+          type="button"
+          onClick={() => setDebugEnabled((prev) => !prev)}
+          className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded shadow-sm hover:bg-gray-50"
+        >
+          Debug {debugEnabled ? 'On' : 'Off'}
+        </button>
+      </div>
+      {debugEnabled && (
+        <div className="absolute left-4 top-4 z-10 text-[11px] font-mono bg-white/90 border border-gray-200 rounded px-2 py-1">
+          nodes:{nodes.length} edges:{edges.length} view:{Math.round(viewport.x)},{Math.round(viewport.y)}@{viewport.zoom.toFixed(2)}
+          <button
+            type="button"
+            onClick={copySnapshot}
+            className="ml-2 px-2 py-0.5 text-[10px] bg-gray-100 border border-gray-200 rounded"
+          >
+            copy snapshot
+          </button>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        style={{ width: '100%', height: '100%' }}
+        onInit={(instance) => {
+          rfInstanceRef.current = instance;
+          if (nodes.length > 0 && !didAutoFitRef.current) {
+            instance.fitView({ padding: 0.2 });
+            didAutoFitRef.current = true;
+          }
+          setViewport(instance.getViewport());
+        }}
+        onMoveEnd={() => {
+          const instance = rfInstanceRef.current;
+          if (instance) {
+            setViewport(instance.getViewport());
+          }
+        }}
         onNodesChange={handleNodesChange}
         onEdgesChange={handleEdgesChange}
         onConnect={onConnect}
@@ -371,8 +464,6 @@ export function WorkflowCanvas({
         nodesDraggable={!readOnly}
         nodesConnectable={!readOnly}
         elementsSelectable={true}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
         minZoom={0.1}
         maxZoom={2}
         defaultEdgeOptions={{

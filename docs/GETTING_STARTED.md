@@ -1,8 +1,8 @@
-# Getting Started with Supervisor
+# Getting Started with Auto Coder (Supervisor CLI)
 
-## What is Supervisor?
+## What is Auto Coder?
 
-Supervisor is an AI CLI orchestrator that treats AI tools (Claude, Codex, Gemini) as **stateless workers** rather than conversational partners. It solves the "context dilution" problem: when AI CLIs maintain long conversations, their context windows grow and they progressively ignore earlier instructions.
+Auto Coder is an AI CLI orchestrator that treats AI tools (Claude, Codex, Gemini) as **stateless workers** rather than conversational partners. It solves the "context dilution" problem: when AI CLIs maintain long conversations, their context windows grow and they progressively ignore earlier instructions. The CLI entrypoint is `supervisor`.
 
 Instead of one long conversation, Supervisor spawns fresh, short-lived AI instances for each task step, feeding only relevant context, getting structured output, and immediately terminating them. Think of it as an **operating system for AI-assisted development** - managing AI workers with the same rigor you'd manage processes, memory, and I/O.
 
@@ -225,6 +225,33 @@ supervisor workflow feat-authentication --tui
 ```
 
 The `--tui` flag opens a terminal UI showing real-time progress.
+
+### Supervisor Studio (Web Console)
+
+Supervisor Studio is the web UI for visual workflow management (graph editing, execution, and live monitoring).
+
+```bash
+# Start the Studio backend (localhost-only)
+supervisor studio --port 8000
+```
+
+Frontend options:
+- **Dev mode**: run `npm install` and `npm run dev` in `supervisor/studio/frontend`
+- **Production build**: run `npm run build`; the backend serves `dist` automatically
+
+> **Security note**: Studio has no authentication. Bind to localhost only.
+
+### Declarative Graph Workflows
+
+Supervisor supports YAML workflow graphs (used by Studio):
+
+```bash
+# Validate and visualize a graph
+supervisor visualize examples/workflows/basic_workflow.yaml
+
+# Execute a graph
+supervisor run-graph examples/workflows/basic_workflow.yaml --workflow-id wf-1234
+```
 
 ### Gates
 
@@ -471,11 +498,12 @@ roles:
 
 Now that you understand the basics:
 
-1. **Read the [CLI Reference](CLI_REFERENCE.md)** - Complete command documentation
-2. **Review [Architecture](ARCHITECTURE.md)** - Understand the system design
-3. **Check out [Examples](../examples/)** - Practical workflow examples
-4. **Read [Operations Guide](OPERATIONS.md)** - Production deployment and monitoring
-5. **See [Contributing Guide](../CONTRIBUTING.md)** - Extend Supervisor for your needs
+1. **Read the [Runbook](../runbook/README.md)** - Day-to-day usage, operations, and troubleshooting
+2. **Read the [CLI Reference](CLI_REFERENCE.md)** - Complete command documentation
+3. **Review [Architecture](ARCHITECTURE.md)** - Understand the system design
+4. **Check out [Examples](../examples/)** - Practical workflow examples
+5. **Read [Operations Guide](OPERATIONS.md)** - Production deployment and monitoring
+6. **See [Contributing Guide](../CONTRIBUTING.md)** - Extend Supervisor for your needs
 
 ## Advanced Topics
 

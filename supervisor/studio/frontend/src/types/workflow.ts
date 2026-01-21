@@ -24,32 +24,68 @@ export type ExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface TaskConfig {
   role: string;
-  prompt_template?: string;
-  description?: string;
-  target_files?: string[];
-  output_format?: string;
+  task_template?: string;
   timeout?: number;
+  gates?: string[];
+  worktree_id?: string | null;
 }
 
 export interface GateConfig {
-  checks: string[];
-  description?: string;
+  gate_type: string;
+  auto_approve?: boolean;
+  requires_worktree?: boolean;
+}
+
+export interface LoopCondition {
+  field: string;
+  operator:
+    | '=='
+    | '!='
+    | '>'
+    | '<'
+    | '>='
+    | '<='
+    | 'in'
+    | 'not_in'
+    | 'contains'
+    | 'starts_with'
+    | 'ends_with';
+  value: string | number | boolean | Array<string | number | boolean>;
+  max_iterations?: number;
 }
 
 export interface BranchConfig {
-  condition_expr: string;
+  condition: LoopCondition;
   on_true: string;
   on_false: string;
-  max_iterations?: number;
 }
 
 export interface Node {
   id: string;
   type: NodeType;
   label?: string;
+  description?: string;
   task_config?: TaskConfig;
   gate_config?: GateConfig;
   branch_config?: BranchConfig;
+  merge_config?: {
+    wait_for?: 'all' | 'any';
+    merge_strategy?: 'union' | 'intersection' | 'first';
+  };
+  parallel_config?: {
+    branches?: string[];
+    wait_for?: 'all' | 'any' | 'first';
+  };
+  subgraph_config?: {
+    workflow_name: string;
+    input_mapping?: Record<string, string>;
+    output_mapping?: Record<string, string>;
+  };
+  human_config?: {
+    title: string;
+    description?: string | null;
+  };
+  ui_metadata?: Record<string, unknown> | null;
   wait_for_incoming?: 'all' | 'any';
   position?: {
     x: number;
@@ -58,6 +94,7 @@ export interface Node {
 }
 
 export interface Edge {
+  id: string;
   source: string;
   target: string;
   condition?: string;
@@ -121,6 +158,7 @@ export interface WSNodeUpdate {
 export interface WSExecutionComplete {
   type: 'execution_complete';
   status: ExecutionStatus;
+  completed_at?: string;
   final_nodes?: Array<{
     node_id: string;
     status: NodeStatus;

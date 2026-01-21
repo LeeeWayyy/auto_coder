@@ -122,6 +122,19 @@ CREATE TABLE events (
 - `components`: Component-level tracking (files, dependencies)
 - `checkpoints`: Recovery points
 
+### Metrics Table
+
+Stores execution performance metrics for adaptive routing and dashboards:
+- `metrics` (role, cli, task_type, success, duration, retry_count, etc.)
+
+### Graph Workflow Tables
+
+Used by the declarative graph engine and Studio:
+- `graph_workflows`: Stored workflow definitions (JSON)
+- `graph_executions`: Execution instances and status
+- `node_executions`: Per-node execution state with version counters
+- `loop_counters`: Loop iteration tracking
+
 ## Concurrency Features
 
 ### WAL Mode

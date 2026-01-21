@@ -5,6 +5,7 @@ Other tables are read models (projections) rebuilt from events.
 """
 
 import json
+import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -309,9 +310,56 @@ class Database:
             # WAL allows readers and writers to operate simultaneously without blocking
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(self.SCHEMA)
+            self._migrate_schema(conn)
 
         # Verify projection sync on startup
         self._verify_projection_sync()
+        if os.environ.get("SUPERVISOR_AUTO_REBUILD_PROJECTIONS") == "1":
+            self.rebuild_projections()
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Apply lightweight migrations for projection tables."""
+
+        def _columns(table: str) -> set[str]:
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            return {row[1] for row in rows}
+
+        def _ensure_column(table: str, column: str, col_type: str) -> None:
+            cols = _columns(table)
+            if column in cols:
+                return
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+        # updated_by_event_id guards (older DBs may lack these columns)
+        _ensure_column("workflows", "updated_by_event_id", "INTEGER DEFAULT 0")
+        _ensure_column("steps", "updated_by_event_id", "INTEGER DEFAULT 0")
+        _ensure_column("features", "updated_by_event_id", "INTEGER DEFAULT 0")
+        _ensure_column("phases", "updated_by_event_id", "INTEGER DEFAULT 0")
+        _ensure_column("components", "updated_by_event_id", "INTEGER DEFAULT 0")
+
+        # components.description was added later
+        _ensure_column("components", "description", "TEXT DEFAULT ''")
+
+    def rebuild_projections(self) -> None:
+        """Rebuild projection tables from the immutable event log."""
+        projection_tables = ["steps", "components", "phases", "features", "workflows"]
+        with self._connect() as conn:
+            for table in projection_tables:
+                conn.execute(f"DELETE FROM {table}")
+
+            rows = conn.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+            for row in rows:
+                event = Event(
+                    workflow_id=row[1],
+                    event_type=row[2],
+                    role=row[3],
+                    step_id=row[4],
+                    component_id=row[5],
+                    status=row[6],
+                    payload=json.loads(row[7]) if row[7] else None,
+                    timestamp=row[8],
+                )
+                self._update_projections(conn, event, row[0])
 
     def record_metric(
         self,

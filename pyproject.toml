@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.22.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -46,10 +46,23 @@ dev = [
 supervisor = "supervisor.cli:main"
 
 [tool.hatch.build.targets.sdist]
-include = ["supervisor"]
+include = [
+    "supervisor",
+    "supervisor/studio/frontend/dist/**",
+    "supervisor/studio/frontend/package.json",
+    "supervisor/studio/frontend/package-lock.json",
+    "supervisor/studio/frontend/vite.config.ts",
+    "supervisor/studio/frontend/tsconfig.json",
+    "supervisor/studio/frontend/src/**",
+    "supervisor/studio/frontend/index.html",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["supervisor"]
+include = ["supervisor/studio/frontend/dist/**"]
+
+[tool.hatch.build.hooks.custom]
+path = "supervisor/build_hooks.py"
 
 [tool.hatch.version]
 path = "supervisor/__init__.py"

@@ -12,10 +12,10 @@ export interface TaskNodeData extends BaseNodeData {
 }
 
 function TaskNodeComponent(props: NodeProps) {
-  const data = props.data as TaskNodeData;
+  const data = (props.data ?? {}) as TaskNodeData;
 
   return (
-    <BaseNode {...props} data={{ ...data, nodeType: 'task' }}>
+    <BaseNode {...props} data={{ ...data, nodeType: 'task', label: data.label ?? 'Task' }}>
       {data.role && (
         <div className="mt-1 text-xs text-blue-600 font-mono">{data.role}</div>
       )}

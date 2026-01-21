@@ -23,6 +23,9 @@ from click.testing import CliRunner
 from supervisor.cli import main
 from supervisor.core.state import Database
 
+# Environment to bypass sandbox preflight in tests (Docker not available in CI)
+SKIP_SANDBOX_ENV = {"SUPERVISOR_SKIP_SANDBOX_PREFLIGHT": "1"}
+
 
 @pytest.fixture
 def cli_runner() -> CliRunner:
@@ -117,7 +120,9 @@ class TestPlanCommand:
         mock_instance.run_plan.return_value = Mock(phases=[], risks=[])
 
         with cli_runner.isolated_filesystem():
-            result = cli_runner.invoke(main, ["plan", "Add user authentication"])
+            result = cli_runner.invoke(
+                main, ["plan", "Add user authentication"], env=SKIP_SANDBOX_ENV
+            )
             assert result.exit_code == 0
             assert "Planning task:" in result.output
             assert "Add user authentication" in result.output
@@ -135,7 +140,9 @@ class TestPlanCommand:
 
         with cli_runner.isolated_filesystem():
             result = cli_runner.invoke(
-                main, ["plan", "Test task", "--workflow-id", "custom-wf-123"]
+                main,
+                ["plan", "Test task", "--workflow-id", "custom-wf-123"],
+                env=SKIP_SANDBOX_ENV,
             )
             assert result.exit_code == 0
             assert "custom-wf-123" in result.output
@@ -176,7 +183,9 @@ class TestRunCommand:
         )
 
         with cli_runner.isolated_filesystem():
-            result = cli_runner.invoke(main, ["run", "implementer", "Add function"])
+            result = cli_runner.invoke(
+                main, ["run", "implementer", "Add function"], env=SKIP_SANDBOX_ENV
+            )
             assert result.exit_code == 0
             assert "Running role:" in result.output
             assert "implementer" in result.output
@@ -193,6 +202,7 @@ class TestRunCommand:
             result = cli_runner.invoke(
                 main,
                 ["run", "implementer", "Fix bug", "-t", "src/main.py", "-t", "src/utils.py"],
+                env=SKIP_SANDBOX_ENV,
             )
             assert result.exit_code == 0
 
@@ -212,6 +222,7 @@ class TestRunCommand:
             result = cli_runner.invoke(
                 main,
                 ["run", "implementer", "Task", "--workflow-id", "wf-custom"],
+                env=SKIP_SANDBOX_ENV,
             )
             assert result.exit_code == 0
             assert "wf-custom" in result.output
@@ -227,7 +238,7 @@ class TestRunCommand:
         )
 
         with cli_runner.isolated_filesystem():
-            result = cli_runner.invoke(main, ["run", "implementer", "Task"])
+            result = cli_runner.invoke(main, ["run", "implementer", "Task"], env=SKIP_SANDBOX_ENV)
             assert result.exit_code == 0
             assert "Files modified:" in result.output
             assert "src/main.py" in result.output
@@ -268,7 +279,7 @@ class TestWorkflowCommand:
             Path(".supervisor").mkdir()
             Path(".supervisor/state.db").touch()
 
-            result = cli_runner.invoke(main, ["workflow", "feat-123"])
+            result = cli_runner.invoke(main, ["workflow", "feat-123"], env=SKIP_SANDBOX_ENV)
             assert result.exit_code == 0
             assert "Workflow complete!" in result.output
 
@@ -288,7 +299,9 @@ class TestWorkflowCommand:
             Path(".supervisor").mkdir()
             Path(".supervisor/state.db").touch()
 
-            result = cli_runner.invoke(main, ["workflow", "feat-123", "--tui"])
+            result = cli_runner.invoke(
+                main, ["workflow", "feat-123", "--tui"], env=SKIP_SANDBOX_ENV
+            )
             assert result.exit_code == 0
 
             # Verify TUI was created
@@ -310,12 +323,16 @@ class TestWorkflowCommand:
             Path(".supervisor/state.db").touch()
 
             # Test parallel (default)
-            result = cli_runner.invoke(main, ["workflow", "feat-123", "--parallel"])
+            result = cli_runner.invoke(
+                main, ["workflow", "feat-123", "--parallel"], env=SKIP_SANDBOX_ENV
+            )
             assert result.exit_code == 0
             mock_instance.run_implementation.assert_called_with("feat-123", parallel=True)
 
             # Test sequential
-            result = cli_runner.invoke(main, ["workflow", "feat-123", "--sequential"])
+            result = cli_runner.invoke(
+                main, ["workflow", "feat-123", "--sequential"], env=SKIP_SANDBOX_ENV
+            )
             assert result.exit_code == 0
             mock_instance.run_implementation.assert_called_with("feat-123", parallel=False)
 
@@ -558,7 +575,7 @@ class TestCLIIntegration:
             assert Path(".supervisor").exists()
 
             # Run plan
-            result_plan = cli_runner.invoke(main, ["plan", "Test feature"])
+            result_plan = cli_runner.invoke(main, ["plan", "Test feature"], env=SKIP_SANDBOX_ENV)
             assert result_plan.exit_code == 0
 
     def test_help_text_for_all_commands(self, cli_runner):

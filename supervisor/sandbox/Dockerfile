@@ -25,8 +25,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude CLI (example - adjust based on actual installation method)
-# RUN npm install -g @anthropic-ai/claude-cli
+# Install AI CLIs
+RUN npm install -g --no-fund --no-audit \
+    @anthropic-ai/claude-code \
+    @openai/codex \
+    @google/gemini-cli
 
 # Install Python tools
 RUN pip install --no-cache-dir \
@@ -35,7 +38,7 @@ RUN pip install --no-cache-dir \
     google-generativeai
 
 # Copy CLI wrapper scripts
-COPY scripts/cli_wrapper.sh /usr/local/bin/cli_wrapper
+COPY supervisor/sandbox/scripts/cli_wrapper.sh /usr/local/bin/cli_wrapper
 RUN chmod +x /usr/local/bin/cli_wrapper
 
 USER worker

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Runbook folder with operational guides for using Auto Coder end-to-end (runbook/)
+- Studio web console and graph workflow documentation updates across docs and specs
 - Comprehensive improvement plan for documentation and test coverage (docs/IMPROVEMENT_PLAN.md)
 - CHANGELOG.md to track project changes
 - Getting Started guide (docs/GETTING_STARTED.md) - comprehensive user onboarding

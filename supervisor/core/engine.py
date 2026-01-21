@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 import uuid
@@ -61,6 +62,7 @@ from supervisor.core.workspace import (
 )
 from supervisor.sandbox.executor import (
     ExecutionResult,
+    HostLLMClient,
     SandboxConfig,
     SandboxedLLMClient,
     get_sandboxed_executor,
@@ -553,9 +555,21 @@ class ExecutionEngine:
 
         # Configure sandbox with allowed workdir roots for security
         # Workdirs are only allowed under the repo's .worktrees directory
+        def _env_flag(name: str) -> bool | None:
+            raw = os.environ.get(name)
+            if raw is None:
+                return None
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+
         if sandbox_config is None:
+            verify_egress = _env_flag("SUPERVISOR_VERIFY_EGRESS_RULES")
+            fail_on_unverified = _env_flag("SUPERVISOR_FAIL_ON_UNVERIFIED_EGRESS")
             self.sandbox_config = SandboxConfig(
-                allowed_workdir_roots=[str(self.repo_path / ".worktrees")]
+                allowed_workdir_roots=[str(self.repo_path / ".worktrees")],
+                verify_egress_rules=verify_egress if verify_egress is not None else True,
+                fail_on_unverified_egress=fail_on_unverified
+                if fail_on_unverified is not None
+                else True,
             )
         else:
             # If user provided config, add worktrees to allowed roots if not set
@@ -582,10 +596,10 @@ class ExecutionEngine:
         )
 
         # CLI clients (lazily initialized per CLI name)
-        self._cli_clients: dict[str, SandboxedLLMClient] = {}
+        self._cli_clients: dict[str, SandboxedLLMClient | HostLLMClient] = {}
         self._cli_clients_lock = threading.Lock()  # Thread-safe client initialization
 
-    def _get_cli_client(self, model_key: str) -> SandboxedLLMClient:
+    def _get_cli_client(self, model_key: str) -> SandboxedLLMClient | HostLLMClient:
         """Get or create sandboxed CLI client.
 
         Updated (v28): Requires cli:model format for granular model selection.
@@ -607,7 +621,9 @@ class ExecutionEngine:
         with self._cli_clients_lock:
             # Re-check after acquiring lock (another thread may have initialized)
             if model_key not in self._cli_clients:
-                self._cli_clients[model_key] = SandboxedLLMClient(
+                use_host_cli = os.environ.get("SUPERVISOR_USE_HOST_CLI") == "1"
+                client_cls = HostLLMClient if use_host_cli else SandboxedLLMClient
+                self._cli_clients[model_key] = client_cls(
                     cli_name=cli_name,
                     config=self.sandbox_config,
                     model_id=model_id,
