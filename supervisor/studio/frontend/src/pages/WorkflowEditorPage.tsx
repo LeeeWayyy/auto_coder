@@ -259,9 +259,15 @@ export function WorkflowEditorPage() {
     [currentWorkflow, selectedNode, updateSelectedNode]
   );
 
+  // Counter to ensure unique IDs even within same millisecond
+  const nodeIdCounterRef = React.useRef(0);
+
   const addTaskNode = useCallback(() => {
     if (!currentWorkflow) return;
-    const nextId = `task-${(currentWorkflow.nodes.length + 1).toString(36)}`;
+    // Generate unique ID using timestamp + counter to prevent collisions
+    const timestamp = Date.now().toString(36);
+    const suffix = (nodeIdCounterRef.current++).toString(36);
+    const nextId = `task-${timestamp}-${suffix}`;
     const newNode = {
       id: nextId,
       type: 'task' as const,

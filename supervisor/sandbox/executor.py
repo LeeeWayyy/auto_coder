@@ -916,6 +916,10 @@ class SandboxedExecutor:
                 "--cap-drop=ALL",
                 # HOME must match tmpfs mount so tools can write config/cache
                 "--env=HOME=/home",
+                # Override ENTRYPOINT to ensure our bash command works correctly
+                # The executor image has ENTRYPOINT ["/bin/bash", "-c"] which conflicts
+                # with passing "bash -lc <cmd>" as we want a login shell with full PATH
+                "--entrypoint=",
             ]
         )
 
@@ -998,6 +1002,17 @@ class HostLLMClient:
             raise SandboxError(f"Workdir is not a directory: {workdir_resolved}")
 
         cli_args, uses_stdin = _build_cli_config(self.cli_name, self.model_id)
+
+        # ARG_MAX guard for argument-based CLIs (same as SandboxedLLMClient)
+        # When shell expands $PROMPT as argument, very large prompts can exceed ARG_MAX.
+        # POSIX guarantees only 128KB minimum, so use that as safe limit.
+        ARG_MAX_SAFE = 131_072  # 128KB
+        if not uses_stdin and len(prompt) > ARG_MAX_SAFE:
+            raise SandboxError(
+                f"Prompt size ({len(prompt)} bytes) exceeds ARG_MAX limit ({ARG_MAX_SAFE} bytes) "
+                f"for CLI '{self.cli_name}' which requires argument-based prompt passing. "
+                f"Use a stdin-capable CLI (codex, gemini) or reduce prompt size."
+            )
 
         stdin_input = prompt
         cmd: list[str]

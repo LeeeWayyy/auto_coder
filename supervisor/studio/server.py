@@ -914,12 +914,17 @@ if frontend_dir.exists():
 
     @app.get("/")
     async def serve_index():
+        import re
         index_path = frontend_dir / "index.html"
         content = index_path.read_text()
         if HOST_CLI_MODE:
-            content = content.replace(
-                "</head>",
+            # Use case-insensitive regex for robustness against HTML minification
+            content = re.sub(
+                r"</head>",
                 "<script>window.__SUPERVISOR_HOST_CLI__ = true;</script></head>",
+                content,
+                count=1,
+                flags=re.IGNORECASE,
             )
         return Response(content, media_type="text/html")
 
