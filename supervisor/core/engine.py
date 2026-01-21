@@ -12,8 +12,8 @@ Coordinates:
 from __future__ import annotations
 
 import hashlib
-import os
 import logging
+import os
 import threading
 import time
 import uuid
@@ -566,9 +566,7 @@ class ExecutionEngine:
             fail_on_unverified = _env_flag("SUPERVISOR_FAIL_ON_UNVERIFIED_EGRESS")
             self.sandbox_config = SandboxConfig(
                 allowed_workdir_roots=[str(self.repo_path / ".worktrees")],
-                verify_egress_rules=verify_egress
-                if verify_egress is not None
-                else True,
+                verify_egress_rules=verify_egress if verify_egress is not None else True,
                 fail_on_unverified_egress=fail_on_unverified
                 if fail_on_unverified is not None
                 else True,

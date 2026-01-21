@@ -328,9 +328,7 @@ def create_workflow(request: WorkflowCreateRequest) -> dict[str, Any]:
                 ),
             )
     except sqlite3.IntegrityError:
-        raise HTTPException(
-            status_code=409, detail=f"Workflow with ID '{graph_id}' already exists"
-        )
+        raise HTTPException(status_code=409, detail=f"Workflow with ID '{graph_id}' already exists")
 
     return graph.model_dump()
 
@@ -915,6 +913,7 @@ if frontend_dir.exists():
     @app.get("/")
     async def serve_index():
         import re
+
         index_path = frontend_dir / "index.html"
         content = index_path.read_text()
         if HOST_CLI_MODE:
@@ -948,6 +947,7 @@ if frontend_dir.exists():
             return FileResponse(requested_path)
         return FileResponse(frontend_dir / "index.html")
 else:
+
     @app.get("/")
     async def studio_not_built():
         return JSONResponse(
