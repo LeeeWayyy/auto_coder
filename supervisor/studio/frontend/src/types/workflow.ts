@@ -153,6 +153,18 @@ export interface TraceEvent {
   status: NodeStatus;
 }
 
+export interface ExecutionEvent {
+  id: number;
+  execution_id: string;
+  event_type: string;
+  node_id?: string | null;
+  node_type?: NodeType | null;
+  status?: string | null;
+  payload?: Record<string, unknown> | null;
+  version?: number | null;
+  timestamp: string;
+}
+
 // WebSocket message types
 
 export interface WSNodeUpdate {

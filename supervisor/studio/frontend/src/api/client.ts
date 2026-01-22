@@ -7,6 +7,7 @@ import type {
   WorkflowGraph,
   ExecutionResponse,
   NodeExecutionStatus,
+  ExecutionEvent,
 } from '../types/workflow';
 
 const API_BASE = '/api';
@@ -183,6 +184,25 @@ export async function getExecutionNodes(
     ? `/executions/${encodeURIComponent(executionId)}/nodes?since_version=${sinceVersion}`
     : `/executions/${encodeURIComponent(executionId)}/nodes`;
   return fetchApi<NodeExecutionStatus[]>(url);
+}
+
+export async function getExecutionHistory(
+  executionId: string,
+  sinceId?: number,
+  limit?: number
+): Promise<ExecutionEvent[]> {
+  const searchParams = new URLSearchParams();
+  if (sinceId !== undefined) {
+    searchParams.set('since_id', String(sinceId));
+  }
+  if (limit !== undefined) {
+    searchParams.set('limit', String(limit));
+  }
+  const query = searchParams.toString();
+  const url = query
+    ? `/executions/${encodeURIComponent(executionId)}/history?${query}`
+    : `/executions/${encodeURIComponent(executionId)}/history`;
+  return fetchApi<ExecutionEvent[]>(url);
 }
 
 // ========== WebSocket Connection ==========

@@ -13,6 +13,7 @@ import {
   getExecutionNodes,
   executeWorkflow,
   cancelExecution,
+  getExecutionHistory,
   type ListExecutionsParams,
   type ExecuteWorkflowParams,
 } from '../api/client';
@@ -67,6 +68,18 @@ export function useExecutionNodes(executionId: string | undefined) {
     queryFn: () => getExecutionNodes(executionId!),
     enabled: !!executionId,
     staleTime: 5000,
+  });
+}
+
+/**
+ * Fetch execution event history for time-travel debugging.
+ */
+export function useExecutionHistory(executionId: string | undefined, limit = 1000) {
+  return useQuery({
+    queryKey: [...executionKeys.detail(executionId ?? ''), 'history', limit],
+    queryFn: () => getExecutionHistory(executionId!, undefined, limit),
+    enabled: !!executionId,
+    staleTime: 10000,
   });
 }
 

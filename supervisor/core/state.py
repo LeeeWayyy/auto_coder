@@ -283,6 +283,20 @@ class Database:
         FOREIGN KEY (execution_id) REFERENCES graph_executions(id)
     );
 
+    -- Execution events for time-travel debugging and timeline persistence
+    CREATE TABLE IF NOT EXISTS execution_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id TEXT NOT NULL,
+        node_id TEXT,
+        node_type TEXT,
+        event_type TEXT NOT NULL,
+        status TEXT,
+        payload JSON,
+        version INTEGER DEFAULT 0,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (execution_id) REFERENCES graph_executions(id)
+    );
+
     -- Loop iteration counters (prevent infinite loops)
     CREATE TABLE IF NOT EXISTS loop_counters (
         execution_id TEXT NOT NULL,
@@ -296,6 +310,7 @@ class Database:
     CREATE INDEX IF NOT EXISTS idx_node_exec_status ON node_executions(execution_id, status);
     CREATE INDEX IF NOT EXISTS idx_node_ready ON node_executions(execution_id, status) WHERE status = 'ready';
     CREATE INDEX IF NOT EXISTS idx_graph_exec_status ON graph_executions(workflow_id, status);
+    CREATE INDEX IF NOT EXISTS idx_exec_events_exec ON execution_events(execution_id, id);
     """
 
     def __init__(self, db_path: str | Path = ".supervisor/state.db"):
@@ -1113,6 +1128,82 @@ class Database:
                 ).fetchall()
 
             return [self._row_to_event(row) for row in rows]
+
+    def append_execution_event(
+        self,
+        execution_id: str,
+        event_type: str,
+        node_id: str | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        payload: dict[str, Any] | None = None,
+        version: int = 0,
+    ) -> int:
+        """Append an execution event for time-travel/debugging."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO execution_events
+                    (execution_id, node_id, node_type, event_type, status, payload, version, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    execution_id,
+                    node_id,
+                    node_type,
+                    event_type,
+                    status,
+                    _safe_json_dumps(payload or {}),
+                    version,
+                ),
+            )
+            return cursor.lastrowid  # type: ignore[return-value]
+
+    def get_execution_events(
+        self,
+        execution_id: str,
+        since_id: int | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Get execution events for time-travel/debugging."""
+        with self._connect() as conn:
+            if since_id is not None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM execution_events
+                    WHERE execution_id = ? AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (execution_id, since_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM execution_events
+                    WHERE execution_id = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (execution_id, limit),
+                ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+            events.append(
+                {
+                    "id": row["id"],
+                    "execution_id": row["execution_id"],
+                    "node_id": row["node_id"],
+                    "node_type": row["node_type"],
+                    "event_type": row["event_type"],
+                    "status": row["status"],
+                    "payload": payload,
+                    "version": row["version"],
+                    "timestamp": row["timestamp"],
+                }
+            )
+        return events
 
     def _row_to_event(self, row: sqlite3.Row) -> Event:
         """Convert database row to Event."""

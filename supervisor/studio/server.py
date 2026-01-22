@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -462,6 +462,23 @@ async def execute_workflow(request: ExecutionRequest) -> ExecutionResponse:
         consistency between status and version (no race condition possible).
         """
         try:
+            node_type = None
+            for node in workflow.nodes:
+                if node.id == node_id:
+                    node_type = node.type
+                    break
+
+            await run_in_threadpool(
+                db.append_execution_event,
+                execution_id,
+                "node_update",
+                node_id,
+                node_type,
+                status,
+                {"output": output},
+                version,
+            )
+
             await manager.broadcast(
                 execution_id,
                 {
@@ -531,6 +548,16 @@ async def _run_execution_with_events(execution_id: str):
 
         # Only broadcast if not already cancelled
         if final_status and final_status != "cancelled":
+            await run_in_threadpool(
+                db.append_execution_event,
+                execution_id,
+                "execution_complete",
+                None,
+                None,
+                final_status,
+                {"completed_at": completed_at, "error": error},
+                0,
+            )
             payload: dict[str, Any] = {
                 "type": "execution_complete",
                 "status": final_status,
@@ -640,6 +667,17 @@ async def cancel_execution(execution_id: str) -> dict[str, str]:
         return [{"node_id": r[0], "status": r[1], "version": r[2]} for r in rows]
 
     final_nodes = await run_in_threadpool(get_final_nodes_and_cancel_running)
+
+    await run_in_threadpool(
+        db.append_execution_event,
+        execution_id,
+        "execution_complete",
+        None,
+        None,
+        "cancelled",
+        {"completed_at": datetime.now(UTC).isoformat()},
+        0,
+    )
 
     await manager.broadcast(
         execution_id,
@@ -819,6 +857,19 @@ def get_execution_nodes(
         }
         for row in rows
     ]
+
+
+@app.get("/api/executions/{execution_id}/history")
+def get_execution_history(
+    execution_id: str, since_id: int | None = None, limit: int = 500
+) -> list[dict[str, Any]]:
+    """Get execution event history for time-travel debugging."""
+    db = get_db()
+    if limit < 1:
+        limit = 1
+    if limit > 5000:
+        limit = 5000
+    return db.get_execution_events(execution_id, since_id=since_id, limit=limit)
 
 
 # ========== WebSocket for Live Updates ==========

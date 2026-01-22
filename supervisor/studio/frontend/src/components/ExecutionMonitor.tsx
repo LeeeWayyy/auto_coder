@@ -9,11 +9,13 @@ import type {
   ExecutionStatus,
   NodeExecutionStatus,
   TraceEvent,
+  NodeType,
 } from '../types/workflow';
 import {
   useExecution,
   useExecutionNodes,
   useCancelExecution,
+  useExecutionHistory,
 } from '../hooks/useExecutions';
 import { useExecutionWebSocket } from '../hooks/useExecutionWebSocket';
 import { WorkflowCanvas } from './WorkflowCanvas';
@@ -37,9 +39,12 @@ export function ExecutionMonitor({
   // Fetch execution and node data
   const { data: execution, isLoading: execLoading } = useExecution(executionId);
   const { data: nodes } = useExecutionNodes(executionId);
+  const { data: historyEvents } = useExecutionHistory(executionId, 2000);
   const cancelMutation = useCancelExecution();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
+  const [historyMode, setHistoryMode] = useState(false);
+  const [historyIndex, setHistoryIndex] = useState(0);
   const [humanWaiting, setHumanWaiting] = useState<{
     nodeId: string;
     title: string;
@@ -123,25 +128,85 @@ export function ExecutionMonitor({
     return map;
   }, [nodes]);
 
+  const nodeTypeById = useMemo(() => {
+    return new Map(workflow.nodes.map((node) => [node.id, node.type]));
+  }, [workflow.nodes]);
+
+  const historyTraceEvents = useMemo(() => {
+    if (!historyEvents) return [];
+    return historyEvents
+      .filter((event) => event.event_type === 'node_update' && event.node_id)
+      .map((event) => ({
+        id: String(event.id),
+        timestamp: event.timestamp,
+        nodeId: event.node_id as string,
+        nodeLabel:
+          workflow.nodes.find((node) => node.id === event.node_id)?.label ||
+          (event.node_id as string),
+        nodeType:
+          (event.node_type as NodeType | null) ||
+          nodeTypeById.get(event.node_id as string) ||
+          'task',
+        status: (event.status as NodeStatus) || 'pending',
+      }));
+  }, [historyEvents, workflow.nodes, nodeTypeById]);
+
+  useEffect(() => {
+    if (historyMode && historyTraceEvents.length > 0) {
+      setHistoryIndex(historyTraceEvents.length - 1);
+    }
+  }, [historyMode, historyTraceEvents.length]);
+
+  const snapshotFromHistory = useMemo(() => {
+    if (!historyMode || historyTraceEvents.length === 0) {
+      return null;
+    }
+    const idx = Math.min(Math.max(historyIndex, 0), historyTraceEvents.length - 1);
+    const statuses: Record<string, NodeStatus> = {};
+    const outputs = new Map<string, NodeExecutionStatus>();
+    for (let i = 0; i <= idx; i += 1) {
+      const event = historyTraceEvents[i];
+      statuses[event.nodeId] = event.status;
+      const raw = historyEvents?.find((ev) => String(ev.id) === event.id);
+      const payload = raw?.payload as Record<string, unknown> | undefined;
+      const output = payload?.output as Record<string, unknown> | undefined;
+      outputs.set(event.nodeId, {
+        node_id: event.nodeId,
+        node_type: (nodeTypeById.get(event.nodeId) ?? 'task') as NodeExecutionStatus['node_type'],
+        status: event.status,
+        output: output ?? null,
+        error: (payload?.error as string | undefined) ?? null,
+        version: raw?.version ?? 0,
+      });
+    }
+    return { statuses, outputs };
+  }, [historyMode, historyIndex, historyTraceEvents, historyEvents, nodeTypeById]);
+
   const globalState = useMemo(() => {
     const state: Record<string, unknown> = {};
-    for (const [nodeId, nodeStatus] of nodeOutputs) {
+    const source = historyMode && snapshotFromHistory ? snapshotFromHistory.outputs : nodeOutputs;
+    for (const [nodeId, nodeStatus] of source) {
       if (nodeStatus.status === 'completed' && nodeStatus.output) {
         state[nodeId] = nodeStatus.output;
       }
     }
     return state;
-  }, [nodeOutputs]);
+  }, [nodeOutputs, historyMode, snapshotFromHistory]);
 
   const activeNodeIds = useMemo(() => {
     const active = new Set<string>();
-    for (const [nodeId, status] of Object.entries(nodeStatuses)) {
+    const statuses = historyMode && snapshotFromHistory ? snapshotFromHistory.statuses : nodeStatuses;
+    for (const [nodeId, status] of Object.entries(statuses)) {
       if (status === 'running') {
         active.add(nodeId);
       }
     }
     return active;
-  }, [nodeStatuses]);
+  }, [nodeStatuses, historyMode, snapshotFromHistory]);
+
+  const viewNodeStatuses = historyMode && snapshotFromHistory ? snapshotFromHistory.statuses : nodeStatuses;
+  const viewNodeOutputs = historyMode && snapshotFromHistory ? snapshotFromHistory.outputs : nodeOutputs;
+  const viewTraceEvents = historyMode ? historyTraceEvents : traceEvents;
 
   // Handle cancel button
   const handleCancel = useCallback(() => {
@@ -269,18 +334,56 @@ export function ExecutionMonitor({
 
       <div className="flex-1 min-h-0 flex">
         <div className="w-64 border-r bg-white">
+          <div className="px-3 py-2 border-b space-y-2">
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setHistoryMode(false)}
+                className={`px-2 py-1 rounded border ${
+                  historyMode ? 'border-gray-200 text-gray-500' : 'border-emerald-300 text-emerald-700 bg-emerald-50'
+                }`}
+              >
+                Live
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryMode(true)}
+                className={`px-2 py-1 rounded border ${
+                  historyMode ? 'border-blue-300 text-blue-700 bg-blue-50' : 'border-gray-200 text-gray-500'
+                }`}
+                disabled={!historyTraceEvents.length}
+              >
+                History
+              </button>
+            </div>
+            {historyMode && historyTraceEvents.length > 0 && (
+              <div className="space-y-1">
+                <input
+                  type="range"
+                  min={0}
+                  max={historyTraceEvents.length - 1}
+                  value={Math.min(historyIndex, historyTraceEvents.length - 1)}
+                  onChange={(e) => setHistoryIndex(Number(e.target.value))}
+                  className="w-full"
+                />
+                <div className="text-[10px] text-gray-500">
+                  Event {Math.min(historyIndex, historyTraceEvents.length - 1) + 1} / {historyTraceEvents.length}
+                </div>
+              </div>
+            )}
+          </div>
           <TraceTimeline
-            events={traceEvents}
+            events={viewTraceEvents}
             selectedNodeId={selectedNodeId}
             onNodeSelect={setSelectedNodeId}
-            isLive={execution.status === 'running'}
+            isLive={!historyMode && execution.status === 'running'}
           />
         </div>
         <div className="flex-1 min-h-0 flex flex-col">
           <div className="flex-1 min-h-0">
             <WorkflowCanvas
               workflow={workflow}
-              nodeStatuses={nodeStatuses}
+              nodeStatuses={viewNodeStatuses}
               activeNodeIds={activeNodeIds}
               readOnly
               onNodeSelect={setSelectedNodeId}
@@ -289,7 +392,7 @@ export function ExecutionMonitor({
           <div className="h-56">
             <StateInspector
               workflow={workflow}
-              nodeOutputs={nodeOutputs}
+              nodeOutputs={viewNodeOutputs}
               selectedNodeId={selectedNodeId}
               globalState={globalState}
             />
