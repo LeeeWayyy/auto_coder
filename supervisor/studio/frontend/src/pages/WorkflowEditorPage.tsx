@@ -2,12 +2,14 @@
  * Page for editing a workflow.
  */
 
-import { useCallback, useState, useEffect, useMemo } from 'react';
+import { useCallback, useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useWorkflow, useUpdateWorkflow, useCreateWorkflow } from '../hooks/useWorkflows';
 import { useExecuteWorkflow } from '../hooks/useExecutions';
 import { WorkflowCanvas } from '../components/WorkflowCanvas';
-import type { WorkflowGraph } from '../types/workflow';
+import { NodePalette, getDefaultConfig } from '../components/NodePalette';
+import { PropertiesPanel, type PropertiesPanelHandle } from '../components/PropertiesPanel';
+import type { WorkflowGraph, Node, NodeType } from '../types/workflow';
 
 // Default workflow for "new" page
 const defaultWorkflow: WorkflowGraph = {
@@ -59,11 +61,14 @@ export function WorkflowEditorPage() {
     `workflow-${Date.now().toString(36)}`
   );
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [edgeFrom, setEdgeFrom] = useState<string>('');
-  const [edgeTo, setEdgeTo] = useState<string>('');
   const [runGoal, setRunGoal] = useState('');
   const [runInputs, setRunInputs] = useState('');
   const [runLabel, setRunLabel] = useState('');
+  const [runInputError, setRunInputError] = useState<string | null>(null);
+  const [nodeFieldErrors, setNodeFieldErrors] = useState<Record<string, string | null>>({});
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [propertiesOpen, setPropertiesOpen] = useState(true);
+  const propertiesPanelRef = useRef<PropertiesPanelHandle | null>(null);
 
   // Reset state when navigating to a different workflow
   // React Router reuses the component, so we need to clear stale state
@@ -118,6 +123,10 @@ export function WorkflowEditorPage() {
   // Handle save - returns the saved workflow ID on success, undefined on failure
   const handleSave = useCallback(async (): Promise<string | undefined> => {
     if (!currentWorkflow) return undefined;
+    if (propertiesPanelRef.current) {
+      const valid = propertiesPanelRef.current.validateNodeFields();
+      if (!valid) return undefined;
+    }
 
     setSaveError(null); // Clear previous errors
     try {
@@ -169,18 +178,19 @@ export function WorkflowEditorPage() {
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           inputData = parsed as Record<string, unknown>;
         } else {
-          setRunError('Run inputs must be a JSON object.');
+          setRunInputError('Run inputs must be a JSON object.');
           return;
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Invalid JSON input.';
-        setRunError(message);
+        setRunInputError(message);
         return;
       }
     }
     if (runGoal.trim()) {
       inputData = { ...inputData, goal: runGoal.trim() };
     }
+    setRunInputError(null);
 
     // Determine which graph_id to use for execution
     let graphIdToRun = currentWorkflow.id;
@@ -219,6 +229,7 @@ export function WorkflowEditorPage() {
     executeMutation,
     navigate,
     runGoal,
+    runLabel,
     runInputs,
   ]);
 
@@ -227,8 +238,8 @@ export function WorkflowEditorPage() {
     return currentWorkflow.nodes.find((n) => n.id === selectedNodeId) || null;
   }, [currentWorkflow, selectedNodeId]);
 
-  const updateSelectedNode = useCallback(
-    (patch: Partial<WorkflowGraph['nodes'][number]>) => {
+  const handleNodeUpdate = useCallback(
+    (patch: Partial<Node>) => {
       if (!currentWorkflow || !selectedNode) return;
       const updatedNodes = currentWorkflow.nodes.map((node) =>
         node.id === selectedNode.id ? { ...node, ...patch } : node
@@ -238,72 +249,58 @@ export function WorkflowEditorPage() {
     [currentWorkflow, selectedNode, handleChange]
   );
 
-  const updateTaskConfig = useCallback(
-    (patch: Partial<NonNullable<WorkflowGraph['nodes'][number]['task_config']>>) => {
-      if (!currentWorkflow || !selectedNode) return;
-      const task_config = { ...(selectedNode.task_config || { role: 'implementer' }), ...patch };
-      updateSelectedNode({ task_config });
-    },
-    [currentWorkflow, selectedNode, updateSelectedNode]
-  );
-
-  const updateGateConfig = useCallback(
-    (patch: Partial<NonNullable<WorkflowGraph['nodes'][number]['gate_config']>>) => {
-      if (!currentWorkflow || !selectedNode) return;
-      const gate_config = {
-        ...(selectedNode.gate_config || { gate_type: 'test' }),
-        ...patch,
-      };
-      updateSelectedNode({ gate_config });
-    },
-    [currentWorkflow, selectedNode, updateSelectedNode]
-  );
-
   // Counter to ensure unique IDs even within same millisecond
-  const nodeIdCounterRef = React.useRef(0);
+  const nodeIdCounterRef = useRef(0);
+
+  const generateNodeId = useCallback((nodeType: NodeType) => {
+    const timestamp = Date.now().toString(36);
+    const suffix = (nodeIdCounterRef.current++).toString(36);
+    return `${nodeType}-${timestamp}-${suffix}`;
+  }, []);
+
+  const handleNodeAdd = useCallback(
+    (nodeType: NodeType, position: { x: number; y: number }) => {
+      if (!currentWorkflow) return;
+      const nextId = generateNodeId(nodeType);
+      const countForType =
+        currentWorkflow.nodes.filter((node) => node.type === nodeType).length + 1;
+      const label = `${nodeType.charAt(0).toUpperCase()}${nodeType.slice(1)} ${countForType}`;
+      const newNode: Node = {
+        id: nextId,
+        type: nodeType,
+        label,
+        description: '',
+        position,
+        ...getDefaultConfig(nodeType),
+      };
+      handleChange({ ...currentWorkflow, nodes: [...currentWorkflow.nodes, newNode] });
+      setSelectedNodeId(nextId);
+    },
+    [currentWorkflow, generateNodeId, handleChange]
+  );
 
   const addTaskNode = useCallback(() => {
     if (!currentWorkflow) return;
-    // Generate unique ID using timestamp + counter to prevent collisions
-    const timestamp = Date.now().toString(36);
-    const suffix = (nodeIdCounterRef.current++).toString(36);
-    const nextId = `task-${timestamp}-${suffix}`;
-    const newNode = {
-      id: nextId,
-      type: 'task' as const,
-      label: `Task ${currentWorkflow.nodes.length + 1}`,
-      description: '',
-      position: { x: 200, y: 100 + currentWorkflow.nodes.length * 120 },
-      task_config: { role: 'implementer' },
-    };
-    handleChange({ ...currentWorkflow, nodes: [...currentWorkflow.nodes, newNode] });
-    setSelectedNodeId(nextId);
-    if (!edgeFrom) {
-      setEdgeFrom(nextId);
-    }
-  }, [currentWorkflow, handleChange]);
+    handleNodeAdd('task', {
+      x: 200,
+      y: 100 + currentWorkflow.nodes.length * 120,
+    });
+  }, [currentWorkflow, handleNodeAdd]);
 
-  useEffect(() => {
-    if (!currentWorkflow || currentWorkflow.nodes.length === 0) return;
-    if (!edgeFrom) {
-      setEdgeFrom(currentWorkflow.nodes[0].id);
-    }
-    if (!edgeTo && currentWorkflow.nodes.length > 1) {
-      setEdgeTo(currentWorkflow.nodes[1].id);
-    }
-  }, [currentWorkflow, edgeFrom, edgeTo]);
-
-  const addEdge = useCallback(() => {
-    if (!currentWorkflow) return;
-    if (!edgeFrom || !edgeTo || edgeFrom === edgeTo) return;
-    const edgeId = `${edgeFrom}-${edgeTo}-${Date.now().toString(36)}`;
-    const newEdge = {
-      id: edgeId,
-      source: edgeFrom,
-      target: edgeTo,
-    };
-    handleChange({ ...currentWorkflow, edges: [...currentWorkflow.edges, newEdge] });
-  }, [currentWorkflow, edgeFrom, edgeTo, handleChange]);
+  const addEdge = useCallback(
+    (source: string, target: string) => {
+      if (!currentWorkflow) return;
+      if (!source || !target || source === target) return;
+      const edgeId = `${source}-${target}-${Date.now().toString(36)}`;
+      const newEdge = {
+        id: edgeId,
+        source,
+        target,
+      };
+      handleChange({ ...currentWorkflow, edges: [...currentWorkflow.edges, newEdge] });
+    },
+    [currentWorkflow, handleChange]
+  );
 
   const removeSelectedNode = useCallback(() => {
     if (!currentWorkflow || !selectedNode) return;
@@ -314,13 +311,10 @@ export function WorkflowEditorPage() {
     );
     handleChange({ ...currentWorkflow, nodes, edges });
     setSelectedNodeId(null);
-    if (edgeFrom === removedId) {
-      setEdgeFrom(nodes[0]?.id || '');
-    }
-    if (edgeTo === removedId) {
-      setEdgeTo(nodes[1]?.id || nodes[0]?.id || '');
-    }
-  }, [currentWorkflow, selectedNode, handleChange, edgeFrom, edgeTo]);
+  }, [currentWorkflow, selectedNode, handleChange]);
+
+  const canSave = !Object.values(nodeFieldErrors).some((error) => error !== null);
+  const canRun = !runInputError;
 
   if (!isNew && isLoading) {
     return (
@@ -405,7 +399,7 @@ export function WorkflowEditorPage() {
           )}
           <button
             onClick={handleSave}
-            disabled={createMutation.isPending || updateMutation.isPending}
+            disabled={!canSave || createMutation.isPending || updateMutation.isPending}
             className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50"
           >
             {createMutation.isPending || updateMutation.isPending
@@ -414,7 +408,7 @@ export function WorkflowEditorPage() {
           </button>
           <button
             onClick={handleRun}
-            disabled={executeMutation.isPending || createMutation.isPending || updateMutation.isPending}
+            disabled={!canRun || executeMutation.isPending || createMutation.isPending || updateMutation.isPending}
             className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 rounded-md hover:bg-emerald-700 disabled:opacity-50"
           >
             {executeMutation.isPending ? 'Starting...' : (createMutation.isPending || updateMutation.isPending) ? 'Saving...' : 'Run'}
@@ -423,178 +417,60 @@ export function WorkflowEditorPage() {
       </div>
 
       <div className="flex-1 flex overflow-hidden min-h-0">
-        {/* Canvas */}
-        <div className="flex-1 min-h-0">
+        <div className={`border-r bg-white flex flex-col ${paletteOpen ? 'w-56 min-w-48' : 'w-10'}`}>
+          <button
+            type="button"
+            onClick={() => setPaletteOpen((prev) => !prev)}
+            className="h-10 text-xs font-semibold text-gray-600 border-b hover:bg-gray-50"
+          >
+            {paletteOpen ? '<' : '>'}
+          </button>
+          {paletteOpen && (
+            <div className="flex-1 overflow-y-auto">
+              <NodePalette onNodeAdd={handleNodeAdd} />
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 min-h-0 min-w-[400px]">
           <WorkflowCanvas
             workflow={currentWorkflow}
             onWorkflowChange={handleChange}
             onNodeSelect={setSelectedNodeId}
+            onNodeAdd={handleNodeAdd}
           />
         </div>
 
-        {/* Sidebar */}
-        <div className="w-80 border-l bg-white p-4 overflow-y-auto">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">Node Details</h3>
-          {!selectedNode ? (
-            <div className="text-sm text-gray-500">Select a node to edit its settings.</div>
-          ) : (
-            <div className="space-y-4">
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Node ID</div>
-                <div className="text-sm font-mono text-gray-800">{selectedNode.id}</div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Type</div>
-                <div className="text-sm text-gray-800">{selectedNode.type}</div>
-              </div>
-              <label className="block">
-                <span className="text-xs text-gray-500">Label</span>
-                <input
-                  id="node-label"
-                  name="node-label"
-                  value={selectedNode.label || ''}
-                  onChange={(e) => updateSelectedNode({ label: e.target.value })}
-                  className="mt-1 w-full rounded border border-gray-200 px-2 py-1 text-sm"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs text-gray-500">Description</span>
-                <input
-                  id="node-description"
-                  name="node-description"
-                  value={selectedNode.description || ''}
-                  onChange={(e) => updateSelectedNode({ description: e.target.value })}
-                  className="mt-1 w-full rounded border border-gray-200 px-2 py-1 text-sm"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={removeSelectedNode}
-                className="w-full px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 rounded hover:bg-red-100"
-              >
-                Remove Node
-              </button>
-
-              {selectedNode.type === 'task' && (
-                <label className="block">
-                  <span className="text-xs text-gray-500">Role</span>
-                  <input
-                    id="task-role"
-                    name="task-role"
-                    value={selectedNode.task_config?.role || ''}
-                    onChange={(e) => updateTaskConfig({ role: e.target.value })}
-                    className="mt-1 w-full rounded border border-gray-200 px-2 py-1 text-sm"
-                    list="role-suggestions"
-                    placeholder="implementer"
-                  />
-                  <datalist id="role-suggestions">
-                    <option value="planner" />
-                    <option value="implementer" />
-                    <option value="reviewer" />
-                    <option value="security_reviewer" />
-                    <option value="tester" />
-                    <option value="debugger" />
-                  </datalist>
-                </label>
-              )}
-
-              {selectedNode.type === 'gate' && (
-                <label className="block">
-                  <span className="text-xs text-gray-500">Gate Type</span>
-                  <input
-                    id="gate-type"
-                    name="gate-type"
-                    value={selectedNode.gate_config?.gate_type || ''}
-                    onChange={(e) => updateGateConfig({ gate_type: e.target.value })}
-                    className="mt-1 w-full rounded border border-gray-200 px-2 py-1 text-sm"
-                    placeholder="test"
-                  />
-                </label>
-              )}
-
-              <div className="pt-4 border-t">
-                <div className="text-xs text-gray-500 mb-2">Add Edge</div>
-                <div className="space-y-2">
-                  <select
-                    id="edge-from"
-                    name="edge-from"
-                    value={edgeFrom}
-                    onChange={(e) => setEdgeFrom(e.target.value)}
-                    className="w-full rounded border border-gray-200 px-2 py-1 text-sm"
-                  >
-                    <option value="">From…</option>
-                    {currentWorkflow.nodes.map((node) => (
-                      <option key={node.id} value={node.id}>
-                        {node.label || node.id}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    id="edge-to"
-                    name="edge-to"
-                    value={edgeTo}
-                    onChange={(e) => setEdgeTo(e.target.value)}
-                    className="w-full rounded border border-gray-200 px-2 py-1 text-sm"
-                  >
-                    <option value="">To…</option>
-                    {currentWorkflow.nodes.map((node) => (
-                      <option key={node.id} value={node.id}>
-                        {node.label || node.id}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={addEdge}
-                    className="w-full px-3 py-1.5 text-sm font-medium text-emerald-700 bg-emerald-50 rounded hover:bg-emerald-100"
-                  >
-                    Add Edge
-                  </button>
-                </div>
-              </div>
-
-              <div className="pt-4 border-t">
-                <div className="text-xs text-gray-500 mb-2">Run Inputs</div>
-                <div className="space-y-2">
-                  <label className="block">
-                    <span className="text-xs text-gray-500">Goal</span>
-                    <input
-                      id="run-goal"
-                      name="run-goal"
-                      value={runGoal}
-                      onChange={(e) => setRunGoal(e.target.value)}
-                      className="mt-1 w-full rounded border border-gray-200 px-2 py-1 text-sm"
-                      placeholder="Describe the desired outcome"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="text-xs text-gray-500">Run Label (optional)</span>
-                    <input
-                      id="run-label"
-                      name="run-label"
-                      value={runLabel}
-                      onChange={(e) => setRunLabel(e.target.value)}
-                      className="mt-1 w-full rounded border border-gray-200 px-2 py-1 text-sm font-mono"
-                      placeholder="auto-generated if empty"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="text-xs text-gray-500">JSON Inputs</span>
-                    <textarea
-                      id="run-inputs"
-                      name="run-inputs"
-                      value={runInputs}
-                      onChange={(e) => setRunInputs(e.target.value)}
-                      className="mt-1 w-full rounded border border-gray-200 px-2 py-1 text-sm font-mono"
-                      rows={4}
-                      placeholder='{"key":"value"}'
-                    />
-                    <div className="mt-1 text-[11px] text-gray-400">
-                      Must be a JSON object (not an array).
-                    </div>
-                  </label>
-                </div>
-              </div>
+        <div className={`border-l bg-white flex flex-col ${propertiesOpen ? 'w-80 min-w-64' : 'w-10'}`}>
+          <button
+            type="button"
+            onClick={() => setPropertiesOpen((prev) => !prev)}
+            className="h-10 text-xs font-semibold text-gray-600 border-b hover:bg-gray-50"
+          >
+            {propertiesOpen ? '>' : '<'}
+          </button>
+          {propertiesOpen && (
+            <div className="flex-1 overflow-y-auto">
+              <PropertiesPanel
+                ref={propertiesPanelRef}
+                selectedNode={selectedNode}
+                workflow={currentWorkflow}
+                onNodeUpdate={handleNodeUpdate}
+                onNodeDelete={removeSelectedNode}
+                onEdgeAdd={addEdge}
+                runGoal={runGoal}
+                onRunGoalChange={setRunGoal}
+                runInputs={runInputs}
+                onRunInputsChange={(value) => {
+                  setRunInputs(value);
+                  setRunInputError(null);
+                }}
+                runLabel={runLabel}
+                onRunLabelChange={setRunLabel}
+                runInputError={runInputError}
+                onRunInputErrorChange={setRunInputError}
+                onNodeErrorsChange={setNodeFieldErrors}
+              />
             </div>
           )}
         </div>

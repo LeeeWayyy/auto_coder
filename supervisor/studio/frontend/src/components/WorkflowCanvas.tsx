@@ -23,7 +23,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 // Use default ReactFlow node renderer for stability
-import type { WorkflowGraph, Node, Edge, NodeStatus } from '../types/workflow';
+import type { WorkflowGraph, Node, Edge, NodeStatus, NodeType } from '../types/workflow';
 import { nodeTypes } from './nodes';
 
 const EMPTY_STATUSES: Record<string, NodeStatus> = {};
@@ -31,9 +31,11 @@ const EMPTY_STATUSES: Record<string, NodeStatus> = {};
 export interface WorkflowCanvasProps {
   workflow: WorkflowGraph;
   nodeStatuses?: Record<string, NodeStatus>;
+  activeNodeIds?: Set<string>;
   readOnly?: boolean;
   onWorkflowChange?: (workflow: WorkflowGraph) => void;
   onNodeSelect?: (nodeId: string | null) => void;
+  onNodeAdd?: (nodeType: NodeType, position: { x: number; y: number }) => void;
 }
 
 /**
@@ -70,15 +72,19 @@ function toFlowNodes(
  * Convert workflow schema to ReactFlow edges.
  * Stores original edge metadata in data property to preserve it on round-trip.
  */
-function toFlowEdges(edges: Edge[]): FlowEdge[] {
+function toFlowEdges(edges: Edge[], activeNodeIds?: Set<string>): FlowEdge[] {
+  const active = activeNodeIds || new Set<string>();
   return edges.map((edge, index) => ({
     id: edge.id || `${edge.source}-${edge.target}-${index}`,
     source: edge.source,
     target: edge.target,
-    animated: edge.is_loop_edge,
-    style: edge.is_loop_edge
-      ? { strokeDasharray: '5,5' }
-      : undefined,
+    animated: (active.has(edge.source) || active.has(edge.target)) || edge.is_loop_edge,
+    style:
+      active.has(edge.source) || active.has(edge.target)
+        ? { stroke: '#f59e0b', strokeWidth: 2 }
+        : edge.is_loop_edge
+        ? { strokeDasharray: '5,5' }
+        : undefined,
     label: edge.condition,
     // Preserve original edge metadata for round-trip conversion
     data: {
@@ -168,9 +174,11 @@ function fromFlowEdges(flowEdges: FlowEdge[], originalEdges: Edge[]): Edge[] {
 export function WorkflowCanvas({
   workflow,
   nodeStatuses = EMPTY_STATUSES,
+  activeNodeIds,
   readOnly = false,
   onWorkflowChange,
   onNodeSelect,
+  onNodeAdd,
 }: WorkflowCanvasProps) {
   const reactFlow = useReactFlow();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -216,8 +224,8 @@ export function WorkflowCanvas({
 
     // Sync ReactFlow state from workflow model updates.
     setNodes(toFlowNodes(workflow.nodes, nodeStatuses));
-    setEdges(toFlowEdges(workflow.edges));
-  }, [workflow.id, workflow.nodes, workflow.edges, nodeStatuses, setNodes, setEdges]);
+    setEdges(toFlowEdges(workflow.edges, activeNodeIds));
+  }, [workflow.id, workflow.nodes, workflow.edges, nodeStatuses, activeNodeIds, setNodes, setEdges]);
 
   useEffect(() => {
     if (!rfInstanceRef.current) return;
@@ -369,6 +377,33 @@ export function WorkflowCanvas({
     onNodeSelect?.(null);
   }, [onNodeSelect]);
 
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      if (readOnly) return;
+      const nodeType = event.dataTransfer.getData('application/reactflow-node-type');
+      if (!nodeType || !onNodeAdd) return;
+      const position = reactFlow.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      onNodeAdd(nodeType as NodeType, position);
+    },
+    [onNodeAdd, reactFlow, readOnly]
+  );
+
+  const onDragOver = useCallback(
+    (event: React.DragEvent) => {
+      if (readOnly) {
+        event.dataTransfer.dropEffect = 'none';
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    },
+    [readOnly]
+  );
+
   // Handle edge deletion
   const onEdgesDelete = useCallback(
     (deletedEdges: FlowEdge[]) => {
@@ -440,6 +475,8 @@ export function WorkflowCanvas({
         edges={edges}
         nodeTypes={nodeTypes}
         style={{ width: '100%', height: '100%' }}
+        onDrop={onDrop}
+        onDragOver={onDragOver}
         onInit={(instance) => {
           rfInstanceRef.current = instance;
           if (nodes.length > 0 && !didAutoFitRef.current) {
