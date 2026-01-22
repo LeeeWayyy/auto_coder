@@ -259,7 +259,7 @@ class Database:
         id TEXT PRIMARY KEY,
         workflow_id TEXT NOT NULL,
         graph_id TEXT NOT NULL,
-        status TEXT CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+        status TEXT CHECK(status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
         started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         completed_at TIMESTAMP,
         error TEXT,
@@ -354,6 +354,43 @@ class Database:
 
         # components.description was added later
         _ensure_column("components", "description", "TEXT DEFAULT ''")
+
+        # Expand graph_executions status CHECK to include 'interrupted'
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='graph_executions'"
+        ).fetchone()
+        if row and row[0] and "interrupted" not in row[0]:
+            # Disable FK checks to allow table swap (node_executions references graph_executions).
+            conn.execute("PRAGMA foreign_keys = OFF")
+            try:
+                conn.execute("ALTER TABLE graph_executions RENAME TO graph_executions_old")
+                conn.execute(
+                    """
+                    CREATE TABLE graph_executions (
+                        id TEXT PRIMARY KEY,
+                        workflow_id TEXT NOT NULL,
+                        graph_id TEXT NOT NULL,
+                        status TEXT CHECK(status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        error TEXT,
+                        FOREIGN KEY (graph_id) REFERENCES graph_workflows(id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO graph_executions (id, workflow_id, graph_id, status, started_at, completed_at, error)
+                    SELECT id, workflow_id, graph_id, status, started_at, completed_at, error
+                    FROM graph_executions_old
+                    """
+                )
+                conn.execute("DROP TABLE graph_executions_old")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_graph_exec_status ON graph_executions(workflow_id, status)"
+                )
+            finally:
+                conn.execute("PRAGMA foreign_keys = ON")
 
     def rebuild_projections(self) -> None:
         """Rebuild projection tables from the immutable event log."""

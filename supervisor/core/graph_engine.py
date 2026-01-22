@@ -35,7 +35,7 @@ from supervisor.core.graph_schema import (
     TransitionCondition,
     WorkflowGraph,
 )
-from supervisor.core.interaction import ApprovalDecision
+from supervisor.core.interaction import ApprovalDecision, InteractionBridge
 from supervisor.core.state import Database
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,7 @@ class GraphOrchestrator:
         gate_executor: GateExecutor,
         gate_loader: GateLoader,
         max_parallel: int = 4,
+        interaction_bridge: "InteractionBridge | None" = None,
     ):
         self.db = db
         self.engine = execution_engine
@@ -136,6 +137,7 @@ class GraphOrchestrator:
         self.gate_loader = gate_loader
         self.semaphore = asyncio.Semaphore(max_parallel)
         self.approval_gate = ApprovalGate(db)
+        self.interaction_bridge = interaction_bridge
         # Status callbacks for real-time WebSocket updates (Phase 3)
         # Protected by lock for thread-safety (callbacks invoked from worker threads)
         # Callback signature: (node_id, status, output, version) -> None
@@ -371,6 +373,14 @@ class GraphOrchestrator:
             ).fetchone()
             return (True, row[0] if row else 0)
         return (False, 0)
+
+    def _set_execution_status(self, execution_id: str, status: str) -> None:
+        """Set execution status in graph_executions."""
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE graph_executions SET status=? WHERE id=?",
+                (status, execution_id),
+            )
 
     def _get_workflow(self, execution_id: str) -> WorkflowGraph:
         """Load workflow definition for an execution."""
@@ -1951,6 +1961,8 @@ class GraphOrchestrator:
     async def _execute_human(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute human approval node."""
         config = node.human_config
+        # Mark execution as interrupted while waiting on human input.
+        await asyncio.to_thread(self._set_execution_status, execution_id, "interrupted")
 
         # Prepare changes list
         changes = []
@@ -1968,11 +1980,19 @@ class GraphOrchestrator:
             title=config.title,
             changes=changes,
             review_summary=json.dumps(input_data, indent=2),
-            bridge=None,
+            component_id=node.id,
+            bridge=self.interaction_bridge,
             diff_lines=None,
         )
 
-        return {"approved": decision == ApprovalDecision.APPROVE}
+        if decision == ApprovalDecision.REJECT:
+            # Propagate rejection as failure.
+            await asyncio.to_thread(self._set_execution_status, execution_id, "failed")
+            raise RuntimeError(f"Human approval rejected for node '{node.id}'")
+
+        # Resume execution for approve/skip/edit.
+        await asyncio.to_thread(self._set_execution_status, execution_id, "running")
+        return {"approved": decision.is_proceed()}
 
     async def _execute_subgraph(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute nested workflow (not yet implemented)."""

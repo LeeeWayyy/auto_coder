@@ -39,6 +39,7 @@ from starlette.concurrency import run_in_threadpool
 from supervisor.core.engine import ExecutionEngine
 from supervisor.core.graph_engine import GraphOrchestrator
 from supervisor.core.graph_schema import WorkflowGraph
+from supervisor.core.interaction import InteractionBridge, ApprovalDecision
 from supervisor.core.state import Database
 from supervisor.core.worker import WorkflowWorker
 from supervisor.sandbox.executor import DockerNotAvailableError, EgressNotConfiguredError
@@ -53,6 +54,8 @@ app = FastAPI(
 
 # Expose host CLI mode to the frontend (for warning banner).
 HOST_CLI_MODE = os.environ.get("SUPERVISOR_USE_HOST_CLI") == "1"
+_interaction_bridge = InteractionBridge()
+_pending_human_requests: dict[tuple[str, str], str] = {}
 
 
 # CORS for local development - restricted to known origins
@@ -201,7 +204,13 @@ def get_orchestrator() -> GraphOrchestrator:
         db = get_db()
         root = _find_project_root()
         _engine = ExecutionEngine(root)
-        _orchestrator = GraphOrchestrator(db, _engine, _engine.gate_executor, _engine.gate_loader)
+        _orchestrator = GraphOrchestrator(
+            db,
+            _engine,
+            _engine.gate_executor,
+            _engine.gate_loader,
+            interaction_bridge=_interaction_bridge,
+        )
     return _orchestrator
 
 
@@ -693,7 +702,6 @@ async def respond_to_human_node(
 ) -> dict[str, str]:
     """Handle human response to interrupted execution."""
     db = get_db()
-
     def get_status():
         with db._connect() as conn:
             row = conn.execute(
@@ -704,16 +712,59 @@ async def respond_to_human_node(
     status = await run_in_threadpool(get_status)
     if not status:
         raise HTTPException(status_code=404, detail="Execution not found")
-    if status != "interrupted":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Execution not interrupted (current status: {status})",
-        )
 
-    # TODO: Forward response to supervisor engine and update status accordingly.
-    # This is a placeholder response until backend orchestration support is added.
-    _ = request
-    return {"status": "resumed"}
+    key = (execution_id, request.node_id)
+    gate_id = _pending_human_requests.get(key)
+    if not gate_id:
+        raise HTTPException(status_code=404, detail="No pending approval for node")
+
+    if request.action == "approve":
+        decision = ApprovalDecision.APPROVE
+        next_status = "running"
+    elif request.action == "edit":
+        decision = ApprovalDecision.EDIT
+        next_status = "running"
+    else:
+        decision = ApprovalDecision.REJECT
+        next_status = "failed"
+
+    ok = _interaction_bridge.submit_decision(gate_id, decision)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Approval already resolved")
+
+    _pending_human_requests.pop(key, None)
+
+    def update_status():
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE graph_executions SET status=? WHERE id=?",
+                (next_status, execution_id),
+            )
+
+    await run_in_threadpool(update_status)
+
+    await run_in_threadpool(
+        db.append_execution_event,
+        execution_id,
+        "human_resolved",
+        request.node_id,
+        None,
+        next_status,
+        {"action": request.action},
+        0,
+    )
+
+    await manager.broadcast(
+        execution_id,
+        {
+            "type": "human_resolved",
+            "node_id": request.node_id,
+            "action": request.action,
+            "status": next_status,
+        },
+    )
+
+    return {"status": next_status}
 
 
 @app.get("/api/executions")
@@ -948,6 +999,63 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+@app.on_event("startup")
+async def start_human_approval_poller() -> None:
+    async def poll():
+        db = get_db()
+        while True:
+            await asyncio.sleep(0.5)
+            requests = _interaction_bridge.get_pending_requests()
+            for request in requests:
+                node_id = request.component_id or ""
+                key = (request.feature_id, node_id)
+                _pending_human_requests[key] = request.gate_id
+
+                try:
+                    current_output = json.loads(request.review_summary)
+                except Exception:
+                    current_output = None
+
+                def mark_interrupted():
+                    with db._connect() as conn:
+                        conn.execute(
+                            "UPDATE graph_executions SET status='interrupted' "
+                            "WHERE id=? AND status='running'",
+                            (request.feature_id,),
+                        )
+
+                await run_in_threadpool(mark_interrupted)
+
+                await run_in_threadpool(
+                    db.append_execution_event,
+                    request.feature_id,
+                    "human_waiting",
+                    node_id,
+                    None,
+                    "interrupted",
+                    {
+                        "title": request.title,
+                        "description": request.description,
+                        "current_output": current_output,
+                        "gate_id": request.gate_id,
+                    },
+                    0,
+                )
+
+                await manager.broadcast(
+                    request.feature_id,
+                    {
+                        "type": "human_waiting",
+                        "node_id": node_id,
+                        "title": request.title,
+                        "description": request.description or "",
+                        "current_output": current_output,
+                    },
+                )
+
+    asyncio.create_task(poll())
 
 
 @app.websocket("/ws/executions/{execution_id}")
