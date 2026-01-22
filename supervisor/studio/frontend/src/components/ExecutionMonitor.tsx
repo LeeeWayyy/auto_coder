@@ -9,6 +9,7 @@ import type {
   ExecutionStatus,
   NodeExecutionStatus,
   TraceEvent,
+  ExecutionEvent,
   NodeType,
 } from '../types/workflow';
 import {
@@ -23,7 +24,7 @@ import { TraceTimeline } from './TraceTimeline';
 import { StateInspector } from './StateInspector';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ApprovalModal } from './ApprovalModal';
-import { respondToHumanNode } from '../api/client';
+import { respondToHumanNode, createExecutionEventStream } from '../api/client';
 
 interface ExecutionMonitorProps {
   executionId: string;
@@ -45,6 +46,9 @@ export function ExecutionMonitor({
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [historyMode, setHistoryMode] = useState(false);
   const [historyIndex, setHistoryIndex] = useState(0);
+  const [streamedOutputs, setStreamedOutputs] = useState(
+    new Map<string, Record<string, unknown>>()
+  );
   const [humanWaiting, setHumanWaiting] = useState<{
     nodeId: string;
     title: string;
@@ -57,6 +61,37 @@ export function ExecutionMonitor({
 
   useEffect(() => {
     setTraceEvents([]);
+  }, [executionId]);
+
+  useEffect(() => {
+    setStreamedOutputs(new Map());
+  }, [executionId]);
+
+  useEffect(() => {
+    const source = createExecutionEventStream(executionId);
+    const handleEvent = (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data) as ExecutionEvent;
+        if (data.event_type === 'node_update' && data.node_id) {
+          const payload = (data.payload || {}) as Record<string, unknown>;
+          const output = payload.output as Record<string, unknown> | undefined;
+          if (output && Object.keys(output).length > 0) {
+            setStreamedOutputs((prev) => {
+              const next = new Map(prev);
+              next.set(data.node_id as string, output);
+              return next;
+            });
+          }
+        }
+      } catch {
+        // Ignore malformed events.
+      }
+    };
+    source.addEventListener('execution_event', handleEvent);
+    return () => {
+      source.removeEventListener('execution_event', handleEvent);
+      source.close();
+    };
   }, [executionId]);
 
   useEffect(() => {
@@ -207,6 +242,7 @@ export function ExecutionMonitor({
   const viewNodeStatuses = historyMode && snapshotFromHistory ? snapshotFromHistory.statuses : nodeStatuses;
   const viewNodeOutputs = historyMode && snapshotFromHistory ? snapshotFromHistory.outputs : nodeOutputs;
   const viewTraceEvents = historyMode ? historyTraceEvents : traceEvents;
+  const streamedOutput = selectedNodeId ? streamedOutputs.get(selectedNodeId) || null : null;
 
   // Handle cancel button
   const handleCancel = useCallback(() => {
@@ -395,6 +431,7 @@ export function ExecutionMonitor({
               nodeOutputs={viewNodeOutputs}
               selectedNodeId={selectedNodeId}
               globalState={globalState}
+              streamedOutput={streamedOutput}
             />
           </div>
         </div>

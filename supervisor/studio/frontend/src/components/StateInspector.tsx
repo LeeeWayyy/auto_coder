@@ -10,6 +10,7 @@ export interface StateInspectorProps {
   nodeOutputs: Map<string, NodeExecutionStatus>;
   workflow: WorkflowGraph;
   globalState: Record<string, unknown>;
+  streamedOutput?: Record<string, unknown> | null;
 }
 
 function copyToClipboard(data: unknown) {
@@ -21,6 +22,7 @@ export function StateInspector({
   nodeOutputs,
   workflow,
   globalState,
+  streamedOutput,
 }: StateInspectorProps) {
   const nodeMap = useMemo(() => new Map(workflow.nodes.map((n) => [n.id, n])), [
     workflow.nodes,
@@ -40,6 +42,25 @@ export function StateInspector({
       </div>
       <div className="grid grid-cols-2 gap-4 p-4 text-xs">
         <div className="space-y-2">
+          {streamedOutput && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold text-gray-600">Live Output (stream)</div>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(streamedOutput)}
+                  className="text-[10px] text-blue-600 hover:underline"
+                >
+                  Copy
+                </button>
+              </div>
+              <div className="rounded border border-blue-100 bg-blue-50 p-2 overflow-auto max-h-32">
+                <pre className="whitespace-pre-wrap text-gray-800">
+                  {JSON.stringify(streamedOutput, null, 2)}
+                </pre>
+              </div>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <div className="text-xs font-semibold text-gray-600">Selected Node Output</div>
             <button

@@ -872,6 +872,34 @@ def get_execution_history(
     return db.get_execution_events(execution_id, since_id=since_id, limit=limit)
 
 
+@app.get("/api/executions/{execution_id}/stream")
+async def stream_execution_events(
+    execution_id: str, request: Request, since_id: int | None = None
+) -> StreamingResponse:
+    """Stream execution events via Server-Sent Events (SSE)."""
+    db = get_db()
+    last_id = since_id or 0
+
+    async def event_generator():
+        nonlocal last_id
+        while True:
+            if await request.is_disconnected():
+                break
+            events = await run_in_threadpool(
+                db.get_execution_events, execution_id, last_id, 200
+            )
+            for event in events:
+                last_id = max(last_id, int(event.get("id", last_id)))
+                yield f"event: execution_event\ndata: {json.dumps(event)}\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
 # ========== WebSocket for Live Updates ==========
 
 

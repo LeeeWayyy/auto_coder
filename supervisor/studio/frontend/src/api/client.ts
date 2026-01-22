@@ -205,6 +205,21 @@ export async function getExecutionHistory(
   return fetchApi<ExecutionEvent[]>(url);
 }
 
+export function createExecutionEventStream(
+  executionId: string,
+  sinceId?: number
+): EventSource {
+  const searchParams = new URLSearchParams();
+  if (sinceId !== undefined) {
+    searchParams.set('since_id', String(sinceId));
+  }
+  const query = searchParams.toString();
+  const url = query
+    ? `${API_BASE}/executions/${encodeURIComponent(executionId)}/stream?${query}`
+    : `${API_BASE}/executions/${encodeURIComponent(executionId)}/stream`;
+  return new EventSource(url);
+}
+
 // ========== WebSocket Connection ==========
 
 /**
