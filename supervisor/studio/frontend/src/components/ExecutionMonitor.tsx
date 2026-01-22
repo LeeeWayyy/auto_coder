@@ -133,6 +133,16 @@ export function ExecutionMonitor({
     return state;
   }, [nodeOutputs]);
 
+  const activeNodeIds = useMemo(() => {
+    const active = new Set<string>();
+    for (const [nodeId, status] of Object.entries(nodeStatuses)) {
+      if (status === 'running') {
+        active.add(nodeId);
+      }
+    }
+    return active;
+  }, [nodeStatuses]);
+
   // Handle cancel button
   const handleCancel = useCallback(() => {
     cancelMutation.mutate(executionId);
@@ -271,6 +281,7 @@ export function ExecutionMonitor({
             <WorkflowCanvas
               workflow={workflow}
               nodeStatuses={nodeStatuses}
+              activeNodeIds={activeNodeIds}
               readOnly
               onNodeSelect={setSelectedNodeId}
             />
