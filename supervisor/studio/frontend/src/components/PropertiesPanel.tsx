@@ -10,7 +10,7 @@ import {
   forwardRef,
   useImperativeHandle,
 } from 'react';
-import type { Node, NodeType, WorkflowGraph } from '../types/workflow';
+import type { Node, NodeType, WorkflowGraph, BranchConfig, LoopCondition } from '../types/workflow';
 
 export interface PropertiesPanelHandle {
   validateNodeFields: () => boolean;
@@ -218,7 +218,7 @@ export const PropertiesPanel = forwardRef<PropertiesPanelHandle, PropertiesPanel
       [validateNodeFields]
     );
 
-    const branchConfig = useMemo(() => {
+    const branchConfig: BranchConfig = useMemo(() => {
       return (
         selectedNode?.branch_config || {
           condition: { field: '', operator: '==', value: '' },
@@ -445,7 +445,7 @@ export const PropertiesPanel = forwardRef<PropertiesPanelHandle, PropertiesPanel
                             ...branchConfig,
                             condition: {
                               ...branchConfig.condition,
-                              operator: e.target.value as typeof branchConfig.condition.operator,
+                              operator: e.target.value as LoopCondition['operator'],
                             },
                           },
                         })

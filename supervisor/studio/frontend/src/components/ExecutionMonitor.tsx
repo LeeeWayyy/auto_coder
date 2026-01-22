@@ -83,7 +83,11 @@ export function ExecutionMonitor({
       if (historyLoading) return;
       setHistoryLoading(true);
       try {
-        const sinceId = reset ? undefined : historyEvents.at(-1)?.id;
+        const sinceId = reset
+          ? undefined
+          : historyEvents.length > 0
+          ? historyEvents[historyEvents.length - 1].id
+          : undefined;
         const data = await getExecutionHistory(executionId, sinceId, HISTORY_PAGE_SIZE);
         setHistoryEvents((prev) => (reset ? data : [...prev, ...data]));
         setHistoryHasMore(data.length === HISTORY_PAGE_SIZE);
