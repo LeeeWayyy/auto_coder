@@ -144,6 +144,15 @@ export interface NodeExecutionStatus {
   version: number;
 }
 
+export interface TraceEvent {
+  id: string;
+  timestamp: string;
+  nodeId: string;
+  nodeLabel: string;
+  nodeType: NodeType;
+  status: NodeStatus;
+}
+
 // WebSocket message types
 
 export interface WSNodeUpdate {

@@ -2,12 +2,13 @@
  * ExecutionMonitor component for live execution tracking.
  */
 
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useState, useEffect } from 'react';
 import type {
   WorkflowGraph,
   NodeStatus,
   ExecutionStatus,
   NodeExecutionStatus,
+  TraceEvent,
 } from '../types/workflow';
 import {
   useExecution,
@@ -16,6 +17,8 @@ import {
 } from '../hooks/useExecutions';
 import { useExecutionWebSocket } from '../hooks/useExecutionWebSocket';
 import { WorkflowCanvas } from './WorkflowCanvas';
+import { TraceTimeline } from './TraceTimeline';
+import { StateInspector } from './StateInspector';
 
 interface ExecutionMonitorProps {
   executionId: string;
@@ -33,6 +36,11 @@ export function ExecutionMonitor({
   const { data: nodes } = useExecutionNodes(executionId);
   const cancelMutation = useCancelExecution();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
+
+  useEffect(() => {
+    setTraceEvents([]);
+  }, [executionId]);
 
   // Handle WebSocket updates
   const handleComplete = useCallback(
@@ -45,6 +53,25 @@ export function ExecutionMonitor({
   const { isConnected } = useExecutionWebSocket(executionId, {
     enabled: execution?.status === 'running',
     onExecutionComplete: handleComplete,
+    onInitialState: () => setTraceEvents([]),
+    onNodeUpdate: (nodeId, status, _output, timestamp) => {
+      const nodeInfo = workflow.nodes.find((node) => node.id === nodeId);
+      const eventId = `${nodeId}-${timestamp}`;
+      setTraceEvents((prev) => {
+        if (prev.some((event) => event.id === eventId)) return prev;
+        const next: TraceEvent = {
+          id: eventId,
+          timestamp,
+          nodeId,
+          nodeLabel: nodeInfo?.label || nodeId,
+          nodeType: nodeInfo?.type || 'task',
+          status,
+        };
+        const updated = [...prev, next];
+        updated.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        return updated;
+      });
+    },
   });
 
   // Build node status map from execution nodes
@@ -66,6 +93,16 @@ export function ExecutionMonitor({
     }
     return map;
   }, [nodes]);
+
+  const globalState = useMemo(() => {
+    const state: Record<string, unknown> = {};
+    for (const [nodeId, nodeStatus] of nodeOutputs) {
+      if (nodeStatus.status === 'completed' && nodeStatus.output) {
+        state[nodeId] = nodeStatus.output;
+      }
+    }
+    return state;
+  }, [nodeOutputs]);
 
   // Handle cancel button
   const handleCancel = useCallback(() => {
@@ -150,23 +187,34 @@ export function ExecutionMonitor({
         </div>
       )}
 
-      {/* Canvas - read-only during execution */}
-      <div className="flex-1 min-h-0">
-        <WorkflowCanvas
-          workflow={workflow}
-          nodeStatuses={nodeStatuses}
-          readOnly
-          onNodeSelect={setSelectedNodeId}
-        />
+      <div className="flex-1 min-h-0 flex">
+        <div className="w-64 border-r bg-white">
+          <TraceTimeline
+            events={traceEvents}
+            selectedNodeId={selectedNodeId}
+            onNodeSelect={setSelectedNodeId}
+            isLive={execution.status === 'running'}
+          />
+        </div>
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="flex-1 min-h-0">
+            <WorkflowCanvas
+              workflow={workflow}
+              nodeStatuses={nodeStatuses}
+              readOnly
+              onNodeSelect={setSelectedNodeId}
+            />
+          </div>
+          <div className="h-56">
+            <StateInspector
+              workflow={workflow}
+              nodeOutputs={nodeOutputs}
+              selectedNodeId={selectedNodeId}
+              globalState={globalState}
+            />
+          </div>
+        </div>
       </div>
-
-      <NodeOutputPanel
-        workflow={workflow}
-        nodeStatuses={nodeStatuses}
-        nodeOutputs={nodeOutputs}
-        selectedNodeId={selectedNodeId}
-        onSelectNode={setSelectedNodeId}
-      />
 
       {/* Node status summary */}
       <NodeStatusSummary nodes={nodes || []} />
@@ -216,101 +264,6 @@ function NodeStatusSummary({ nodes }: NodeStatusSummaryProps) {
             {status}: {count}
           </span>
         ))}
-    </div>
-  );
-}
-
-interface NodeOutputPanelProps {
-  workflow: WorkflowGraph;
-  nodeStatuses: Record<string, NodeStatus>;
-  nodeOutputs: Map<string, NodeExecutionStatus>;
-  selectedNodeId: string | null;
-  onSelectNode: (nodeId: string | null) => void;
-}
-
-function NodeOutputPanel({
-  workflow,
-  nodeStatuses,
-  nodeOutputs,
-  selectedNodeId,
-  onSelectNode,
-}: NodeOutputPanelProps) {
-  const nodeMap = useMemo(() => {
-    return new Map(workflow.nodes.map((n) => [n.id, n]));
-  }, [workflow.nodes]);
-
-  const selectedMeta = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
-  const selectedOutput = selectedNodeId ? nodeOutputs.get(selectedNodeId) : null;
-  const selectedStatus = selectedNodeId
-    ? nodeStatuses[selectedNodeId] || 'pending'
-    : null;
-
-  return (
-    <div className="border-t bg-white">
-      <div className="flex items-center justify-between px-4 py-2 border-b">
-        <div className="text-sm font-medium text-gray-700">Node Output</div>
-        {selectedNodeId && (
-          <div className="text-xs text-gray-500">
-            {selectedNodeId} • {selectedStatus}
-          </div>
-        )}
-      </div>
-      <div className="flex h-56">
-        <div className="w-56 border-r overflow-y-auto">
-          {workflow.nodes.length === 0 ? (
-            <div className="p-3 text-xs text-gray-400">No nodes yet.</div>
-          ) : (
-            workflow.nodes.map((node) => {
-              const label = node.label || node.id;
-              const isActive = node.id === selectedNodeId;
-              const status = nodeStatuses[node.id] || 'pending';
-              return (
-                <button
-                  key={node.id}
-                  type="button"
-                  onClick={() => onSelectNode(node.id)}
-                  className={`w-full text-left px-3 py-2 text-xs border-b hover:bg-gray-50 ${
-                    isActive ? 'bg-gray-100 font-medium' : 'text-gray-600'
-                  }`}
-                >
-                  <div className="truncate">{label}</div>
-                  <div className="text-[10px] text-gray-400">{status}</div>
-                </button>
-              );
-            })
-          )}
-        </div>
-        <div className="flex-1 p-3 overflow-y-auto">
-          {!selectedNodeId ? (
-            <div className="text-xs text-gray-400">Select a node to view output.</div>
-          ) : (
-            <div className="space-y-3 text-xs">
-              <div>
-                <div className="text-gray-500">Label</div>
-                <div className="font-mono text-gray-800">
-                  {selectedMeta?.label || selectedNodeId}
-                </div>
-              </div>
-              {selectedOutput?.error && (
-                <div>
-                  <div className="text-red-600">Error</div>
-                  <pre className="whitespace-pre-wrap text-red-700">
-                    {selectedOutput.error}
-                  </pre>
-                </div>
-              )}
-              <div>
-                <div className="text-gray-500">Output</div>
-                <pre className="whitespace-pre-wrap text-gray-800">
-                  {selectedOutput?.output
-                    ? JSON.stringify(selectedOutput.output, null, 2)
-                    : '—'}
-                </pre>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
     </div>
   );
 }
