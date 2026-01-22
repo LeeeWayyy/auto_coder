@@ -996,19 +996,36 @@ def studio(host: str, port: int, reload: bool) -> None:
     os.environ["SUPERVISOR_STUDIO_PORT"] = str(port)
     frontend_dir = Path(__file__).parent / "studio" / "frontend"
     frontend_dist = frontend_dir / "dist"
-    if not frontend_dist.exists():
-        if os.environ.get("AUTO_CODER_SKIP_FRONTEND_BUILD") == "1":
-            console.print(
-                "[yellow]Studio UI not built.[/yellow] "
-                "Visit http://127.0.0.1:5173 after running "
-                "`cd supervisor/studio/frontend && npm install && npm run dev`, "
-                "or build with `npm run build` to serve from the backend."
-            )
-        else:
-            import shutil
-            import subprocess
+    dev_server = None
 
-            npm = shutil.which("npm")
+    if not frontend_dist.exists():
+        import shutil
+        import subprocess
+
+        npm = shutil.which("npm")
+        if reload or os.environ.get("AUTO_CODER_SKIP_FRONTEND_BUILD") == "1":
+            if npm:
+                try:
+                    if not (frontend_dir / "node_modules").exists():
+                        console.print("[cyan]Installing Studio UI deps (npm install)...[/cyan]")
+                        subprocess.run([npm, "install"], cwd=frontend_dir, check=True)
+                    console.print("[cyan]Starting Studio UI dev server (npm run dev)...[/cyan]")
+                    dev_server = subprocess.Popen(
+                        [npm, "run", "dev", "--", "--host", host, "--port", "5173"],
+                        cwd=frontend_dir,
+                    )
+                    console.print(
+                        "[cyan]Studio UI dev server started.[/cyan] "
+                        "Check the Vite output for the exact URL (may auto-increment port)."
+                    )
+                except subprocess.CalledProcessError as exc:
+                    console.print(f"[yellow]Studio UI dev server failed:[/yellow] {exc}")
+            else:
+                console.print(
+                    "[yellow]Studio UI not built.[/yellow] "
+                    "Run `cd supervisor/studio/frontend && npm install && npm run dev`."
+                )
+        else:
             if npm:
                 console.print("[cyan]Building Studio UI (npm run build)...[/cyan]")
                 try:
@@ -1024,13 +1041,17 @@ def studio(host: str, port: int, reload: bool) -> None:
                     "or build with `npm run build` to serve from the backend."
                 )
 
-    uvicorn.run(
-        "supervisor.studio.server:app",
-        host=host,
-        port=port,
-        reload=reload,
-        log_level="info",
-    )
+    try:
+        uvicorn.run(
+            "supervisor.studio.server:app",
+            host=host,
+            port=port,
+            reload=reload,
+            log_level="info",
+        )
+    finally:
+        if dev_server:
+            dev_server.terminate()
 
 
 @main.command()
