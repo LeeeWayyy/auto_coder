@@ -16,10 +16,11 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel
 
@@ -141,6 +142,135 @@ class ExecutionResult(BaseModel):
     stdout: str
     stderr: str
     timed_out: bool = False
+
+
+def _run_process_streaming(
+    cmd: list[str],
+    stdin_input: str | None,
+    timeout: int,
+    max_bytes: int,
+    on_output: Callable[[str, str], None] | None = None,
+    strip_ansi: Callable[[str], str] | None = None,
+    cwd: Path | str | None = None,
+    kill_fn: Callable[[], None] | None = None,
+) -> ExecutionResult:
+    """Run a subprocess with incremental stdout/stderr streaming."""
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(cwd) if cwd else None,
+    )
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_bytes = 0
+    stderr_bytes = 0
+    stdout_truncated = False
+    stderr_truncated = False
+
+    def append_with_limit(
+        chunks: list[str],
+        data: str,
+        current_bytes: int,
+        truncated: bool,
+    ) -> tuple[int, bool]:
+        if current_bytes >= max_bytes:
+            return current_bytes, True
+        data_bytes = data.encode("utf-8", errors="replace")
+        remaining = max_bytes - current_bytes
+        if len(data_bytes) > remaining:
+            data = data_bytes[:remaining].decode("utf-8", errors="ignore")
+            truncated = True
+        chunks.append(data)
+        current_bytes += len(data.encode("utf-8", errors="replace"))
+        return current_bytes, truncated
+
+    def reader(stream_name: str, pipe, chunks: list[str]):
+        nonlocal stdout_bytes, stderr_bytes, stdout_truncated, stderr_truncated
+        try:
+            while True:
+                data = pipe.read(4096)
+                if not data:
+                    break
+                if stream_name == "stdout" and strip_ansi:
+                    data = strip_ansi(data)
+                if on_output:
+                    on_output(stream_name, data)
+                if stream_name == "stdout":
+                    stdout_bytes, stdout_truncated = append_with_limit(
+                        chunks, data, stdout_bytes, stdout_truncated
+                    )
+                else:
+                    stderr_bytes, stderr_truncated = append_with_limit(
+                        chunks, data, stderr_bytes, stderr_truncated
+                    )
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    stdout_thread = threading.Thread(
+        target=reader,
+        args=("stdout", proc.stdout, stdout_chunks),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=reader,
+        args=("stderr", proc.stderr, stderr_chunks),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        if proc.stdin and stdin_input is not None:
+            proc.stdin.write(stdin_input)
+            proc.stdin.flush()
+        if proc.stdin:
+            proc.stdin.close()
+    except Exception:
+        pass
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if kill_fn:
+            kill_fn()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    stdout_thread.join(timeout=1.0)
+    stderr_thread.join(timeout=1.0)
+
+    if timed_out:
+        return ExecutionResult(
+            returncode=-1,
+            stdout="",
+            stderr=f"Execution timed out after {timeout}s",
+            timed_out=True,
+        )
+
+    stdout_text = "".join(stdout_chunks)
+    stderr_text = "".join(stderr_chunks)
+    if stdout_truncated:
+        stdout_text += f"\n\n[OUTPUT TRUNCATED - exceeded {max_bytes} bytes]"
+    if stderr_truncated:
+        stderr_text += f"\n\n[OUTPUT TRUNCATED - exceeded {max_bytes} bytes]"
+
+    return ExecutionResult(
+        returncode=proc.returncode or 0,
+        stdout=stdout_text,
+        stderr=stderr_text,
+        timed_out=False,
+    )
 
 
 def _truncate_output(output: str, max_bytes: int) -> str:
@@ -658,6 +788,7 @@ class SandboxedLLMClient:
         self,
         prompt: str,
         workdir: Path | str,
+        on_output: Callable[[str, str], None] | None = None,
     ) -> ExecutionResult:
         """Execute CLI with prompt in sandboxed container.
 
@@ -787,41 +918,17 @@ class SandboxedLLMClient:
 
         _registry.add(container_name)
         try:
-            # KNOWN LIMITATION: subprocess.run with capture_output=True buffers all
-            # output in memory before _truncate_output is applied. A malicious or
-            # runaway command could emit gigabytes before timeout, causing OOM.
-            #
-            # MITIGATIONS IN PLACE:
-            # (1) Container memory limit (--memory) caps total container memory
-            # (2) Timeout kills container before unbounded output accumulates
-            # (3) Post-capture truncation prevents downstream memory issues
-            #
-            # FUTURE: Implement streaming capture with Popen and incremental reads,
-            # enforcing byte limit during capture rather than after. This would
-            # require significant refactoring of the execution flow.
-            result = subprocess.run(
-                cmd,
-                input=stdin_input,
-                capture_output=True,
-                text=True,
-                timeout=self.config.cli_timeout,
-            )
-            # Truncate output to prevent downstream memory issues
             max_bytes = self.config.max_output_bytes
-            return ExecutionResult(
-                returncode=result.returncode,
-                stdout=_truncate_output(self._strip_ansi(result.stdout), max_bytes),
-                stderr=_truncate_output(result.stderr, max_bytes),
-                timed_out=False,
-            )
-        except subprocess.TimeoutExpired:
-            # Kill container on timeout
-            subprocess.run(["docker", "kill", container_name], capture_output=True)
-            return ExecutionResult(
-                returncode=-1,
-                stdout="",
-                stderr=f"CLI execution timed out after {self.config.cli_timeout}s",
-                timed_out=True,
+            return _run_process_streaming(
+                cmd,
+                stdin_input,
+                self.config.cli_timeout,
+                max_bytes,
+                on_output=on_output,
+                strip_ansi=self._strip_ansi,
+                kill_fn=lambda: subprocess.run(
+                    ["docker", "kill", container_name], capture_output=True
+                ),
             )
         finally:
             _registry.remove(container_name)
@@ -992,7 +1099,12 @@ class HostLLMClient:
                 "This mode is UNSANDBOXED and should be used only for local dev."
             )
 
-    def execute(self, prompt: str, workdir: Path | str) -> ExecutionResult:
+    def execute(
+        self,
+        prompt: str,
+        workdir: Path | str,
+        on_output: Callable[[str, str], None] | None = None,
+    ) -> ExecutionResult:
         workdir = Path(workdir).absolute()
         workdir_resolved = _validate_workdir(workdir, self.config.allowed_workdir_roots)
 
@@ -1027,29 +1139,16 @@ class HostLLMClient:
                 f'PROMPT="$(cat)" && {shlex.join(cli_args)} "$PROMPT"',
             ]
 
-        try:
-            result = subprocess.run(
-                cmd,
-                input=stdin_input,
-                capture_output=True,
-                text=True,
-                timeout=self.config.cli_timeout,
-                cwd=str(workdir_resolved),
-            )
-            max_bytes = self.config.max_output_bytes
-            return ExecutionResult(
-                returncode=result.returncode,
-                stdout=_truncate_output(self._strip_ansi(result.stdout), max_bytes),
-                stderr=_truncate_output(result.stderr, max_bytes),
-                timed_out=False,
-            )
-        except subprocess.TimeoutExpired:
-            return ExecutionResult(
-                returncode=-1,
-                stdout="",
-                stderr=f"CLI execution timed out after {self.config.cli_timeout}s",
-                timed_out=True,
-            )
+        max_bytes = self.config.max_output_bytes
+        return _run_process_streaming(
+            cmd,
+            stdin_input,
+            self.config.cli_timeout,
+            max_bytes,
+            on_output=on_output,
+            strip_ansi=self._strip_ansi,
+            cwd=workdir_resolved,
+        )
 
     def _strip_ansi(self, text: str) -> str:
         return self.ANSI_ESCAPE.sub("", text)

@@ -16,7 +16,6 @@ import {
   useExecution,
   useExecutionNodes,
   useCancelExecution,
-  useExecutionHistory,
 } from '../hooks/useExecutions';
 import { useExecutionWebSocket } from '../hooks/useExecutionWebSocket';
 import { WorkflowCanvas } from './WorkflowCanvas';
@@ -24,7 +23,7 @@ import { TraceTimeline } from './TraceTimeline';
 import { StateInspector } from './StateInspector';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ApprovalModal } from './ApprovalModal';
-import { respondToHumanNode, createExecutionEventStream } from '../api/client';
+import { respondToHumanNode, createExecutionEventStream, getExecutionHistory } from '../api/client';
 
 interface ExecutionMonitorProps {
   executionId: string;
@@ -40,12 +39,15 @@ export function ExecutionMonitor({
   // Fetch execution and node data
   const { data: execution, isLoading: execLoading } = useExecution(executionId);
   const { data: nodes } = useExecutionNodes(executionId);
-  const { data: historyEvents } = useExecutionHistory(executionId, 2000);
   const cancelMutation = useCancelExecution();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [historyMode, setHistoryMode] = useState(false);
   const [historyIndex, setHistoryIndex] = useState(0);
+  const [historyEvents, setHistoryEvents] = useState<ExecutionEvent[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(true);
+  const [historyJump, setHistoryJump] = useState('');
   const [streamedOutputs, setStreamedOutputs] = useState(
     new Map<string, Record<string, unknown>>()
   );
@@ -68,6 +70,39 @@ export function ExecutionMonitor({
   }, [executionId]);
 
   useEffect(() => {
+    setHistoryEvents([]);
+    setHistoryHasMore(true);
+    setHistoryLoading(false);
+    setHistoryIndex(0);
+  }, [executionId]);
+
+  const HISTORY_PAGE_SIZE = 500;
+
+  const loadHistoryPage = useCallback(
+    async (reset = false) => {
+      if (historyLoading) return;
+      setHistoryLoading(true);
+      try {
+        const sinceId = reset ? undefined : historyEvents.at(-1)?.id;
+        const data = await getExecutionHistory(executionId, sinceId, HISTORY_PAGE_SIZE);
+        setHistoryEvents((prev) => (reset ? data : [...prev, ...data]));
+        setHistoryHasMore(data.length === HISTORY_PAGE_SIZE);
+      } catch {
+        setHistoryHasMore(false);
+      } finally {
+        setHistoryLoading(false);
+      }
+    },
+    [executionId, historyEvents, historyLoading]
+  );
+
+  useEffect(() => {
+    if (historyMode && historyEvents.length === 0) {
+      void loadHistoryPage(true);
+    }
+  }, [historyMode, historyEvents.length, loadHistoryPage]);
+
+  useEffect(() => {
     const source = createExecutionEventStream(executionId);
     const handleEvent = (event: MessageEvent) => {
       try {
@@ -82,6 +117,23 @@ export function ExecutionMonitor({
               return next;
             });
           }
+        }
+        if (data.event_type === 'stream_chunk' && data.node_id) {
+          const payload = (data.payload || {}) as Record<string, unknown>;
+          const stream = String(payload.stream || 'stdout');
+          const chunk = String(payload.chunk || '');
+          if (!chunk) return;
+          setStreamedOutputs((prev) => {
+            const next = new Map(prev);
+            const existing = (next.get(data.node_id as string) || {}) as Record<
+              string,
+              unknown
+            >;
+            const currentText = String(existing[stream] || '');
+            const combined = (currentText + chunk).slice(-8000);
+            next.set(data.node_id as string, { ...existing, [stream]: combined });
+            return next;
+          });
         }
       } catch {
         // Ignore malformed events.
@@ -242,7 +294,8 @@ export function ExecutionMonitor({
   const viewNodeStatuses = historyMode && snapshotFromHistory ? snapshotFromHistory.statuses : nodeStatuses;
   const viewNodeOutputs = historyMode && snapshotFromHistory ? snapshotFromHistory.outputs : nodeOutputs;
   const viewTraceEvents = historyMode ? historyTraceEvents : traceEvents;
-  const streamedOutput = selectedNodeId ? streamedOutputs.get(selectedNodeId) || null : null;
+  const streamedOutput =
+    !historyMode && selectedNodeId ? streamedOutputs.get(selectedNodeId) || null : null;
 
   // Handle cancel button
   const handleCancel = useCallback(() => {
@@ -387,7 +440,6 @@ export function ExecutionMonitor({
                 className={`px-2 py-1 rounded border ${
                   historyMode ? 'border-blue-300 text-blue-700 bg-blue-50' : 'border-gray-200 text-gray-500'
                 }`}
-                disabled={!historyTraceEvents.length}
               >
                 History
               </button>
@@ -404,6 +456,51 @@ export function ExecutionMonitor({
                 />
                 <div className="text-[10px] text-gray-500">
                   Event {Math.min(historyIndex, historyTraceEvents.length - 1) + 1} / {historyTraceEvents.length}
+                </div>
+              </div>
+            )}
+            {historyMode && (
+              <div className="space-y-2">
+                <div className="text-[10px] text-gray-500">
+                  Loaded {historyTraceEvents.length} events
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => loadHistoryPage(false)}
+                    disabled={!historyHasMore || historyLoading}
+                    className="px-2 py-1 text-[10px] border rounded text-gray-600 disabled:opacity-50"
+                  >
+                    {historyLoading ? 'Loading...' : historyHasMore ? 'Load more' : 'All loaded'}
+                  </button>
+                  <input
+                    type="text"
+                    value={historyJump}
+                    onChange={(e) => setHistoryJump(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter') return;
+                      const value = historyJump.trim();
+                      if (!value) return;
+                      let targetIndex = -1;
+                      if (value.startsWith('id:')) {
+                        const id = Number(value.replace('id:', '').trim());
+                        const found = historyTraceEvents.findIndex(
+                          (event) => Number(event.id) === id
+                        );
+                        targetIndex = found;
+                      } else {
+                        const idx = Number(value);
+                        if (!Number.isNaN(idx)) {
+                          targetIndex = idx - 1;
+                        }
+                      }
+                      if (targetIndex >= 0 && targetIndex < historyTraceEvents.length) {
+                        setHistoryIndex(targetIndex);
+                      }
+                    }}
+                    className="px-2 py-1 text-[10px] border rounded w-28"
+                    placeholder="Jump # or id:123"
+                  />
                 </div>
               </div>
             )}

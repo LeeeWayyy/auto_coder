@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from supervisor.core.models import Feature
@@ -835,6 +835,7 @@ class ExecutionEngine:
         gates: list[str] | None = None,
         cli_override: str | None = None,
         cancellation_check: Callable[[], bool] | None = None,
+        on_output: Callable[[str, str], None] | None = None,
     ) -> BaseModel:
         """Run a role with full context packing, isolation, and error handling.
 
@@ -915,7 +916,7 @@ class ExecutionEngine:
                     # Execute CLI in ISOLATED worktree
                     with self.workspace.isolated_execution(step_id) as ctx:
                         result = self._execute_cli(
-                            role, effective_prompt, ctx.worktree_path, cli_override
+                            role, effective_prompt, ctx.worktree_path, cli_override, on_output
                         )
 
                         if result.returncode != 0 and not result.timed_out:
@@ -1126,6 +1127,7 @@ class ExecutionEngine:
         prompt: str,
         workdir: Path,
         cli_override: str | None = None,
+        on_output: Callable[[str, str], None] | None = None,
     ) -> ExecutionResult:
         """Execute CLI for a role in sandbox.
 
@@ -1141,7 +1143,7 @@ class ExecutionEngine:
         """
         cli_name = cli_override or role.cli
         client = self._get_cli_client(cli_name)
-        return client.execute(prompt, workdir)
+        return client.execute(prompt, workdir, on_output=on_output)
 
     def _get_template_for_role(self, role: RoleConfig) -> str | None:
         """Map role to template, resolving overlays via base_role.

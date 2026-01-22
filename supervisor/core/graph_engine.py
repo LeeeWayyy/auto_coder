@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -1659,6 +1660,39 @@ class GraphOrchestrator:
         step_id = f"{execution_id}_{base_step_id}_{unique_suffix}"
 
         async with self.semaphore:
+            stream_lock = threading.Lock()
+            stream_buffers: dict[str, str] = {"stdout": "", "stderr": ""}
+            last_emit: dict[str, float] = {"stdout": 0.0, "stderr": 0.0}
+
+            def flush_stream(stream_name: str):
+                buffer = stream_buffers[stream_name]
+                if not buffer:
+                    return
+                node_type = node.type.value if hasattr(node.type, "value") else node.type
+                self.db.append_execution_event(
+                    execution_id,
+                    "stream_chunk",
+                    node.id,
+                    node_type,
+                    NodeStatus.RUNNING.value,
+                    {"stream": stream_name, "chunk": buffer},
+                    0,
+                )
+                stream_buffers[stream_name] = ""
+                last_emit[stream_name] = time.monotonic()
+
+            def on_output(stream_name: str, chunk: str):
+                if not chunk:
+                    return
+                now = time.monotonic()
+                with stream_lock:
+                    stream_buffers[stream_name] += chunk
+                    if (
+                        len(stream_buffers[stream_name]) >= 2048
+                        or now - last_emit[stream_name] >= 0.5
+                    ):
+                        flush_stream(stream_name)
+
             coro = asyncio.to_thread(
                 self.engine.run_role,
                 config.role,
@@ -1671,26 +1705,31 @@ class GraphOrchestrator:
                 config.gates or None,
                 None,
                 None,
+                on_output,
             )
 
-            if config.timeout:
-                try:
+            try:
+                if config.timeout:
                     result = await asyncio.wait_for(coro, timeout=config.timeout)
-                except TimeoutError:
-                    # Log a warning about the zombie task - the thread may still be running
-                    # and could modify files even though this execution is marked as failed
-                    logger.warning(
-                        f"ZOMBIE TASK WARNING: Task '{node.id}' timed out after {config.timeout}s. "
-                        f"The underlying thread (step_id={step_id}) may still be running in the "
-                        f"background and could modify files. Consider using isolated worktrees."
-                    )
-                    # Re-raise with context
-                    raise TimeoutError(
-                        f"Task '{node.id}' timed out after {config.timeout}s. "
-                        f"Note: The underlying thread may still be running."
-                    )
-            else:
-                result = await coro
+                else:
+                    result = await coro
+            except TimeoutError:
+                # Log a warning about the zombie task - the thread may still be running
+                # and could modify files even though this execution is marked as failed
+                logger.warning(
+                    f"ZOMBIE TASK WARNING: Task '{node.id}' timed out after {config.timeout}s. "
+                    f"The underlying thread (step_id={step_id}) may still be running in the "
+                    f"background and could modify files. Consider using isolated worktrees."
+                )
+                # Re-raise with context
+                raise TimeoutError(
+                    f"Task '{node.id}' timed out after {config.timeout}s. "
+                    f"Note: The underlying thread may still be running."
+                )
+            finally:
+                with stream_lock:
+                    flush_stream("stdout")
+                    flush_stream("stderr")
 
         return result
 
