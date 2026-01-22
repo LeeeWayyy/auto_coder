@@ -1992,7 +1992,14 @@ class GraphOrchestrator:
 
         # Resume execution for approve/skip/edit.
         await asyncio.to_thread(self._set_execution_status, execution_id, "running")
-        return {"approved": decision.is_proceed()}
+        # Pass through upstream inputs so downstream nodes keep full context.
+        output = {
+            **(input_data or {}),
+            "approved": decision.is_proceed(),
+            "decision": decision.value,
+            "_passthrough_keys": True,
+        }
+        return output
 
     async def _execute_subgraph(self, execution_id: str, node: Node, input_data: dict) -> Any:
         """Execute nested workflow (not yet implemented)."""
