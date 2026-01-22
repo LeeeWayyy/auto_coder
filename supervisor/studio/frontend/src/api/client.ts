@@ -117,6 +117,31 @@ export async function cancelExecution(
   );
 }
 
+export interface HumanResponseParams {
+  executionId: string;
+  nodeId: string;
+  action: 'approve' | 'reject' | 'edit';
+  feedback?: string;
+  editedData?: Record<string, unknown>;
+}
+
+export async function respondToHumanNode(
+  params: HumanResponseParams
+): Promise<{ status: string }> {
+  return fetchApi<{ status: string }>(
+    `/executions/${encodeURIComponent(params.executionId)}/respond`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        node_id: params.nodeId,
+        action: params.action,
+        feedback: params.feedback,
+        edited_data: params.editedData,
+      }),
+    }
+  );
+}
+
 export interface ListExecutionsParams {
   workflow_id?: string;
   source_graph_id?: string;

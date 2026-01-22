@@ -20,7 +20,7 @@ export type NodeStatus =
   | 'failed'
   | 'skipped';
 
-export type ExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type ExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 export interface TaskConfig {
   role: string;
@@ -196,10 +196,27 @@ export interface WSError {
   detail: string;
 }
 
+export interface WSHumanWaiting {
+  type: 'human_waiting';
+  node_id: string;
+  title: string;
+  description?: string;
+  current_output?: Record<string, unknown>;
+}
+
+export interface WSHumanResolved {
+  type: 'human_resolved';
+  node_id: string;
+  action: 'approve' | 'reject' | 'edit';
+  status: ExecutionStatus;
+}
+
 export type WSMessage =
   | WSNodeUpdate
   | WSExecutionComplete
   | WSInitialState
   | WSHeartbeat
   | WSPong
-  | WSError;
+  | WSError
+  | WSHumanWaiting
+  | WSHumanResolved;

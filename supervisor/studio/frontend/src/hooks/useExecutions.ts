@@ -51,7 +51,9 @@ export function useExecution(executionId: string | undefined) {
     // Refetch while running
     refetchInterval: (query) => {
       const data = query.state.data as ExecutionResponse | undefined;
-      return data?.status === 'running' ? 2000 : false;
+      return data?.status === 'running' || data?.status === 'interrupted'
+        ? 2000
+        : false;
     },
   });
 }

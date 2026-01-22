@@ -19,6 +19,8 @@ export interface UseExecutionWebSocketOptions {
   onInitialState?: () => void;
   onNodeUpdate?: (nodeId: string, status: NodeStatus, output: Record<string, unknown>, timestamp: string) => void;
   onExecutionComplete?: (status: ExecutionStatus, finalNodes?: Array<{ node_id: string; status: NodeStatus; version: number }>) => void;
+  onHumanWaiting?: (nodeId: string, title: string, description?: string, currentOutput?: Record<string, unknown>) => void;
+  onHumanResolved?: (nodeId: string, action: 'approve' | 'reject' | 'edit', status: ExecutionStatus) => void;
   onError?: (error: string) => void;
 }
 
@@ -31,6 +33,8 @@ export function useExecutionWebSocket(
     onInitialState,
     onNodeUpdate,
     onExecutionComplete,
+    onHumanWaiting,
+    onHumanResolved,
     onError,
   } = options;
 
@@ -48,10 +52,14 @@ export function useExecutionWebSocket(
   const onExecutionCompleteRef = useRef(onExecutionComplete);
   const onErrorRef = useRef(onError);
   const onInitialStateRef = useRef(onInitialState);
+  const onHumanWaitingRef = useRef(onHumanWaiting);
+  const onHumanResolvedRef = useRef(onHumanResolved);
   onNodeUpdateRef.current = onNodeUpdate;
   onExecutionCompleteRef.current = onExecutionComplete;
   onErrorRef.current = onError;
   onInitialStateRef.current = onInitialState;
+  onHumanWaitingRef.current = onHumanWaiting;
+  onHumanResolvedRef.current = onHumanResolved;
 
   const handleMessage = useCallback(
     (data: unknown) => {
@@ -101,7 +109,8 @@ export function useExecutionWebSocket(
             }
           );
           // If execution is already complete, notify callback (once only)
-          if (message.status !== 'running' && !didCompleteRef.current) {
+          const terminalStatuses: ExecutionStatus[] = ['completed', 'failed', 'cancelled'];
+          if (terminalStatuses.includes(message.status) && !didCompleteRef.current) {
             didCompleteRef.current = true;
             onExecutionCompleteRef.current?.(message.status);
           }
@@ -194,6 +203,27 @@ export function useExecutionWebSocket(
           // Close WebSocket after execution completes - no more updates expected
           // This prevents resource leaks from idle connections
           wsRef.current?.close();
+          break;
+
+        case 'human_waiting':
+          queryClient.setQueryData<ExecutionResponse>(
+            executionKeys.detail(executionId!),
+            (old) => (old ? { ...old, status: 'interrupted' } : old)
+          );
+          onHumanWaitingRef.current?.(
+            message.node_id,
+            message.title,
+            message.description,
+            message.current_output
+          );
+          break;
+
+        case 'human_resolved':
+          queryClient.setQueryData<ExecutionResponse>(
+            executionKeys.detail(executionId!),
+            (old) => (old ? { ...old, status: message.status } : old)
+          );
+          onHumanResolvedRef.current?.(message.node_id, message.action, message.status);
           break;
 
         case 'error':

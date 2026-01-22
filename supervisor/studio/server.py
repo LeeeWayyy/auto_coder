@@ -27,7 +27,7 @@ import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -226,6 +226,15 @@ class ExecutionRequest(BaseModel):
     graph_id: str
     workflow_id: str | None = None
     input_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class HumanResponseRequest(BaseModel):
+    """Request to respond to a human-in-the-loop node"""
+
+    node_id: str
+    action: Literal["approve", "reject", "edit"]
+    feedback: str | None = None
+    edited_data: dict[str, Any] | None = None
 
 
 class ExecutionResponse(BaseModel):
@@ -638,6 +647,35 @@ async def cancel_execution(execution_id: str) -> dict[str, str]:
     )
 
     return {"status": "cancelled", "execution_id": execution_id}
+
+
+@app.post("/api/executions/{execution_id}/respond")
+async def respond_to_human_node(
+    execution_id: str, request: HumanResponseRequest
+) -> dict[str, str]:
+    """Handle human response to interrupted execution."""
+    db = get_db()
+
+    def get_status():
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM graph_executions WHERE id = ?", (execution_id,)
+            ).fetchone()
+        return row[0] if row else None
+
+    status = await run_in_threadpool(get_status)
+    if not status:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if status != "interrupted":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Execution not interrupted (current status: {status})",
+        )
+
+    # TODO: Forward response to supervisor engine and update status accordingly.
+    # This is a placeholder response until backend orchestration support is added.
+    _ = request
+    return {"status": "resumed"}
 
 
 @app.get("/api/executions")

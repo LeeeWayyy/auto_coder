@@ -19,6 +19,9 @@ import { useExecutionWebSocket } from '../hooks/useExecutionWebSocket';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { TraceTimeline } from './TraceTimeline';
 import { StateInspector } from './StateInspector';
+import { ApprovalBanner } from './ApprovalBanner';
+import { ApprovalModal } from './ApprovalModal';
+import { respondToHumanNode } from '../api/client';
 
 interface ExecutionMonitorProps {
   executionId: string;
@@ -37,10 +40,27 @@ export function ExecutionMonitor({
   const cancelMutation = useCancelExecution();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
+  const [humanWaiting, setHumanWaiting] = useState<{
+    nodeId: string;
+    title: string;
+    description?: string;
+    currentOutput?: Record<string, unknown>;
+  } | null>(null);
+  const [approvalOpen, setApprovalOpen] = useState(false);
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
   useEffect(() => {
     setTraceEvents([]);
   }, [executionId]);
+
+  useEffect(() => {
+    if (execution?.status !== 'interrupted') {
+      setHumanWaiting(null);
+      setApprovalOpen(false);
+      setApprovalSubmitting(false);
+    }
+  }, [execution?.status]);
 
   // Handle WebSocket updates
   const handleComplete = useCallback(
@@ -51,7 +71,7 @@ export function ExecutionMonitor({
   );
 
   const { isConnected } = useExecutionWebSocket(executionId, {
-    enabled: execution?.status === 'running',
+    enabled: execution?.status === 'running' || execution?.status === 'interrupted',
     onExecutionComplete: handleComplete,
     onInitialState: () => setTraceEvents([]),
     onNodeUpdate: (nodeId, status, _output, timestamp) => {
@@ -71,6 +91,15 @@ export function ExecutionMonitor({
         updated.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         return updated;
       });
+    },
+    onHumanWaiting: (nodeId, title, description, currentOutput) => {
+      setHumanWaiting({ nodeId, title, description, currentOutput });
+      setSelectedNodeId(nodeId);
+    },
+    onHumanResolved: () => {
+      setHumanWaiting(null);
+      setApprovalOpen(false);
+      setApprovalSubmitting(false);
     },
   });
 
@@ -130,7 +159,30 @@ export function ExecutionMonitor({
     completed: 'text-emerald-600',
     failed: 'text-red-600',
     cancelled: 'text-gray-600',
+    interrupted: 'text-amber-600',
   };
+
+  const handleHumanAction = useCallback(
+    async (action: 'approve' | 'reject' | 'edit', payload?: { feedback?: string; editedData?: Record<string, unknown> }) => {
+      if (!humanWaiting) return;
+      setApprovalSubmitting(true);
+      setApprovalError(null);
+      try {
+        await respondToHumanNode({
+          executionId,
+          nodeId: humanWaiting.nodeId,
+          action,
+          feedback: payload?.feedback,
+          editedData: payload?.editedData,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Submission failed';
+        setApprovalError(message);
+        setApprovalSubmitting(false);
+      }
+    },
+    [executionId, humanWaiting]
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -187,6 +239,24 @@ export function ExecutionMonitor({
         </div>
       )}
 
+      {execution.status === 'interrupted' && humanWaiting && (
+        <ApprovalBanner
+          nodeId={humanWaiting.nodeId}
+          title={humanWaiting.title}
+          description={humanWaiting.description}
+          currentOutput={humanWaiting.currentOutput}
+          onApprove={() => handleHumanAction('approve')}
+          onReject={(reason) => handleHumanAction('reject', { feedback: reason })}
+          onEdit={() => setApprovalOpen(true)}
+          isSubmitting={approvalSubmitting}
+        />
+      )}
+      {approvalError && (
+        <div className="px-4 py-2 text-xs text-red-600 bg-red-50 border-b border-red-200">
+          {approvalError}
+        </div>
+      )}
+
       <div className="flex-1 min-h-0 flex">
         <div className="w-64 border-r bg-white">
           <TraceTimeline
@@ -218,6 +288,16 @@ export function ExecutionMonitor({
 
       {/* Node status summary */}
       <NodeStatusSummary nodes={nodes || []} />
+
+      {humanWaiting && (
+        <ApprovalModal
+          isOpen={approvalOpen}
+          onClose={() => setApprovalOpen(false)}
+          currentOutput={humanWaiting.currentOutput || {}}
+          onSubmit={(editedData) => handleHumanAction('edit', { editedData })}
+          isSubmitting={approvalSubmitting}
+        />
+      )}
     </div>
   );
 }
