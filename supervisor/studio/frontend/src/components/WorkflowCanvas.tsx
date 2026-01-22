@@ -18,6 +18,7 @@ import {
   type Node as FlowNode,
   type OnNodesChange,
   type OnEdgesChange,
+  MarkerType,
   BackgroundVariant,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -505,6 +506,7 @@ export function WorkflowCanvas({
         maxZoom={2}
         defaultEdgeOptions={{
           type: 'smoothstep',
+          markerEnd: { type: MarkerType.ArrowClosed },
         }}
       >
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} />

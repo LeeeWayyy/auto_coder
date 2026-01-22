@@ -455,6 +455,9 @@ export function WorkflowEditorPage() {
                 ref={propertiesPanelRef}
                 selectedNode={selectedNode}
                 workflow={currentWorkflow}
+                onWorkflowUpdate={(patch) =>
+                  handleChange({ ...currentWorkflow, ...patch })
+                }
                 onNodeUpdate={handleNodeUpdate}
                 onNodeDelete={removeSelectedNode}
                 onEdgeAdd={addEdge}

@@ -19,6 +19,7 @@ export interface PropertiesPanelHandle {
 export interface PropertiesPanelProps {
   selectedNode: Node | null;
   workflow: WorkflowGraph;
+  onWorkflowUpdate?: (patch: Partial<WorkflowGraph>) => void;
   onNodeUpdate: (patch: Partial<Node>) => void;
   onNodeDelete: () => void;
   onEdgeAdd: (source: string, target: string) => void;
@@ -110,11 +111,12 @@ const NODE_TYPE_BADGES: Record<NodeType, string> = {
 export const PropertiesPanel = forwardRef<PropertiesPanelHandle, PropertiesPanelProps>(
   function PropertiesPanel(
     {
-      selectedNode,
-      workflow,
-      onNodeUpdate,
-      onNodeDelete,
-      onEdgeAdd,
+  selectedNode,
+  workflow,
+  onWorkflowUpdate,
+  onNodeUpdate,
+  onNodeDelete,
+  onEdgeAdd,
       runGoal,
       onRunGoalChange,
       runInputs,
@@ -237,6 +239,25 @@ export const PropertiesPanel = forwardRef<PropertiesPanelHandle, PropertiesPanel
 
     return (
       <div className="p-4 space-y-4">
+        <div className="space-y-3">
+          <div className="text-sm font-semibold text-gray-700">Workflow Settings</div>
+          <label className="block text-sm">
+            <span className="text-gray-700">Entry Point</span>
+            <select
+              value={workflow.entry_point}
+              onChange={(e) =>
+                onWorkflowUpdate?.({ entry_point: e.target.value })
+              }
+              className="mt-1 block w-full rounded border-gray-300"
+            >
+              {workflow.nodes.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.label || node.id}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <div>
           <h3 className="text-sm font-semibold text-gray-700 mb-3">Node Details</h3>
           {!selectedNode ? (
