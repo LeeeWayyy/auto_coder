@@ -82,10 +82,16 @@ export function StateInspector({
                     JSON.stringify to preserve newlines and improve log readability */}
                 <pre className="whitespace-pre-wrap text-gray-800">
                   {(() => {
-                    // FIX (code review): Extract to IIFE for readability
+                    // FIX (code review): Display both stdout AND stderr if present,
+                    // not just one or the other, to avoid hiding error information
                     const output = streamedOutput as Record<string, unknown> | null;
-                    if (typeof output?.stdout === 'string') return output.stdout;
-                    if (typeof output?.stderr === 'string') return output.stderr;
+                    const stdout = typeof output?.stdout === 'string' ? output.stdout : '';
+                    const stderr = typeof output?.stderr === 'string' ? output.stderr : '';
+
+                    if (stdout || stderr) {
+                      return [stdout, stderr].filter(Boolean).join('\n');
+                    }
+
                     return JSON.stringify(streamedOutput, null, 2);
                   })()}
                 </pre>

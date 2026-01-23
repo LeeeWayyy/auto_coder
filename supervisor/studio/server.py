@@ -822,12 +822,19 @@ async def respond_to_human_node(execution_id: str, request: HumanResponseRequest
 
     updated = await run_in_threadpool(update_status)
     if not updated:
-        # Status changed between check and update (e.g., concurrent cancellation)
+        # Status changed between check and update. This can happen in two cases:
+        # 1. Concurrent cancellation -> should return error
+        # 2. Workflow thread already resumed after submit_decision and set status
+        #    to 'running' -> this is actually success, not an error
+        # FIX (code review): Treat 'running' as a successful outcome to avoid
+        # spurious 409 errors on fast approvals where the workflow resumes
+        # before we can update the status ourselves.
         current_status = await run_in_threadpool(get_status)
-        raise HTTPException(
-            status_code=409,
-            detail=f"Execution status changed to '{current_status}' during response",
-        )
+        if current_status != next_status:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Execution status changed to '{current_status}' during response",
+            )
 
     await run_in_threadpool(
         db.append_execution_event,

@@ -110,6 +110,12 @@ export function ExecutionMonitor({
   // (state would capture stale value in closure)
   const lastEventIdRef = useRef<number>(0);
 
+  // FIX (code review): Reset lastEventIdRef when executionId changes to avoid
+  // skipping events for new executions (old ID would be larger than new execution's IDs)
+  useEffect(() => {
+    lastEventIdRef.current = 0;
+  }, [executionId]);
+
   useEffect(() => {
     // FIX (code review): Only depend on executionId to avoid reconnecting on status changes.
     // The SSE connection is stable throughout the execution lifecycle. We handle terminal
