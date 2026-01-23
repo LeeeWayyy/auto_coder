@@ -28,8 +28,13 @@ class ApprovalDecision(str, Enum):
     SKIP = "skip"
 
     def is_proceed(self) -> bool:
-        """Return True if workflow should proceed (APPROVE or SKIP)."""
-        return self in (ApprovalDecision.APPROVE, ApprovalDecision.SKIP)
+        """Return True if workflow should proceed (APPROVE, EDIT, or SKIP).
+
+        FIX (code review): Include EDIT in proceed decisions. When a user
+        chooses to edit and approve, the workflow should continue with the
+        edited data, not be treated as rejected.
+        """
+        return self in (ApprovalDecision.APPROVE, ApprovalDecision.EDIT, ApprovalDecision.SKIP)
 
 
 @dataclass

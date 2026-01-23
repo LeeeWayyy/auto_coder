@@ -990,12 +990,11 @@ def studio(host: str, port: int, reload: bool) -> None:
         )
 
     # Pass port to server for dynamic CORS origin configuration
-    import os
-    from pathlib import Path
-
     import atexit
+    import os
     import shutil
     import subprocess
+    from pathlib import Path
 
     os.environ["SUPERVISOR_STUDIO_PORT"] = str(port)
     frontend_dir = Path(__file__).parent / "studio" / "frontend"

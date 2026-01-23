@@ -16,11 +16,11 @@ import shutil
 import signal
 import subprocess
 import threading
-import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -644,6 +644,18 @@ def _build_cli_config(cli_name: str, model_id: str | None) -> tuple[list[str], b
     }
 
     cmd_args, uses_stdin = base_configs.get(cli_name, ([cli_name], True))
+
+    bypass_permissions = os.environ.get("SUPERVISOR_CLI_BYPASS_PERMISSIONS")
+    if bypass_permissions is None and os.environ.get("SUPERVISOR_USE_HOST_CLI") == "1":
+        bypass_permissions = "1"
+
+    if bypass_permissions == "1":
+        if cli_name == "claude":
+            cmd_args = cmd_args[:1] + ["--dangerously-skip-permissions"] + cmd_args[1:]
+        elif cli_name == "codex":
+            cmd_args = cmd_args[:2] + ["--dangerously-bypass-approvals-and-sandbox"] + cmd_args[2:]
+        elif cli_name == "gemini":
+            cmd_args = cmd_args[:1] + ["-y"] + cmd_args[1:]
 
     if model_id:
         model_flag = ["--model", model_id]

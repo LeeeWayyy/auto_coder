@@ -39,7 +39,7 @@ from starlette.concurrency import run_in_threadpool
 from supervisor.core.engine import ExecutionEngine
 from supervisor.core.graph_engine import GraphOrchestrator
 from supervisor.core.graph_schema import WorkflowGraph
-from supervisor.core.interaction import InteractionBridge, ApprovalDecision
+from supervisor.core.interaction import ApprovalDecision, InteractionBridge
 from supervisor.core.state import Database
 from supervisor.core.worker import WorkflowWorker
 from supervisor.sandbox.executor import DockerNotAvailableError, EgressNotConfiguredError
@@ -730,9 +730,7 @@ async def cancel_execution(execution_id: str) -> dict[str, str]:
 
 
 @app.post("/api/executions/{execution_id}/respond")
-async def respond_to_human_node(
-    execution_id: str, request: HumanResponseRequest
-) -> dict[str, str]:
+async def respond_to_human_node(execution_id: str, request: HumanResponseRequest) -> dict[str, str]:
     """Handle human response to interrupted execution.
 
     FIX (code review): Validates that execution is in 'interrupted' state before
@@ -780,7 +778,9 @@ async def respond_to_human_node(
         )
 
     key = (execution_id, request.node_id)
-    gate_id = _pending_human_requests.get(key)
+    # FIX (code review): Use atomic pop to prevent race condition where two
+    # concurrent requests could both get the same gate_id
+    gate_id = _pending_human_requests.pop(key, None)
     if not gate_id:
         raise HTTPException(status_code=404, detail="No pending approval for node")
 
@@ -798,8 +798,7 @@ async def respond_to_human_node(
     if not ok:
         raise HTTPException(status_code=400, detail="Approval already resolved")
 
-    # Clean up tracking data for this request
-    _pending_human_requests.pop(key, None)
+    # Clean up processed gate_id tracking
     _processed_gate_ids.discard(gate_id)
 
     def update_status():
@@ -1045,9 +1044,7 @@ async def stream_execution_events(
         while True:
             if await request.is_disconnected():
                 break
-            events = await run_in_threadpool(
-                db.get_execution_events, execution_id, last_id, 200
-            )
+            events = await run_in_threadpool(db.get_execution_events, execution_id, last_id, 200)
             if not events:
                 empty_poll_count += 1
                 # FIX (code review): Stop streaming after extended inactivity
@@ -1185,12 +1182,16 @@ async def start_human_approval_poller() -> None:
                 except Exception:
                     current_output = None
 
-                def mark_interrupted():
+                # FIX (code review): Capture request.feature_id to avoid B023 lint error
+                # (function definition does not bind loop variable)
+                feature_id = request.feature_id
+
+                def mark_interrupted(fid: str = feature_id) -> None:
                     with db._connect() as conn:
                         conn.execute(
                             "UPDATE graph_executions SET status='interrupted' "
                             "WHERE id=? AND status='running'",
-                            (request.feature_id,),
+                            (fid,),
                         )
 
                 await run_in_threadpool(mark_interrupted)

@@ -129,7 +129,7 @@ class GraphOrchestrator:
         gate_executor: GateExecutor,
         gate_loader: GateLoader,
         max_parallel: int = 4,
-        interaction_bridge: "InteractionBridge | None" = None,
+        interaction_bridge: InteractionBridge | None = None,
     ):
         self.db = db
         self.engine = execution_engine
@@ -1746,9 +1746,7 @@ class GraphOrchestrator:
                     if not stream_truncated[stream_name]:
                         stream_truncated[stream_name] = True
                         # Emit final truncation marker
-                        node_type = (
-                            node.type.value if hasattr(node.type, "value") else node.type
-                        )
+                        node_type = node.type.value if hasattr(node.type, "value") else node.type
                         try:
                             self.db.append_execution_event(
                                 execution_id,
@@ -1778,7 +1776,9 @@ class GraphOrchestrator:
                         {"stream": stream_name, "chunk": buffer},
                         0,
                     )
-                    stream_bytes_emitted[stream_name] += len(buffer.encode("utf-8", errors="replace"))
+                    stream_bytes_emitted[stream_name] += len(
+                        buffer.encode("utf-8", errors="replace")
+                    )
                 except Exception as e:
                     # FIX (code review): Log but don't raise to avoid masking task errors
                     logger.warning(f"Failed to emit stream chunk for {node.id}: {e}")
@@ -1856,8 +1856,7 @@ class GraphOrchestrator:
                 if not claimed_files.issubset(changed_set):
                     missing = sorted(claimed_files - changed_set)
                     raise RuntimeError(
-                        "Model claimed file changes that were not applied: "
-                        + ", ".join(missing)
+                        "Model claimed file changes that were not applied: " + ", ".join(missing)
                     )
 
         return result
@@ -2087,12 +2086,8 @@ class GraphOrchestrator:
         )
         if not updated:
             # Execution was cancelled/completed/failed before we could interrupt
-            current_status = await asyncio.to_thread(
-                self._get_execution_status, execution_id
-            )
-            raise RuntimeError(
-                f"Cannot request human approval: execution is '{current_status}'"
-            )
+            current_status = await asyncio.to_thread(self._get_execution_status, execution_id)
+            raise RuntimeError(f"Cannot request human approval: execution is '{current_status}'")
 
         # Prepare changes list
         changes = []
@@ -2129,9 +2124,7 @@ class GraphOrchestrator:
             self._set_execution_status, execution_id, "running", only_if_running=True
         )
         if not resumed:
-            current_status = await asyncio.to_thread(
-                self._get_execution_status, execution_id
-            )
+            current_status = await asyncio.to_thread(self._get_execution_status, execution_id)
             raise RuntimeError(
                 f"Cannot resume execution after approval: execution is '{current_status}'"
             )

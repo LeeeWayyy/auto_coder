@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import subprocess
 import threading
 import time
 import uuid
@@ -777,6 +778,23 @@ class ExecutionEngine:
                         "Changes not applied."
                     )
                 changed_files = self.workspace._apply_changes(ctx.worktree_path, ctx.original_head)
+                if not changed_files:
+                    try:
+                        status = subprocess.run(
+                            ["git", "status", "--porcelain=v1", "-uall", "--ignored"],
+                            cwd=ctx.worktree_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        status_output = status.stdout.strip()
+                        logger.warning(
+                            "No changes detected during apply. worktree=%s git_status=%s",
+                            ctx.worktree_path,
+                            status_output or "empty",
+                        )
+                    except Exception as log_err:
+                        logger.warning("Failed to inspect worktree after empty apply: %s", log_err)
         except CancellationError:
             raise
         except Exception as apply_err:
@@ -919,6 +937,16 @@ class ExecutionEngine:
                         result = self._execute_cli(
                             role, effective_prompt, ctx.worktree_path, cli_override, on_output
                         )
+                        if os.environ.get("SUPERVISOR_LOG_CLI") == "1":
+                            log_dir = self.repo_path / ".supervisor" / "cli_logs"
+                            log_dir.mkdir(parents=True, exist_ok=True)
+                            try:
+                                (log_dir / f"{step_id}.stdout.log").write_text(result.stdout or "")
+                                (log_dir / f"{step_id}.stderr.log").write_text(result.stderr or "")
+                            except Exception as log_err:
+                                logger.warning(
+                                    "Failed to write CLI logs for step %s: %s", step_id, log_err
+                                )
 
                         if result.returncode != 0 and not result.timed_out:
                             raise EngineError(
