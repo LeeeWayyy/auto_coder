@@ -2,7 +2,7 @@
  * ExecutionMonitor component for live execution tracking.
  */
 
-import { useMemo, useCallback, useState, useEffect } from 'react';
+import { useMemo, useCallback, useState, useEffect, useRef } from 'react';
 import type {
   WorkflowGraph,
   NodeStatus,
@@ -106,49 +106,121 @@ export function ExecutionMonitor({
     }
   }, [historyMode, historyEvents.length, loadHistoryPage]);
 
+  // FIX (code review): Use ref to track last event ID so reconnections use the latest value
+  // (state would capture stale value in closure)
+  const lastEventIdRef = useRef<number>(0);
+
   useEffect(() => {
-    const source = createExecutionEventStream(executionId);
+    // FIX (code review): Only depend on executionId to avoid reconnecting on status changes.
+    // The SSE connection is stable throughout the execution lifecycle. We handle terminal
+    // status by closing inside the effect when we detect completion events.
+    let source: EventSource | null = null;
+    let closed = false;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+
     const handleEvent = (event: MessageEvent) => {
+      if (closed) return;
       try {
         const data = JSON.parse(event.data) as ExecutionEvent;
+
+        // Track event ID in ref to avoid duplicates and enable proper reconnect
+        if (data.id && Number(data.id) > lastEventIdRef.current) {
+          lastEventIdRef.current = Number(data.id);
+        }
+
+        // Close stream on terminal status
+        if (
+          data.event_type === 'execution_complete' &&
+          ['completed', 'failed', 'cancelled'].includes(String(data.status))
+        ) {
+          closed = true;
+          source?.close();
+          return;
+        }
+
         if (data.event_type === 'node_update' && data.node_id) {
-          const payload = (data.payload || {}) as Record<string, unknown>;
-          const output = payload.output as Record<string, unknown> | undefined;
-          if (output && Object.keys(output).length > 0) {
+          // FIX (code review): Runtime type validation instead of unsafe type assertions
+          const payload = data.payload;
+          if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            const output = (payload as Record<string, unknown>).output;
+            if (output && typeof output === 'object' && !Array.isArray(output)) {
+              const validOutput = output as Record<string, unknown>;
+              if (Object.keys(validOutput).length > 0) {
+                setStreamedOutputs((prev) => {
+                  const next = new Map(prev);
+                  next.set(data.node_id as string, validOutput);
+                  // FIX (code review): Evict oldest entries if Map grows too large
+                  // (defense in depth - normally bounded by workflow node count)
+                  const MAX_STREAMED_NODES = 100;
+                  if (next.size > MAX_STREAMED_NODES) {
+                    const oldestKey = next.keys().next().value;
+                    if (oldestKey) next.delete(oldestKey);
+                  }
+                  return next;
+                });
+              }
+            }
+          }
+        }
+        if (data.event_type === 'stream_chunk' && data.node_id) {
+          // FIX (code review): Runtime type validation for stream chunks
+          const payload = data.payload;
+          if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            const payloadObj = payload as Record<string, unknown>;
+            const stream = String(payloadObj.stream || 'stdout');
+            const chunk = String(payloadObj.chunk || '');
+            if (!chunk) return;
             setStreamedOutputs((prev) => {
               const next = new Map(prev);
-              next.set(data.node_id as string, output);
+              const existing = next.get(data.node_id as string) || {};
+              const existingObj =
+                typeof existing === 'object' && !Array.isArray(existing)
+                  ? (existing as Record<string, unknown>)
+                  : {};
+              const currentText = String(existingObj[stream] || '');
+              const combined = (currentText + chunk).slice(-8000);
+              next.set(data.node_id as string, { ...existingObj, [stream]: combined });
+              // FIX (code review): Evict oldest entries if Map grows too large
+              const MAX_STREAMED_NODES = 100;
+              if (next.size > MAX_STREAMED_NODES) {
+                const oldestKey = next.keys().next().value;
+                if (oldestKey) next.delete(oldestKey);
+              }
               return next;
             });
           }
         }
-        if (data.event_type === 'stream_chunk' && data.node_id) {
-          const payload = (data.payload || {}) as Record<string, unknown>;
-          const stream = String(payload.stream || 'stdout');
-          const chunk = String(payload.chunk || '');
-          if (!chunk) return;
-          setStreamedOutputs((prev) => {
-            const next = new Map(prev);
-            const existing = (next.get(data.node_id as string) || {}) as Record<
-              string,
-              unknown
-            >;
-            const currentText = String(existing[stream] || '');
-            const combined = (currentText + chunk).slice(-8000);
-            next.set(data.node_id as string, { ...existing, [stream]: combined });
-            return next;
-          });
-        }
-      } catch {
-        // Ignore malformed events.
+      } catch (error) {
+        // FIX (code review): Log malformed events for debugging instead of silent swallow
+        console.warn('Malformed execution event:', event.data, error);
       }
     };
-    source.addEventListener('execution_event', handleEvent);
-    return () => {
-      source.removeEventListener('execution_event', handleEvent);
-      source.close();
+
+    // FIX (code review): Create connection with manual reconnect using latest event ID
+    const connect = () => {
+      if (closed) return;
+      // Use ref value so reconnect uses the latest event ID, not stale closure value
+      const sinceId = lastEventIdRef.current > 0 ? lastEventIdRef.current : undefined;
+      source = createExecutionEventStream(executionId, sinceId);
+      source.addEventListener('execution_event', handleEvent);
+      // FIX (code review): Handle errors with manual reconnect using latest event ID
+      source.onerror = () => {
+        if (closed) return;
+        source?.close();
+        // Reconnect after delay, using ref to get latest event ID
+        reconnectTimeout = setTimeout(connect, 2000);
+      };
     };
-  }, [executionId]);
+
+    connect();
+
+    return () => {
+      closed = true;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      source?.removeEventListener('execution_event', handleEvent);
+      source?.close();
+    };
+  }, [executionId]); // FIX (code review): Removed execution?.status to avoid reconnects
 
   useEffect(() => {
     if (execution?.status !== 'interrupted') {
@@ -169,7 +241,12 @@ export function ExecutionMonitor({
   const { isConnected } = useExecutionWebSocket(executionId, {
     enabled: execution?.status === 'running' || execution?.status === 'interrupted',
     onExecutionComplete: handleComplete,
-    onInitialState: () => setTraceEvents([]),
+    // FIX (code review): Don't clear trace events on initial_state.
+    // This can race with node_update events that arrive before initial_state,
+    // causing lost timeline entries. We already clear on executionId change.
+    onInitialState: () => {
+      // No-op: trace events are cleared when executionId changes
+    },
     onNodeUpdate: (nodeId, status, _output, timestamp) => {
       const nodeInfo = workflow.nodes.find((node) => node.id === nodeId);
       const eventId = `${nodeId}-${timestamp}`;
@@ -221,6 +298,9 @@ export function ExecutionMonitor({
 
   const nodeTypeById = useMemo(() => {
     return new Map(workflow.nodes.map((node) => [node.id, node.type]));
+  }, [workflow.nodes]);
+  const nodeLabelById = useMemo(() => {
+    return new Map(workflow.nodes.map((node) => [node.id, node.label || node.id]));
   }, [workflow.nodes]);
 
   const historyTraceEvents = useMemo(() => {
@@ -300,6 +380,24 @@ export function ExecutionMonitor({
   const viewTraceEvents = historyMode ? historyTraceEvents : traceEvents;
   const streamedOutput =
     !historyMode && selectedNodeId ? streamedOutputs.get(selectedNodeId) || null : null;
+  const createdFiles = useMemo(() => {
+    const seen = new Set<string>();
+    const items: Array<{ path: string; nodeId: string; nodeLabel: string }> = [];
+    for (const [nodeId, nodeStatus] of viewNodeOutputs) {
+      const output = nodeStatus.output as Record<string, unknown> | null;
+      const files = Array.isArray(output?.files_created) ? output?.files_created : [];
+      for (const file of files) {
+        if (typeof file !== 'string' || seen.has(file)) continue;
+        seen.add(file);
+        items.push({
+          path: file,
+          nodeId,
+          nodeLabel: nodeLabelById.get(nodeId) || nodeId,
+        });
+      }
+    }
+    return items;
+  }, [viewNodeOutputs, nodeLabelById]);
 
   // Handle cancel button
   const handleCancel = useCallback(() => {
@@ -344,6 +442,8 @@ export function ExecutionMonitor({
           editedData: payload?.editedData,
         });
       } catch (error) {
+        // FIX (code review): Log error for debugging instead of silent swallow
+        console.error('Human action failed:', error);
         const message = error instanceof Error ? error.message : 'Submission failed';
         setApprovalError(message);
         setApprovalSubmitting(false);
@@ -386,7 +486,8 @@ export function ExecutionMonitor({
         </div>
 
         <div className="flex items-center gap-2">
-          {execution.status === 'running' && (
+          {/* FIX (code review): Allow cancel from both running and interrupted states */}
+          {(execution.status === 'running' || execution.status === 'interrupted') && (
             <button
               onClick={handleCancel}
               disabled={cancelMutation.isPending}
@@ -526,14 +627,17 @@ export function ExecutionMonitor({
               onNodeSelect={setSelectedNodeId}
             />
           </div>
-          <div className="h-56">
-            <StateInspector
-              workflow={workflow}
-              nodeOutputs={viewNodeOutputs}
-              selectedNodeId={selectedNodeId}
-              globalState={globalState}
-              streamedOutput={streamedOutput}
-            />
+          <div className="h-72 flex flex-col">
+            <ExecutionFilesPanel files={createdFiles} />
+            <div className="flex-1 min-h-0">
+              <StateInspector
+                workflow={workflow}
+                nodeOutputs={viewNodeOutputs}
+                selectedNodeId={selectedNodeId}
+                globalState={globalState}
+                streamedOutput={streamedOutput}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -550,6 +654,45 @@ export function ExecutionMonitor({
           isSubmitting={approvalSubmitting}
         />
       )}
+    </div>
+  );
+}
+
+interface ExecutionFilesPanelProps {
+  files: Array<{ path: string; nodeId: string; nodeLabel: string }>;
+}
+
+function ExecutionFilesPanel({ files }: ExecutionFilesPanelProps) {
+  return (
+    <div className="border-t bg-white">
+      <div className="flex items-center justify-between px-4 py-2 border-b">
+        <div className="text-xs font-semibold text-gray-600">Files created</div>
+        <div className="text-[10px] text-gray-500">{files.length}</div>
+      </div>
+      <div className="px-4 py-2 max-h-28 overflow-auto">
+        {files.length === 0 ? (
+          <div className="text-xs text-gray-400">No files created yet.</div>
+        ) : (
+          <div className="space-y-1">
+            {files.map((file) => (
+              <div key={file.path} className="flex items-center gap-2 text-xs">
+                <a
+                  href={`/api/files?path=${encodeURIComponent(file.path)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="min-w-0 flex-1 truncate text-blue-600 hover:underline"
+                  title={file.path}
+                >
+                  {file.path}
+                </a>
+                <span className="text-[10px] text-gray-400 whitespace-nowrap">
+                  {file.nodeLabel}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

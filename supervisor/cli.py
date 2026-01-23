@@ -993,15 +993,40 @@ def studio(host: str, port: int, reload: bool) -> None:
     import os
     from pathlib import Path
 
+    import atexit
+    import shutil
+    import subprocess
+
     os.environ["SUPERVISOR_STUDIO_PORT"] = str(port)
     frontend_dir = Path(__file__).parent / "studio" / "frontend"
     frontend_dist = frontend_dir / "dist"
     dev_server = None
 
-    if not frontend_dist.exists():
-        import shutil
-        import subprocess
+    def _cleanup_dev_server():
+        """Helper to properly terminate dev server process.
 
+        FIX (code review): Ensure dev server is cleaned up to avoid resource leaks.
+        terminate() sends SIGTERM; we wait() to ensure the process exits.
+        If graceful shutdown fails, we force kill with SIGKILL.
+
+        This is registered with atexit as defense-in-depth for cases where the
+        finally block might not run (e.g., os._exit). Note: atexit handlers won't
+        run on SIGKILL, but that's an OS-level limitation.
+        """
+        nonlocal dev_server
+        if dev_server:
+            dev_server.terminate()
+            try:
+                dev_server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dev_server.kill()
+                dev_server.wait()
+            dev_server = None
+
+    # FIX (code review): Register cleanup with atexit for additional safety
+    atexit.register(_cleanup_dev_server)
+
+    if not frontend_dist.exists():
         npm = shutil.which("npm")
         if reload or os.environ.get("AUTO_CODER_SKIP_FRONTEND_BUILD") == "1":
             if npm:
@@ -1019,7 +1044,11 @@ def studio(host: str, port: int, reload: bool) -> None:
                         "Check the Vite output for the exact URL (may auto-increment port)."
                     )
                 except subprocess.CalledProcessError as exc:
+                    _cleanup_dev_server()  # Clean up on failure
                     console.print(f"[yellow]Studio UI dev server failed:[/yellow] {exc}")
+                except Exception:
+                    _cleanup_dev_server()  # FIX (code review): Clean up on any exception
+                    raise
             else:
                 console.print(
                     "[yellow]Studio UI not built.[/yellow] "
@@ -1050,8 +1079,7 @@ def studio(host: str, port: int, reload: bool) -> None:
             log_level="info",
         )
     finally:
-        if dev_server:
-            dev_server.terminate()
+        _cleanup_dev_server()
 
 
 @main.command()

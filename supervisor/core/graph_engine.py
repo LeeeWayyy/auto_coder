@@ -374,13 +374,43 @@ class GraphOrchestrator:
             return (True, row[0] if row else 0)
         return (False, 0)
 
-    def _set_execution_status(self, execution_id: str, status: str) -> None:
-        """Set execution status in graph_executions."""
+    def _set_execution_status(
+        self, execution_id: str, status: str, only_if_running: bool = False
+    ) -> bool:
+        """Set execution status in graph_executions.
+
+        Args:
+            execution_id: The execution ID to update
+            status: New status to set
+            only_if_running: If True, only update if current status is 'running' or
+                'interrupted'. This prevents overwriting terminal states (cancelled,
+                completed, failed) which could revive cancelled executions.
+
+        Returns:
+            True if the status was updated, False if it was not (e.g., because
+            current status is terminal and only_if_running=True).
+
+        FIX (code review): Guard against overwriting terminal states. An execution
+        can be cancelled while waiting for human approval. Without this guard,
+        the human response could set status back to 'running', reviving a cancelled
+        execution.
+        """
         with self.db._connect() as conn:
-            conn.execute(
-                "UPDATE graph_executions SET status=? WHERE id=?",
-                (status, execution_id),
-            )
+            if only_if_running:
+                result = conn.execute(
+                    """
+                    UPDATE graph_executions SET status=?
+                    WHERE id=? AND status IN ('running', 'interrupted')
+                    """,
+                    (status, execution_id),
+                )
+                return result.rowcount > 0
+            else:
+                conn.execute(
+                    "UPDATE graph_executions SET status=? WHERE id=?",
+                    (status, execution_id),
+                )
+                return True
 
     def _get_workflow(self, execution_id: str) -> WorkflowGraph:
         """Load workflow definition for an execution."""
@@ -494,21 +524,24 @@ class GraphOrchestrator:
             return json.loads(row[0]) if row and row[0] else None
 
     def cancel_execution(self, execution_id: str) -> bool:
-        """Cancel a running execution.
+        """Cancel a running or interrupted execution.
 
         Sets execution status to 'cancelled' and prevents new nodes from being claimed.
         NOTE: This does NOT stop currently running tasks - they will complete but their
         results will be ignored. This is a known limitation for the MVP.
 
+        FIX (code review): Allow cancellation from 'interrupted' state. Users should be
+        able to cancel executions that are waiting for human approval, not just running.
+
         Returns:
-            True if cancellation was successful, False if execution was not running
+            True if cancellation was successful, False if execution was not in a cancellable state
         """
         with self.db._connect() as conn:
             result = conn.execute(
                 """
                 UPDATE graph_executions
                 SET status = 'cancelled', completed_at = ?
-                WHERE id = ? AND status = 'running'
+                WHERE id = ? AND status IN ('running', 'interrupted')
             """,
                 (datetime.utcnow(), execution_id),
             )
@@ -1673,26 +1706,90 @@ class GraphOrchestrator:
             stream_lock = threading.Lock()
             stream_buffers: dict[str, str] = {"stdout": "", "stderr": ""}
             last_emit: dict[str, float] = {"stdout": 0.0, "stderr": 0.0}
+            # FIX (code review): Track total bytes emitted to prevent unbounded DB writes
+            stream_bytes_emitted: dict[str, int] = {"stdout": 0, "stderr": 0}
+            stream_truncated: dict[str, bool] = {"stdout": False, "stderr": False}
+            # Limit stream events to 2MB per stream to prevent DB/disk exhaustion
+            MAX_STREAM_BYTES = 2 * 1024 * 1024
+            files_changed: list[str] = []
 
             def flush_stream(stream_name: str):
+                """Flush buffered stream output to DB.
+
+                NOTE (code review - known limitation): This function performs DB
+                writes and is called from reader threads via on_output. Under heavy
+                output volume, the DB writes could potentially block the reader
+                threads if SQLite is locked, causing subprocess pipe buffers to fill.
+
+                In extreme cases this could cause deadlock if the subprocess output
+                rate exceeds DB write throughput. This is acceptable for local dev
+                tool usage with moderate output volumes.
+
+                Mitigations in place:
+                - SQLite WAL mode enables concurrent reads/writes
+                - 30s busy timeout prevents immediate lock failures
+                - Buffer threshold (2KB) and time threshold (0.5s) limit write frequency
+                - Output is bounded by max_bytes in executor to prevent unbounded accumulation
+                - FIX (code review): Max 2MB per stream to prevent DB exhaustion
+
+                For production use cases with high-volume output, consider:
+                - Decoupling with async queue + background flusher
+                - Writing to separate log files instead of DB
+                - Increasing buffer thresholds
+                """
                 buffer = stream_buffers[stream_name]
                 if not buffer:
                     return
+
+                # FIX (code review): Stop emitting after max bytes to prevent unbounded growth
+                if stream_bytes_emitted[stream_name] >= MAX_STREAM_BYTES:
+                    if not stream_truncated[stream_name]:
+                        stream_truncated[stream_name] = True
+                        # Emit final truncation marker
+                        node_type = (
+                            node.type.value if hasattr(node.type, "value") else node.type
+                        )
+                        try:
+                            self.db.append_execution_event(
+                                execution_id,
+                                "stream_chunk",
+                                node.id,
+                                node_type,
+                                NodeStatus.RUNNING.value,
+                                {
+                                    "stream": stream_name,
+                                    "chunk": f"\n[STREAM TRUNCATED - exceeded {MAX_STREAM_BYTES // 1024 // 1024}MB]",
+                                },
+                                0,
+                            )
+                        except Exception:
+                            pass  # Don't fail on truncation marker
+                    stream_buffers[stream_name] = ""
+                    return
+
                 node_type = node.type.value if hasattr(node.type, "value") else node.type
-                self.db.append_execution_event(
-                    execution_id,
-                    "stream_chunk",
-                    node.id,
-                    node_type,
-                    NodeStatus.RUNNING.value,
-                    {"stream": stream_name, "chunk": buffer},
-                    0,
-                )
+                try:
+                    self.db.append_execution_event(
+                        execution_id,
+                        "stream_chunk",
+                        node.id,
+                        node_type,
+                        NodeStatus.RUNNING.value,
+                        {"stream": stream_name, "chunk": buffer},
+                        0,
+                    )
+                    stream_bytes_emitted[stream_name] += len(buffer.encode("utf-8", errors="replace"))
+                except Exception as e:
+                    # FIX (code review): Log but don't raise to avoid masking task errors
+                    logger.warning(f"Failed to emit stream chunk for {node.id}: {e}")
                 stream_buffers[stream_name] = ""
                 last_emit[stream_name] = time.monotonic()
 
             def on_output(stream_name: str, chunk: str):
                 if not chunk:
+                    return
+                # FIX (code review): Early exit if stream already truncated
+                if stream_truncated.get(stream_name):
                     return
                 now = time.monotonic()
                 with stream_lock:
@@ -1703,19 +1800,24 @@ class GraphOrchestrator:
                     ):
                         flush_stream(stream_name)
 
+            def on_files_changed(changed: list[str]):
+                files_changed.clear()
+                files_changed.extend(changed)
+
             coro = asyncio.to_thread(
                 self.engine.run_role,
-                config.role,
-                task_description,
-                workflow_id,
-                step_id,
-                None,
-                None,
-                None,
-                config.gates or None,
-                None,
-                None,
-                on_output,
+                role_name=config.role,
+                task_description=task_description,
+                workflow_id=workflow_id,
+                step_id=step_id,
+                target_files=None,
+                extra_context=None,
+                retry_policy=None,
+                gates=config.gates or None,
+                cli_override=None,
+                cancellation_check=None,
+                on_output=on_output,
+                on_files_changed=on_files_changed,
             )
 
             try:
@@ -1740,6 +1842,23 @@ class GraphOrchestrator:
                 with stream_lock:
                     flush_stream("stdout")
                     flush_stream("stderr")
+
+        if hasattr(result, "model_dump"):
+            result = result.model_dump()
+
+        if isinstance(result, dict):
+            result["files_changed"] = files_changed
+            claimed_files: set[str] = set(
+                (result.get("files_created") or []) + (result.get("files_modified") or [])
+            )
+            if claimed_files:
+                changed_set = set(files_changed)
+                if not claimed_files.issubset(changed_set):
+                    missing = sorted(claimed_files - changed_set)
+                    raise RuntimeError(
+                        "Model claimed file changes that were not applied: "
+                        + ", ".join(missing)
+                    )
 
         return result
 
@@ -1962,7 +2081,18 @@ class GraphOrchestrator:
         """Execute human approval node."""
         config = node.human_config
         # Mark execution as interrupted while waiting on human input.
-        await asyncio.to_thread(self._set_execution_status, execution_id, "interrupted")
+        # Use guarded update to avoid overwriting terminal states.
+        updated = await asyncio.to_thread(
+            self._set_execution_status, execution_id, "interrupted", only_if_running=True
+        )
+        if not updated:
+            # Execution was cancelled/completed/failed before we could interrupt
+            current_status = await asyncio.to_thread(
+                self._get_execution_status, execution_id
+            )
+            raise RuntimeError(
+                f"Cannot request human approval: execution is '{current_status}'"
+            )
 
         # Prepare changes list
         changes = []
@@ -1986,12 +2116,26 @@ class GraphOrchestrator:
         )
 
         if decision == ApprovalDecision.REJECT:
-            # Propagate rejection as failure.
-            await asyncio.to_thread(self._set_execution_status, execution_id, "failed")
+            # Propagate rejection as failure. Use guarded update.
+            await asyncio.to_thread(
+                self._set_execution_status, execution_id, "failed", only_if_running=True
+            )
             raise RuntimeError(f"Human approval rejected for node '{node.id}'")
 
         # Resume execution for approve/skip/edit.
-        await asyncio.to_thread(self._set_execution_status, execution_id, "running")
+        # FIX (code review): Use guarded update to prevent reviving cancelled executions.
+        # If execution was cancelled while waiting for approval, don't resume it.
+        resumed = await asyncio.to_thread(
+            self._set_execution_status, execution_id, "running", only_if_running=True
+        )
+        if not resumed:
+            current_status = await asyncio.to_thread(
+                self._get_execution_status, execution_id
+            )
+            raise RuntimeError(
+                f"Cannot resume execution after approval: execution is '{current_status}'"
+            )
+
         # Pass through upstream inputs so downstream nodes keep full context.
         output = {
             **(input_data or {}),

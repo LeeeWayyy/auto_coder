@@ -195,8 +195,15 @@ def _run_process_streaming(
                 data = pipe.read(4096)
                 if not data:
                     break
-                if stream_name == "stdout" and strip_ansi:
-                    data = strip_ansi(data)
+                # FIX (code review): Don't strip ANSI per-chunk for storage.
+                # ANSI escape sequences can be split across chunk boundaries
+                # (e.g., '\x1B' in one chunk, '[1m' in next). Stripping per-chunk
+                # would leave broken sequences like '[1m' in the output.
+                # Instead, strip once on the final joined result.
+                #
+                # For streaming output (on_output), we pass raw data so the
+                # callback can decide how to handle ANSI codes (e.g., display
+                # in terminal that supports them, or strip client-side).
                 if on_output:
                     on_output(stream_name, data)
                 if stream_name == "stdout":
@@ -260,6 +267,15 @@ def _run_process_streaming(
 
     stdout_text = "".join(stdout_chunks)
     stderr_text = "".join(stderr_chunks)
+
+    # FIX (code review): Apply ANSI stripping on the final joined result.
+    # This correctly handles escape sequences that were split across chunk
+    # boundaries during streaming. The regex can now match complete sequences.
+    # FIX (code review): Apply to both stdout and stderr for consistency.
+    if strip_ansi:
+        stdout_text = strip_ansi(stdout_text)
+        stderr_text = strip_ansi(stderr_text)
+
     if stdout_truncated:
         stdout_text += f"\n\n[OUTPUT TRUNCATED - exceeded {max_bytes} bytes]"
     if stderr_truncated:

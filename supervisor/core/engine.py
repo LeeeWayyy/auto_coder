@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from supervisor.core.models import Feature
@@ -836,6 +836,7 @@ class ExecutionEngine:
         cli_override: str | None = None,
         cancellation_check: Callable[[], bool] | None = None,
         on_output: Callable[[str, str], None] | None = None,
+        on_files_changed: Callable[[list[str]], None] | None = None,
     ) -> BaseModel:
         """Run a role with full context packing, isolation, and error handling.
 
@@ -975,7 +976,7 @@ class ExecutionEngine:
                                 raise GateFailedError(gate_result.gate_name, gate_result.output)
 
                         # FIX (v27 - Gemini PR review): Use helper for apply and finalize
-                        self._apply_and_finalize_step(
+                        changed_files = self._apply_and_finalize_step(
                             workflow_id,
                             step_id,
                             role_name,
@@ -983,6 +984,9 @@ class ExecutionEngine:
                             ctx,
                             cancellation_check,
                         )
+
+                        if on_files_changed:
+                            on_files_changed(changed_files)
 
                     self.circuit_breaker.reset(circuit_key)
                     success = True

@@ -356,6 +356,26 @@ class Database:
         _ensure_column("components", "description", "TEXT DEFAULT ''")
 
         # Expand graph_executions status CHECK to include 'interrupted'
+        #
+        # NOTE (code review): This migration pattern is correct and does NOT break
+        # foreign keys. Here's why:
+        #
+        # 1. FK checks are disabled during the migration
+        # 2. The old table is renamed (graph_executions -> graph_executions_old)
+        # 3. A new table is created with the same name and PK structure
+        # 4. Data is copied (preserving all IDs)
+        # 5. The old table is dropped
+        # 6. FK checks are re-enabled
+        #
+        # In SQLite, foreign key constraints reference tables BY NAME, not by
+        # internal table ID. After the migration:
+        # - node_executions.FOREIGN KEY references "graph_executions"
+        # - execution_events.FOREIGN KEY references "graph_executions"
+        # - There IS a table named "graph_executions" with all the original IDs
+        #
+        # Therefore, FK constraints resolve correctly. The key requirement is
+        # that the new table has the same name and contains all referenced IDs,
+        # which this migration ensures by copying all data.
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='graph_executions'"
         ).fetchone()

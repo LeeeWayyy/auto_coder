@@ -29,6 +29,29 @@ export function StateInspector({
   ]);
   const selectedMeta = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
   const selectedOutput = selectedNodeId ? nodeOutputs.get(selectedNodeId) : null;
+  const selectedOutputData = selectedOutput?.output as
+    | {
+        files_created?: unknown;
+        files_modified?: unknown;
+        files_changed?: unknown;
+      }
+    | undefined
+    | null;
+  const claimedFiles = useMemo(() => {
+    if (!selectedOutputData) {
+      return [] as string[];
+    }
+    const created = Array.isArray(selectedOutputData.files_created)
+      ? selectedOutputData.files_created
+      : [];
+    const modified = Array.isArray(selectedOutputData.files_modified)
+      ? selectedOutputData.files_modified
+      : [];
+    return [...created, ...modified].filter((item): item is string => typeof item === 'string');
+  }, [selectedOutputData]);
+  const hasFilesChanged =
+    Array.isArray(selectedOutputData?.files_changed) &&
+    selectedOutputData?.files_changed.length > 0;
 
   return (
     <div className="border-t bg-white">
@@ -55,8 +78,16 @@ export function StateInspector({
                 </button>
               </div>
               <div className="rounded border border-blue-100 bg-blue-50 p-2 overflow-auto max-h-32">
+                {/* FIX (code review): Display stdout/stderr directly as text instead of
+                    JSON.stringify to preserve newlines and improve log readability */}
                 <pre className="whitespace-pre-wrap text-gray-800">
-                  {JSON.stringify(streamedOutput, null, 2)}
+                  {(() => {
+                    // FIX (code review): Extract to IIFE for readability
+                    const output = streamedOutput as Record<string, unknown> | null;
+                    if (typeof output?.stdout === 'string') return output.stdout;
+                    if (typeof output?.stderr === 'string') return output.stderr;
+                    return JSON.stringify(streamedOutput, null, 2);
+                  })()}
                 </pre>
               </div>
             </div>
@@ -76,6 +107,12 @@ export function StateInspector({
             <div className="text-xs text-gray-400">Select a node to view output.</div>
           ) : (
             <div className="rounded border border-gray-200 bg-gray-50 p-2 overflow-auto max-h-44">
+              {claimedFiles.length > 0 && !hasFilesChanged && (
+                <div className="mb-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">
+                  This output claims file changes, but no files were applied. The run may have
+                  failed verification.
+                </div>
+              )}
               {selectedOutput?.error && (
                 <div className="mb-2 text-red-600 whitespace-pre-wrap">
                   {selectedOutput.error}
