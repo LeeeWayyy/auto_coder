@@ -7,6 +7,7 @@ import type {
   WorkflowGraph,
   ExecutionResponse,
   NodeExecutionStatus,
+  ExecutionEvent,
 } from '../types/workflow';
 
 const API_BASE = '/api';
@@ -117,6 +118,31 @@ export async function cancelExecution(
   );
 }
 
+export interface HumanResponseParams {
+  executionId: string;
+  nodeId: string;
+  action: 'approve' | 'reject' | 'edit';
+  feedback?: string;
+  editedData?: Record<string, unknown>;
+}
+
+export async function respondToHumanNode(
+  params: HumanResponseParams
+): Promise<{ status: string }> {
+  return fetchApi<{ status: string }>(
+    `/executions/${encodeURIComponent(params.executionId)}/respond`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        node_id: params.nodeId,
+        action: params.action,
+        feedback: params.feedback,
+        edited_data: params.editedData,
+      }),
+    }
+  );
+}
+
 export interface ListExecutionsParams {
   workflow_id?: string;
   source_graph_id?: string;
@@ -158,6 +184,40 @@ export async function getExecutionNodes(
     ? `/executions/${encodeURIComponent(executionId)}/nodes?since_version=${sinceVersion}`
     : `/executions/${encodeURIComponent(executionId)}/nodes`;
   return fetchApi<NodeExecutionStatus[]>(url);
+}
+
+export async function getExecutionHistory(
+  executionId: string,
+  sinceId?: number,
+  limit?: number
+): Promise<ExecutionEvent[]> {
+  const searchParams = new URLSearchParams();
+  if (sinceId !== undefined) {
+    searchParams.set('since_id', String(sinceId));
+  }
+  if (limit !== undefined) {
+    searchParams.set('limit', String(limit));
+  }
+  const query = searchParams.toString();
+  const url = query
+    ? `/executions/${encodeURIComponent(executionId)}/history?${query}`
+    : `/executions/${encodeURIComponent(executionId)}/history`;
+  return fetchApi<ExecutionEvent[]>(url);
+}
+
+export function createExecutionEventStream(
+  executionId: string,
+  sinceId?: number
+): EventSource {
+  const searchParams = new URLSearchParams();
+  if (sinceId !== undefined) {
+    searchParams.set('since_id', String(sinceId));
+  }
+  const query = searchParams.toString();
+  const url = query
+    ? `${API_BASE}/executions/${encodeURIComponent(executionId)}/stream?${query}`
+    : `${API_BASE}/executions/${encodeURIComponent(executionId)}/stream`;
+  return new EventSource(url);
 }
 
 // ========== WebSocket Connection ==========

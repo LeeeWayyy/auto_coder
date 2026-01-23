@@ -13,6 +13,7 @@ import {
   getExecutionNodes,
   executeWorkflow,
   cancelExecution,
+  getExecutionHistory,
   type ListExecutionsParams,
   type ExecuteWorkflowParams,
 } from '../api/client';
@@ -51,7 +52,9 @@ export function useExecution(executionId: string | undefined) {
     // Refetch while running
     refetchInterval: (query) => {
       const data = query.state.data as ExecutionResponse | undefined;
-      return data?.status === 'running' ? 2000 : false;
+      return data?.status === 'running' || data?.status === 'interrupted'
+        ? 2000
+        : false;
     },
   });
 }
@@ -65,6 +68,18 @@ export function useExecutionNodes(executionId: string | undefined) {
     queryFn: () => getExecutionNodes(executionId!),
     enabled: !!executionId,
     staleTime: 5000,
+  });
+}
+
+/**
+ * Fetch execution event history for time-travel debugging.
+ */
+export function useExecutionHistory(executionId: string | undefined, limit = 1000) {
+  return useQuery({
+    queryKey: [...executionKeys.detail(executionId ?? ''), 'history', limit],
+    queryFn: () => getExecutionHistory(executionId!, undefined, limit),
+    enabled: !!executionId,
+    staleTime: 10000,
   });
 }
 

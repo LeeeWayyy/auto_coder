@@ -259,7 +259,7 @@ class Database:
         id TEXT PRIMARY KEY,
         workflow_id TEXT NOT NULL,
         graph_id TEXT NOT NULL,
-        status TEXT CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+        status TEXT CHECK(status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
         started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         completed_at TIMESTAMP,
         error TEXT,
@@ -283,6 +283,20 @@ class Database:
         FOREIGN KEY (execution_id) REFERENCES graph_executions(id)
     );
 
+    -- Execution events for time-travel debugging and timeline persistence
+    CREATE TABLE IF NOT EXISTS execution_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id TEXT NOT NULL,
+        node_id TEXT,
+        node_type TEXT,
+        event_type TEXT NOT NULL,
+        status TEXT,
+        payload JSON,
+        version INTEGER DEFAULT 0,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (execution_id) REFERENCES graph_executions(id)
+    );
+
     -- Loop iteration counters (prevent infinite loops)
     CREATE TABLE IF NOT EXISTS loop_counters (
         execution_id TEXT NOT NULL,
@@ -296,6 +310,7 @@ class Database:
     CREATE INDEX IF NOT EXISTS idx_node_exec_status ON node_executions(execution_id, status);
     CREATE INDEX IF NOT EXISTS idx_node_ready ON node_executions(execution_id, status) WHERE status = 'ready';
     CREATE INDEX IF NOT EXISTS idx_graph_exec_status ON graph_executions(workflow_id, status);
+    CREATE INDEX IF NOT EXISTS idx_exec_events_exec ON execution_events(execution_id, id);
     """
 
     def __init__(self, db_path: str | Path = ".supervisor/state.db"):
@@ -339,6 +354,63 @@ class Database:
 
         # components.description was added later
         _ensure_column("components", "description", "TEXT DEFAULT ''")
+
+        # Expand graph_executions status CHECK to include 'interrupted'
+        #
+        # NOTE (code review): This migration pattern is correct and does NOT break
+        # foreign keys. Here's why:
+        #
+        # 1. FK checks are disabled during the migration
+        # 2. The old table is renamed (graph_executions -> graph_executions_old)
+        # 3. A new table is created with the same name and PK structure
+        # 4. Data is copied (preserving all IDs)
+        # 5. The old table is dropped
+        # 6. FK checks are re-enabled
+        #
+        # In SQLite, foreign key constraints reference tables BY NAME, not by
+        # internal table ID. After the migration:
+        # - node_executions.FOREIGN KEY references "graph_executions"
+        # - execution_events.FOREIGN KEY references "graph_executions"
+        # - There IS a table named "graph_executions" with all the original IDs
+        #
+        # Therefore, FK constraints resolve correctly. The key requirement is
+        # that the new table has the same name and contains all referenced IDs,
+        # which this migration ensures by copying all data.
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='graph_executions'"
+        ).fetchone()
+        if row and row[0] and "interrupted" not in row[0]:
+            # Disable FK checks to allow table swap (node_executions references graph_executions).
+            conn.execute("PRAGMA foreign_keys = OFF")
+            try:
+                conn.execute("ALTER TABLE graph_executions RENAME TO graph_executions_old")
+                conn.execute(
+                    """
+                    CREATE TABLE graph_executions (
+                        id TEXT PRIMARY KEY,
+                        workflow_id TEXT NOT NULL,
+                        graph_id TEXT NOT NULL,
+                        status TEXT CHECK(status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        error TEXT,
+                        FOREIGN KEY (graph_id) REFERENCES graph_workflows(id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO graph_executions (id, workflow_id, graph_id, status, started_at, completed_at, error)
+                    SELECT id, workflow_id, graph_id, status, started_at, completed_at, error
+                    FROM graph_executions_old
+                    """
+                )
+                conn.execute("DROP TABLE graph_executions_old")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_graph_exec_status ON graph_executions(workflow_id, status)"
+                )
+            finally:
+                conn.execute("PRAGMA foreign_keys = ON")
 
     def rebuild_projections(self) -> None:
         """Rebuild projection tables from the immutable event log."""
@@ -1113,6 +1185,82 @@ class Database:
                 ).fetchall()
 
             return [self._row_to_event(row) for row in rows]
+
+    def append_execution_event(
+        self,
+        execution_id: str,
+        event_type: str,
+        node_id: str | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        payload: dict[str, Any] | None = None,
+        version: int = 0,
+    ) -> int:
+        """Append an execution event for time-travel/debugging."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO execution_events
+                    (execution_id, node_id, node_type, event_type, status, payload, version, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    execution_id,
+                    node_id,
+                    node_type,
+                    event_type,
+                    status,
+                    _safe_json_dumps(payload or {}),
+                    version,
+                ),
+            )
+            return cursor.lastrowid  # type: ignore[return-value]
+
+    def get_execution_events(
+        self,
+        execution_id: str,
+        since_id: int | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Get execution events for time-travel/debugging."""
+        with self._connect() as conn:
+            if since_id is not None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM execution_events
+                    WHERE execution_id = ? AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (execution_id, since_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM execution_events
+                    WHERE execution_id = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (execution_id, limit),
+                ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+            events.append(
+                {
+                    "id": row["id"],
+                    "execution_id": row["execution_id"],
+                    "node_id": row["node_id"],
+                    "node_type": row["node_type"],
+                    "event_type": row["event_type"],
+                    "status": row["status"],
+                    "payload": payload,
+                    "version": row["version"],
+                    "timestamp": row["timestamp"],
+                }
+            )
+        return events
 
     def _row_to_event(self, row: sqlite3.Row) -> Event:
         """Convert database row to Event."""

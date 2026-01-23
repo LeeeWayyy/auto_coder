@@ -73,6 +73,13 @@ export function ExecutionPage() {
         </Link>
         <span className="mx-2 text-gray-400">/</span>
         <span className="text-gray-900">Execution {id?.slice(0, 8)}</span>
+        <span className="mx-2 text-gray-400">/</span>
+        <Link
+          to={`/workflows/${execution.workflow_id}`}
+          className="text-blue-600 hover:text-blue-700"
+        >
+          Edit workflow
+        </Link>
       </div>
 
       {/* Monitor */}

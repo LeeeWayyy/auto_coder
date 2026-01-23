@@ -27,11 +27,11 @@ import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -39,6 +39,7 @@ from starlette.concurrency import run_in_threadpool
 from supervisor.core.engine import ExecutionEngine
 from supervisor.core.graph_engine import GraphOrchestrator
 from supervisor.core.graph_schema import WorkflowGraph
+from supervisor.core.interaction import ApprovalDecision, InteractionBridge
 from supervisor.core.state import Database
 from supervisor.core.worker import WorkflowWorker
 from supervisor.sandbox.executor import DockerNotAvailableError, EgressNotConfiguredError
@@ -53,6 +54,10 @@ app = FastAPI(
 
 # Expose host CLI mode to the frontend (for warning banner).
 HOST_CLI_MODE = os.environ.get("SUPERVISOR_USE_HOST_CLI") == "1"
+_interaction_bridge = InteractionBridge()
+_pending_human_requests: dict[tuple[str, str], str] = {}
+# FIX (code review): Track processed gate_ids to avoid duplicate broadcasts
+_processed_gate_ids: set[str] = set()
 
 
 # CORS for local development - restricted to known origins
@@ -201,7 +206,13 @@ def get_orchestrator() -> GraphOrchestrator:
         db = get_db()
         root = _find_project_root()
         _engine = ExecutionEngine(root)
-        _orchestrator = GraphOrchestrator(db, _engine, _engine.gate_executor, _engine.gate_loader)
+        _orchestrator = GraphOrchestrator(
+            db,
+            _engine,
+            _engine.gate_executor,
+            _engine.gate_loader,
+            interaction_bridge=_interaction_bridge,
+        )
     return _orchestrator
 
 
@@ -226,6 +237,32 @@ class ExecutionRequest(BaseModel):
     graph_id: str
     workflow_id: str | None = None
     input_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class HumanResponseRequest(BaseModel):
+    """Request to respond to a human-in-the-loop node.
+
+    NOTE (code review - known limitation): The 'feedback' and 'edited_data' fields
+    are accepted for API forward-compatibility but are NOT currently propagated to
+    the workflow execution. This is a deliberate design decision:
+
+    1. The current HITL implementation focuses on binary approve/reject flow
+    2. Full edit support requires extending InteractionBridge to carry payloads
+    3. The edited_data would need schema validation against node expectations
+    4. Persistence of edit history in execution_events needs design
+
+    The "edit" action currently behaves identically to "approve" (proceeds with
+    original data). This is documented in respond_to_human_node's docstring.
+    Future releases may implement full edit propagation when requirements are clear.
+    """
+
+    node_id: str
+    action: Literal["approve", "reject", "edit"]
+    feedback: str | None = Field(None, max_length=10000)  # 10KB max feedback
+    # FIX (code review): edited_data size validated in respond_to_human_node endpoint
+    # to prevent DoS via large payloads (Pydantic v2 field validators can't easily
+    # serialize/check dict size, so we validate in the handler)
+    edited_data: dict[str, Any] | None = None
 
 
 class ExecutionResponse(BaseModel):
@@ -453,6 +490,23 @@ async def execute_workflow(request: ExecutionRequest) -> ExecutionResponse:
         consistency between status and version (no race condition possible).
         """
         try:
+            node_type = None
+            for node in workflow.nodes:
+                if node.id == node_id:
+                    node_type = node.type
+                    break
+
+            await run_in_threadpool(
+                db.append_execution_event,
+                execution_id,
+                "node_update",
+                node_id,
+                node_type,
+                status,
+                {"output": output},
+                version,
+            )
+
             await manager.broadcast(
                 execution_id,
                 {
@@ -522,6 +576,16 @@ async def _run_execution_with_events(execution_id: str):
 
         # Only broadcast if not already cancelled
         if final_status and final_status != "cancelled":
+            await run_in_threadpool(
+                db.append_execution_event,
+                execution_id,
+                "execution_complete",
+                None,
+                None,
+                final_status,
+                {"completed_at": completed_at, "error": error},
+                0,
+            )
             payload: dict[str, Any] = {
                 "type": "execution_complete",
                 "status": final_status,
@@ -572,6 +636,12 @@ async def _run_execution_with_events(execution_id: str):
             )
     finally:
         orchestrator.unregister_status_callback(execution_id)
+        # FIX (code review): Clean up pending human requests for this execution
+        keys_to_remove = [k for k in _pending_human_requests if k[0] == execution_id]
+        for key in keys_to_remove:
+            gate_id = _pending_human_requests.pop(key, None)
+            if gate_id:
+                _processed_gate_ids.discard(gate_id)
 
 
 @app.post("/api/executions/{execution_id}/cancel")
@@ -632,12 +702,162 @@ async def cancel_execution(execution_id: str) -> dict[str, str]:
 
     final_nodes = await run_in_threadpool(get_final_nodes_and_cancel_running)
 
+    # FIX (code review): Clean up pending human requests for this execution
+    # to prevent memory leaks and stale entries.
+    keys_to_remove = [k for k in _pending_human_requests if k[0] == execution_id]
+    for key in keys_to_remove:
+        gate_id = _pending_human_requests.pop(key, None)
+        if gate_id:
+            _processed_gate_ids.discard(gate_id)
+
+    await run_in_threadpool(
+        db.append_execution_event,
+        execution_id,
+        "execution_complete",
+        None,
+        None,
+        "cancelled",
+        {"completed_at": datetime.now(UTC).isoformat()},
+        0,
+    )
+
     await manager.broadcast(
         execution_id,
         {"type": "execution_complete", "status": "cancelled", "final_nodes": final_nodes},
     )
 
     return {"status": "cancelled", "execution_id": execution_id}
+
+
+@app.post("/api/executions/{execution_id}/respond")
+async def respond_to_human_node(execution_id: str, request: HumanResponseRequest) -> dict[str, str]:
+    """Handle human response to interrupted execution.
+
+    FIX (code review): Validates that execution is in 'interrupted' state before
+    accepting the response. This prevents reviving cancelled/completed executions.
+    Uses conditional UPDATE to guard against race conditions.
+
+    Note: The 'feedback' and 'edited_data' fields are accepted for API compatibility
+    but are not yet propagated to the workflow. This is a known limitation - these
+    fields will be wired through InteractionBridge in a future release when we
+    implement the full HITL data editing flow.
+    """
+    # FIX (code review): Validate edited_data size to prevent DoS via large payloads
+    if request.edited_data is not None:
+        try:
+            serialized = json.dumps(request.edited_data)
+            if len(serialized) > 100000:  # 100KB max
+                raise HTTPException(
+                    status_code=400,
+                    detail="edited_data exceeds maximum allowed size (100KB)",
+                )
+        except (TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=400, detail=f"edited_data is not JSON-serializable: {e}"
+            )
+
+    db = get_db()
+
+    def get_status():
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM graph_executions WHERE id = ?", (execution_id,)
+            ).fetchone()
+        return row[0] if row else None
+
+    status = await run_in_threadpool(get_status)
+    if not status:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    # FIX (code review): Only accept responses when execution is interrupted.
+    # This prevents reviving cancelled/completed/failed executions.
+    if status != "interrupted":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot respond to execution in '{status}' state (must be 'interrupted')",
+        )
+
+    key = (execution_id, request.node_id)
+    # FIX (code review): Use atomic pop to prevent race condition where two
+    # concurrent requests could both get the same gate_id
+    gate_id = _pending_human_requests.pop(key, None)
+    if not gate_id:
+        raise HTTPException(status_code=404, detail="No pending approval for node")
+
+    if request.action == "approve":
+        decision = ApprovalDecision.APPROVE
+        next_status = "running"
+    elif request.action == "edit":
+        decision = ApprovalDecision.EDIT
+        next_status = "running"
+    else:
+        decision = ApprovalDecision.REJECT
+        next_status = "failed"
+
+    ok = _interaction_bridge.submit_decision(gate_id, decision)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Approval already resolved")
+
+    # Clean up processed gate_id tracking
+    _processed_gate_ids.discard(gate_id)
+
+    def update_status():
+        with db._connect() as conn:
+            # FIX (code review): Use conditional UPDATE to prevent race conditions.
+            # Only update if still interrupted (could have been cancelled concurrently).
+            # FIX (code review): Set error and completed_at when rejection fails the execution.
+            if next_status == "failed":
+                result = conn.execute(
+                    """UPDATE graph_executions
+                    SET status=?, error=?, completed_at=?
+                    WHERE id=? AND status='interrupted'""",
+                    ("failed", "Rejected by user", datetime.now(UTC), execution_id),
+                )
+            else:
+                result = conn.execute(
+                    "UPDATE graph_executions SET status=? WHERE id=? AND status='interrupted'",
+                    (next_status, execution_id),
+                )
+            return result.rowcount > 0
+
+    updated = await run_in_threadpool(update_status)
+    if not updated:
+        # Status changed between check and update. This can happen in two cases:
+        # 1. Concurrent cancellation -> should return error
+        # 2. Workflow thread already resumed after submit_decision and set status
+        #    to 'running' -> this is actually success, not an error
+        # FIX (code review): Treat 'running' as a successful outcome to avoid
+        # spurious 409 errors on fast approvals where the workflow resumes
+        # before we can update the status ourselves.
+        current_status = await run_in_threadpool(get_status)
+        if current_status != next_status:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Execution status changed to '{current_status}' during response",
+            )
+
+    await run_in_threadpool(
+        db.append_execution_event,
+        execution_id,
+        "human_resolved",
+        request.node_id,
+        None,
+        next_status,
+        {"action": request.action},
+        0,
+    )
+
+    await manager.broadcast(
+        execution_id,
+        {
+            "type": "human_resolved",
+            "node_id": request.node_id,
+            "action": request.action,
+            "status": next_status,
+        },
+    )
+
+    return {"status": next_status}
 
 
 @app.get("/api/executions")
@@ -783,6 +1003,111 @@ def get_execution_nodes(
     ]
 
 
+@app.get("/api/executions/{execution_id}/history")
+def get_execution_history(
+    execution_id: str, since_id: int | None = None, limit: int = 500
+) -> list[dict[str, Any]]:
+    """Get execution event history for time-travel debugging."""
+    db = get_db()
+    if limit < 1:
+        limit = 1
+    if limit > 5000:
+        limit = 5000
+    return db.get_execution_events(execution_id, since_id=since_id, limit=limit)
+
+
+@app.get("/api/executions/{execution_id}/stream")
+async def stream_execution_events(
+    execution_id: str, request: Request, since_id: int | None = None
+) -> StreamingResponse:
+    """Stream execution events via Server-Sent Events (SSE).
+
+    FIX (code review): Added SSE `id:` field for proper resume semantics.
+    Clients can pass since_id query param to resume from a specific event.
+    Also validates execution exists before streaming.
+    """
+    db = get_db()
+
+    # FIX (code review): Validate execution exists before starting stream
+    # to prevent resource leakage from polling nonexistent executions
+    def check_execution_exists():
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM graph_executions WHERE id = ?", (execution_id,)
+            ).fetchone()
+        return row is not None
+
+    exists = await run_in_threadpool(check_execution_exists)
+    if not exists:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    last_id = since_id or 0
+    # Track consecutive empty polls to detect stale connections
+    empty_poll_count = 0
+    MAX_EMPTY_POLLS = 120  # ~2 minutes at 1s interval
+
+    async def event_generator():
+        nonlocal last_id, empty_poll_count
+        while True:
+            if await request.is_disconnected():
+                break
+            events = await run_in_threadpool(db.get_execution_events, execution_id, last_id, 200)
+            if not events:
+                empty_poll_count += 1
+                # FIX (code review): Stop streaming after extended inactivity
+                # to prevent resource leakage from abandoned connections
+                if empty_poll_count >= MAX_EMPTY_POLLS:
+                    break
+            else:
+                empty_poll_count = 0
+
+            for event in events:
+                event_id = int(event.get("id", last_id))
+                last_id = max(last_id, event_id)
+                # FIX (code review): Emit SSE id: field for proper resume semantics
+                # Client can reconnect with since_id=last_event_id to resume
+                yield f"id: {event_id}\nevent: execution_event\ndata: {json.dumps(event)}\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.get("/api/files")
+def get_file(path: str) -> FileResponse:
+    """Serve a repository file by relative path.
+
+    SECURITY: This endpoint is protected by:
+    1. Localhost-only access enforced by validate_request_origin middleware
+    2. Path traversal protection via is_relative_to check
+    3. Blocklist for sensitive directories (.supervisor, .git)
+    4. Blocklist for sensitive files (.env, credentials, secrets)
+
+    This is intended for local development use only. The server binds to
+    127.0.0.1 by default and the middleware rejects non-localhost requests.
+    """
+    root = _find_project_root().resolve()
+    file_path = (root / path).resolve()
+
+    if not file_path.is_relative_to(root):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if ".supervisor" in file_path.parts or ".git" in file_path.parts:
+        raise HTTPException(status_code=403, detail="Access denied")
+    # FIX (code review): Block access to sensitive files that may contain secrets
+    sensitive_patterns = {".env", ".env.local", ".env.production", "credentials", "secrets"}
+    if file_path.name.lower() in sensitive_patterns or any(
+        p in file_path.name.lower() for p in ("credential", "secret", "apikey", "api_key")
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(file_path)
+
+
 # ========== WebSocket for Live Updates ==========
 
 
@@ -831,6 +1156,81 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+@app.on_event("startup")
+async def start_human_approval_poller() -> None:
+    """Poll for pending human approval requests and broadcast to WebSocket clients.
+
+    FIX (code review): Track processed gate_ids to avoid duplicate broadcasts.
+    The same request may be returned by get_pending_requests() multiple times
+    before it's resolved. Without tracking, we'd broadcast the same waiting
+    message repeatedly.
+    """
+
+    async def poll():
+        db = get_db()
+        while True:
+            await asyncio.sleep(0.5)
+            requests = _interaction_bridge.get_pending_requests()
+            for request in requests:
+                # FIX (code review): Skip already-processed requests to avoid
+                # duplicate broadcasts and redundant DB operations.
+                if request.gate_id in _processed_gate_ids:
+                    continue
+
+                node_id = request.component_id or ""
+                key = (request.feature_id, node_id)
+                _pending_human_requests[key] = request.gate_id
+                _processed_gate_ids.add(request.gate_id)
+
+                try:
+                    current_output = json.loads(request.review_summary)
+                except Exception:
+                    current_output = None
+
+                # FIX (code review): Capture request.feature_id to avoid B023 lint error
+                # (function definition does not bind loop variable)
+                feature_id = request.feature_id
+
+                def mark_interrupted(fid: str = feature_id) -> None:
+                    with db._connect() as conn:
+                        conn.execute(
+                            "UPDATE graph_executions SET status='interrupted' "
+                            "WHERE id=? AND status='running'",
+                            (fid,),
+                        )
+
+                await run_in_threadpool(mark_interrupted)
+
+                await run_in_threadpool(
+                    db.append_execution_event,
+                    request.feature_id,
+                    "human_waiting",
+                    node_id,
+                    None,
+                    "interrupted",
+                    {
+                        "title": request.title,
+                        "description": request.description,
+                        "current_output": current_output,
+                        "gate_id": request.gate_id,
+                    },
+                    0,
+                )
+
+                await manager.broadcast(
+                    request.feature_id,
+                    {
+                        "type": "human_waiting",
+                        "node_id": node_id,
+                        "title": request.title,
+                        "description": request.description or "",
+                        "current_output": current_output,
+                    },
+                )
+
+    asyncio.create_task(poll())
 
 
 @app.websocket("/ws/executions/{execution_id}")

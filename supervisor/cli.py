@@ -990,25 +990,70 @@ def studio(host: str, port: int, reload: bool) -> None:
         )
 
     # Pass port to server for dynamic CORS origin configuration
+    import atexit
     import os
+    import shutil
+    import subprocess
     from pathlib import Path
 
     os.environ["SUPERVISOR_STUDIO_PORT"] = str(port)
     frontend_dir = Path(__file__).parent / "studio" / "frontend"
     frontend_dist = frontend_dir / "dist"
-    if not frontend_dist.exists():
-        if os.environ.get("AUTO_CODER_SKIP_FRONTEND_BUILD") == "1":
-            console.print(
-                "[yellow]Studio UI not built.[/yellow] "
-                "Visit http://127.0.0.1:5173 after running "
-                "`cd supervisor/studio/frontend && npm install && npm run dev`, "
-                "or build with `npm run build` to serve from the backend."
-            )
-        else:
-            import shutil
-            import subprocess
+    dev_server = None
 
-            npm = shutil.which("npm")
+    def _cleanup_dev_server():
+        """Helper to properly terminate dev server process.
+
+        FIX (code review): Ensure dev server is cleaned up to avoid resource leaks.
+        terminate() sends SIGTERM; we wait() to ensure the process exits.
+        If graceful shutdown fails, we force kill with SIGKILL.
+
+        This is registered with atexit as defense-in-depth for cases where the
+        finally block might not run (e.g., os._exit). Note: atexit handlers won't
+        run on SIGKILL, but that's an OS-level limitation.
+        """
+        nonlocal dev_server
+        if dev_server:
+            dev_server.terminate()
+            try:
+                dev_server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dev_server.kill()
+                dev_server.wait()
+            dev_server = None
+
+    # FIX (code review): Register cleanup with atexit for additional safety
+    atexit.register(_cleanup_dev_server)
+
+    if not frontend_dist.exists():
+        npm = shutil.which("npm")
+        if reload or os.environ.get("AUTO_CODER_SKIP_FRONTEND_BUILD") == "1":
+            if npm:
+                try:
+                    if not (frontend_dir / "node_modules").exists():
+                        console.print("[cyan]Installing Studio UI deps (npm install)...[/cyan]")
+                        subprocess.run([npm, "install"], cwd=frontend_dir, check=True)
+                    console.print("[cyan]Starting Studio UI dev server (npm run dev)...[/cyan]")
+                    dev_server = subprocess.Popen(
+                        [npm, "run", "dev", "--", "--host", host, "--port", "5173"],
+                        cwd=frontend_dir,
+                    )
+                    console.print(
+                        "[cyan]Studio UI dev server started.[/cyan] "
+                        "Check the Vite output for the exact URL (may auto-increment port)."
+                    )
+                except subprocess.CalledProcessError as exc:
+                    _cleanup_dev_server()  # Clean up on failure
+                    console.print(f"[yellow]Studio UI dev server failed:[/yellow] {exc}")
+                except Exception:
+                    _cleanup_dev_server()  # FIX (code review): Clean up on any exception
+                    raise
+            else:
+                console.print(
+                    "[yellow]Studio UI not built.[/yellow] "
+                    "Run `cd supervisor/studio/frontend && npm install && npm run dev`."
+                )
+        else:
             if npm:
                 console.print("[cyan]Building Studio UI (npm run build)...[/cyan]")
                 try:
@@ -1024,13 +1069,16 @@ def studio(host: str, port: int, reload: bool) -> None:
                     "or build with `npm run build` to serve from the backend."
                 )
 
-    uvicorn.run(
-        "supervisor.studio.server:app",
-        host=host,
-        port=port,
-        reload=reload,
-        log_level="info",
-    )
+    try:
+        uvicorn.run(
+            "supervisor.studio.server:app",
+            host=host,
+            port=port,
+            reload=reload,
+            log_level="info",
+        )
+    finally:
+        _cleanup_dev_server()
 
 
 @main.command()

@@ -20,7 +20,7 @@ export type NodeStatus =
   | 'failed'
   | 'skipped';
 
-export type ExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type ExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 export interface TaskConfig {
   role: string;
@@ -144,6 +144,27 @@ export interface NodeExecutionStatus {
   version: number;
 }
 
+export interface TraceEvent {
+  id: string;
+  timestamp: string;
+  nodeId: string;
+  nodeLabel: string;
+  nodeType: NodeType;
+  status: NodeStatus;
+}
+
+export interface ExecutionEvent {
+  id: number;
+  execution_id: string;
+  event_type: string;
+  node_id?: string | null;
+  node_type?: NodeType | null;
+  status?: string | null;
+  payload?: Record<string, unknown> | null;
+  version?: number | null;
+  timestamp: string;
+}
+
 // WebSocket message types
 
 export interface WSNodeUpdate {
@@ -187,10 +208,27 @@ export interface WSError {
   detail: string;
 }
 
+export interface WSHumanWaiting {
+  type: 'human_waiting';
+  node_id: string;
+  title: string;
+  description?: string;
+  current_output?: Record<string, unknown>;
+}
+
+export interface WSHumanResolved {
+  type: 'human_resolved';
+  node_id: string;
+  action: 'approve' | 'reject' | 'edit';
+  status: ExecutionStatus;
+}
+
 export type WSMessage =
   | WSNodeUpdate
   | WSExecutionComplete
   | WSInitialState
   | WSHeartbeat
   | WSPong
-  | WSError;
+  | WSError
+  | WSHumanWaiting
+  | WSHumanResolved;

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import subprocess
 import threading
 import time
 import uuid
@@ -777,6 +778,23 @@ class ExecutionEngine:
                         "Changes not applied."
                     )
                 changed_files = self.workspace._apply_changes(ctx.worktree_path, ctx.original_head)
+                if not changed_files:
+                    try:
+                        status = subprocess.run(
+                            ["git", "status", "--porcelain=v1", "-uall", "--ignored"],
+                            cwd=ctx.worktree_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        status_output = status.stdout.strip()
+                        logger.warning(
+                            "No changes detected during apply. worktree=%s git_status=%s",
+                            ctx.worktree_path,
+                            status_output or "empty",
+                        )
+                    except Exception as log_err:
+                        logger.warning("Failed to inspect worktree after empty apply: %s", log_err)
         except CancellationError:
             raise
         except Exception as apply_err:
@@ -835,6 +853,8 @@ class ExecutionEngine:
         gates: list[str] | None = None,
         cli_override: str | None = None,
         cancellation_check: Callable[[], bool] | None = None,
+        on_output: Callable[[str, str], None] | None = None,
+        on_files_changed: Callable[[list[str]], None] | None = None,
     ) -> BaseModel:
         """Run a role with full context packing, isolation, and error handling.
 
@@ -915,8 +935,18 @@ class ExecutionEngine:
                     # Execute CLI in ISOLATED worktree
                     with self.workspace.isolated_execution(step_id) as ctx:
                         result = self._execute_cli(
-                            role, effective_prompt, ctx.worktree_path, cli_override
+                            role, effective_prompt, ctx.worktree_path, cli_override, on_output
                         )
+                        if os.environ.get("SUPERVISOR_LOG_CLI") == "1":
+                            log_dir = self.repo_path / ".supervisor" / "cli_logs"
+                            log_dir.mkdir(parents=True, exist_ok=True)
+                            try:
+                                (log_dir / f"{step_id}.stdout.log").write_text(result.stdout or "")
+                                (log_dir / f"{step_id}.stderr.log").write_text(result.stderr or "")
+                            except Exception as log_err:
+                                logger.warning(
+                                    "Failed to write CLI logs for step %s: %s", step_id, log_err
+                                )
 
                         if result.returncode != 0 and not result.timed_out:
                             raise EngineError(
@@ -974,7 +1004,7 @@ class ExecutionEngine:
                                 raise GateFailedError(gate_result.gate_name, gate_result.output)
 
                         # FIX (v27 - Gemini PR review): Use helper for apply and finalize
-                        self._apply_and_finalize_step(
+                        changed_files = self._apply_and_finalize_step(
                             workflow_id,
                             step_id,
                             role_name,
@@ -982,6 +1012,9 @@ class ExecutionEngine:
                             ctx,
                             cancellation_check,
                         )
+
+                        if on_files_changed:
+                            on_files_changed(changed_files)
 
                     self.circuit_breaker.reset(circuit_key)
                     success = True
@@ -1126,6 +1159,7 @@ class ExecutionEngine:
         prompt: str,
         workdir: Path,
         cli_override: str | None = None,
+        on_output: Callable[[str, str], None] | None = None,
     ) -> ExecutionResult:
         """Execute CLI for a role in sandbox.
 
@@ -1141,7 +1175,7 @@ class ExecutionEngine:
         """
         cli_name = cli_override or role.cli
         client = self._get_cli_client(cli_name)
-        return client.execute(prompt, workdir)
+        return client.execute(prompt, workdir, on_output=on_output)
 
     def _get_template_for_role(self, role: RoleConfig) -> str | None:
         """Map role to template, resolving overlays via base_role.
